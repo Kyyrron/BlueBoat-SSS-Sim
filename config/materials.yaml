@@ -1,0 +1,10 @@
+# Optional overrides of the built-in acoustic material table
+# (blueboat_sss_sim/worldgen/materials.py). Reference this file from the
+# `materials:` section of a world config, or copy entries inline.
+# sand:
+#   reflectivity: 0.55        # mean backscatter, 0..1
+#   texture_amp: 0.10         # relative fine-texture amplitude
+#   texture_cells: 220        # texture spatial frequency
+#   micro_roughness_m: 0.010  # RMS micro-relief added to heightmap [m]
+#   lambert_exp: 1.6          # backscatter cos^p exponent
+#   color: [0.76, 0.70, 0.50] # Gazebo visual only

@@ -1,0 +1,36 @@
+# Default procedural world: 80 x 60 m shallow coastal basin, mixed seabed,
+# realistic litter field. Every key is optional; shown values are defaults.
+world:
+  seed: 42
+  size: [80.0, 60.0]        # [m] x, y
+  origin: [-40.0, -30.0]    # world coords of the min corner
+  resolution: 0.10          # raster cell [m] (0.10 ~ 2.5x finer than a range bin)
+
+terrain:
+  base_depth: 4.0           # [m] mean water depth (shallow coastal regime)
+  slope: {direction_deg: 15.0, grade: 0.015}
+  dunes:
+    enabled: true
+    wavelength: 6.0         # [m]
+    amplitude: 0.12         # [m]
+    direction_deg: 30.0
+    irregularity: 0.5       # 0 = pure sine, 1 = strongly modulated
+  roughness: {amplitude: 0.05, octaves: 5, cells: 12}
+  materials:
+    layout: patches         # uniform | patches
+    patch_cells: 6
+    composition: {sand: 0.50, mud: 0.20, gravel: 0.15, rocks: 0.10, seagrass: 0.05}
+
+objects:
+  density_per_hectare: 60
+  margin_m: 3.0
+  min_separation_m: 1.0
+  size_scale: 1.0
+  burial_scale: 1.0
+  reflectivity_jitter: 0.15
+  # composition: {tire_car: 1.0, can: 1.5, ...}   # optional, see objects.py CATALOG
+  # overrides:
+  #   pipe_pvc: {length_range: [1.0, 4.0], burial_range: [0.0, 0.3]}
+
+# materials:               # optional acoustic-material overrides
+#   sand: {reflectivity: 0.6}

@@ -1,0 +1,82 @@
+# Simulated dual Cerulean Omniscan 450 SS (port + starboard).
+# `acquisition` mirrors the six run-dependent ROS parameters of the real
+# sss_node.py (identical names & semantics). `model` holds simulation-only
+# physics/noise knobs -- a real operator has no equivalent controls.
+acquisition:
+  range_start_mm: 0
+  range_length_mm: 15000    # 15 m, as in the captured field data
+  msec_per_ping: 0          # 0 = free run (device-native)
+  gain_index: 4
+  num_results: 600          # 1/600 of range (25 mm bins). The device
+                            # supports up to 1/1200: set 1200 for
+                            # high-res runs (12.5 mm bins); the renderer,
+                            # encoder and raw framing scale automatically.
+  pulse_len_percent: 0.002
+
+model:
+  # Mounting (vehicle frame) -- Omniscan 450 SS beam geometry
+  sensor_depth_m: 0.15
+  mount_x_m: 0.0
+  mount_y_abs_m: 0.20
+  beam_tilt_deg: 20.0
+  vertical_aperture_deg: 50.0   # spec: 50 deg beam height
+  horizontal_aperture_deg: 0.5  # spec: 0.5 deg along-track beam
+
+  # Timing -- spec-sheet cap vs field capture (documented tension):
+  # the Omniscan 450 spec lists max ping rate 20 Hz; the team's own field
+  # capture shows 22 ms (45 Hz) free-run per channel at 15 m. Default
+  # follows the spec (period = 50 ms at 15 m); set 0 to disable the cap
+  # and reproduce the captured device behaviour.
+  max_ping_rate_hz: 20.0
+
+  # Acoustics
+  lambert_exponent: 1.7
+  absorption_db_per_m: 0.10   # ~450 kHz seawater
+  spreading_exponent: 2.0
+  tvg_compensation: 0.90
+  # Near-nadir first-bottom-return realism (FBR / bottom tracking locks on
+  # this -- see docs/sonar_model.md section 3):
+  beam_sidelobe_floor: 0.004    # pattern floor (~-24 dB), real sidelobes
+  specular_strength: 30.0       # near-normal-incidence lobe amplitude,
+                                # sized so the FBR clears a +8 dB detector
+                                # threshold even over dark mud/seagrass
+  specular_width_deg: 8.0       # angular width of the specular lobe
+  specular_looks: 25            # coherent-return fluctuation: Gamma(L,1/L),
+                                # CV ~0.2 -- the nadir echo is Rician/high-K,
+                                # far steadier than diffuse speckle, which is
+                                # what lets bottom tracking lock ping-to-ping
+  pulse_smearing: true          # convolve pings with the c*tau/2 range
+                                # resolution (~3 bins) like the real
+                                # matched-filter output
+  # Along-track 0.5 deg beam: ground lines integrated across the azimuth
+  # footprint (odd number; 1 = legacy infinitesimal-beam behaviour)
+  alongtrack_beam_lines: 5
+  # Power encoding, calibrated against the real capture (pwr_results
+  # spanning 0-62k counts, max_pwr_db 63.9, min_pwr_db 7.0):
+  calibration_db_offset: 16.0
+  base_scale: 110000.0
+  gain_index_step_db: 3.0
+
+  # Shallow-water multipath (enclosed-basin regime): dim ghost seabed
+  # displaced +altitude in slant range (bottom-surface-bottom path).
+  # First-order model, OFF by default.
+  multipath_enabled: false
+  multipath_gain: 0.12
+
+  # Noise
+  speckle: true
+  speckle_looks: 1            # 1 = fully-developed (Rayleigh-amplitude)
+                              # speckle; >1 = smoother multi-look Gamma
+  noise_floor: 0.002
+  watercolumn_noise: 0.002    # keep well below the FBR peak
+  # Radiometric/link degradations are deferred to the downstream
+  # augmentation stage per the tuning request -- OFF in the base model
+  # (set >0 to re-enable here):
+  gain_drift_amp: 0.0
+  gain_drift_period_s: 45.0
+  dropped_ping_prob: 0.0
+
+  # Sampling: coarse upper bound only -- the renderer automatically
+  # refines the ground step to ~half the slant-bin size so every range
+  # bin is populated at any num_results.
+  sample_step_m: 0.05
