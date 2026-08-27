@@ -82,7 +82,7 @@ Little-endian throughout. For `num_results = 600`: total 1262 bytes,
 | 60 | 2n | `u16[n]` | pwr_results |
 | 60+2n | 2 | `u16` | checksum = Σ(all previous bytes) mod 2¹⁶ |
 
-`blueboat_sss.sonar.encoder.parse_frame()` decodes and validates frames
+`blueboat_sss_sim.sonar.encoder.parse_frame()` decodes and validates frames
 (raises on bad magic/id/checksum) — use it in tests and log tooling.
 
 ## 5. Ground-truth contacts (simulation extra)

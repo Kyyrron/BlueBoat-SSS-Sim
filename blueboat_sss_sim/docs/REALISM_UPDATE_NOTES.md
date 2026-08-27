@@ -86,11 +86,11 @@ the capture's `min_pwr_db` 7 dB.
 
 | File | Change |
 |---|---|
-| `blueboat_sss/sonar/config.py` | aperture 50°, `max_ping_rate_hz`, `alongtrack_beam_lines`, `speckle_looks`, `multipath_*`, `base_scale` 110 000, noise defaults; rate-capped `ping_period_s`/`pulse_duration_s` |
-| `blueboat_sss/sonar/renderer.py` | bin-coupled sampling step; K-line azimuth-beam integration; optional multipath ghost; contact indexing on the actual step |
-| `blueboat_sss/sonar/noise.py` | `speckle_looks` multi-look Gamma speckle |
-| `blueboat_sss/sonar/encoder.py` | `pulse_duration_sec` uses the capped period |
-| `blueboat_sss/ros/sss_sim_node.py` | ping timer uses the capped period |
+| `blueboat_sss_sim/sonar/config.py` | aperture 50°, `max_ping_rate_hz`, `alongtrack_beam_lines`, `speckle_looks`, `multipath_*`, `base_scale` 110 000, noise defaults; rate-capped `ping_period_s`/`pulse_duration_s` |
+| `blueboat_sss_sim/sonar/renderer.py` | bin-coupled sampling step; K-line azimuth-beam integration; optional multipath ghost; contact indexing on the actual step |
+| `blueboat_sss_sim/sonar/noise.py` | `speckle_looks` multi-look Gamma speckle |
+| `blueboat_sss_sim/sonar/encoder.py` | `pulse_duration_sec` uses the capped period |
+| `blueboat_sss_sim/ros/sss_sim_node.py` | ping timer uses the capped period |
 | `config/default_sonar.yaml` | all new keys, calibrated values, documented 20 Hz-vs-22 ms tension |
 | `test/smoke_test.py` | new sections 2c (rate cap, uncapped 22 ms, power scale vs capture, speckle PDF, no empty bins) and 2d (azimuth widening, 1200-bin end-to-end); 32/32 pass |
 | `docs/sonar_model.md`, `docs/configuration_guide.md` | updated model description, calibration, timing tension, multipath, high-res bins |

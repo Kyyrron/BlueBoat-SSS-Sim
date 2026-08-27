@@ -4,7 +4,7 @@
 Serves the same ``blueboat_interfaces/srv/RequestPath`` service on
 ``/path_request`` (time array in, ``nav_msgs/Path`` out), but the
 time-parameterised trajectory comes from a mission bundle's
-``trajectory.yaml`` (see :mod:`blueboat_sss.mission.generate`) instead of
+``trajectory.yaml`` (see :mod:`blueboat_sss_sim.mission.generate`) instead of
 hard-coded analytic shapes.
 
 Because the service contract is byte-identical, the unmodified
