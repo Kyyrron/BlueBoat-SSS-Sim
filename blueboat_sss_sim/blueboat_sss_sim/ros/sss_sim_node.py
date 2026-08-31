@@ -20,6 +20,20 @@ Run-dependent parameters (identical names/semantics to the real node)
 range_start_mm, range_length_mm, msec_per_ping, gain_index, num_results,
 pulse_len_percent -- re-read each time pinging is enabled.
 
+These ROS parameters are the node's acquisition interface, exactly as on the
+real node. The declared defaults are the simulator's calibration point (15 m,
+gain 4 -- the range and gain the power model is anchored to, NC #6) and differ
+from the real ``sss_node.py`` defaults (20 m, ``gain_index: -1`` = device
+auto), so anything that must be comparable between sim and hardware sets them
+explicitly. ``sss_sim_launch.py`` does exactly that, from the mission bundle's
+frozen ``sonar.yaml``; a bundle whose ``acquisition:`` block disagrees with the
+parameters actually in force is reported as a warning at every ping enable.
+
+``gain_index: -1`` is accepted with the real device's meaning (auto-gain) and
+resolves to the calibrated index 4, which is what the profile then reports --
+the device likewise resolves auto-gain internally and reports a concrete index,
+since the ``gain_index`` field is ``uint16`` and cannot carry ``-1``.
+
 Simulation-only parameters
 --------------------------
 scene_dir (required), sonar_config (YAML with the ``model:`` section),
@@ -31,6 +45,7 @@ consumers of the real interface never see it unless they subscribe.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Optional
 
@@ -45,7 +60,8 @@ from blueboat_interfaces.msg import OmniscanProfile
 
 from ..core.geometry import quat_to_rpy
 from ..core.types import Pose3D, Side
-from ..sonar.config import AcquisitionParams, SonarConfig, SonarModelConfig
+from ..sonar.config import (AUTO_GAIN_INDEX, AcquisitionParams, SonarConfig,
+                            SonarModelConfig)
 from ..sonar.encoder import PingEncoder
 from ..sonar.noise import GainDrift, apply_ping_noise, ping_dropped
 from ..sonar.renderer import GeometricRenderer, SonarRenderer
@@ -98,9 +114,14 @@ class SideScanSonarSimNode(Node):
             f"{self._scene.grid.resolution} m, {len(self._scene.objects)} objects")
 
         sonar_cfg_path = self.get_parameter("sonar_config").value
-        self._model_cfg: SonarModelConfig = (
-            SonarConfig.from_yaml(sonar_cfg_path).model
-            if sonar_cfg_path else SonarModelConfig())
+        self._sonar_cfg_path: str = sonar_cfg_path or ""
+        self._file_acq: Optional[AcquisitionParams] = None
+        if sonar_cfg_path:
+            file_cfg = SonarConfig.from_yaml(sonar_cfg_path)
+            self._model_cfg: SonarModelConfig = file_cfg.model
+            self._file_acq = file_cfg.acquisition
+        else:
+            self._model_cfg = SonarModelConfig()
 
         seed = int(self.get_parameter("seed").value)
         self._rng = np.random.default_rng(seed if seed else None)
@@ -156,6 +177,7 @@ class SideScanSonarSimNode(Node):
             pulse_len_percent=float(self.get_parameter("pulse_len_percent").value),
         )
         self._acq = acq
+        self._warn_if_acquisition_diverges(acq)
         self._renderer = GeometricRenderer(self._scene, acq, self._model_cfg)
         for ch in self._channels.values():
             ch.encoder = PingEncoder(ch.side, acq, self._model_cfg)
@@ -167,10 +189,35 @@ class SideScanSonarSimNode(Node):
         if self._timer is not None:
             self._timer.cancel()
         self._timer = self.create_timer(period, self._tick)
+        gain = (f"{acq.gain_index} (auto -> {acq.effective_gain_index})"
+                if acq.gain_index == AUTO_GAIN_INDEX else str(acq.gain_index))
         self.get_logger().info(
             f"pinging started (range {acq.range_start_mm}-"
             f"{acq.range_start_mm + acq.range_length_mm} mm, gain "
-            f"{acq.gain_index}, n={acq.num_results}, period {period*1000:.0f} ms)")
+            f"{gain}, n={acq.num_results}, period {period*1000:.0f} ms)")
+
+    def _warn_if_acquisition_diverges(self, acq: AcquisitionParams) -> None:
+        """Report a bundle that records different acquisition than is in force.
+
+        The bundle is an immutable record of what a run acquired at (NC #10),
+        so a mismatch means the ground truth and the pings describe different
+        surveys. Warn rather than raise: overriding acquisition per run is
+        legitimate device behaviour, and the operator is told which knobs moved.
+        """
+        if self._file_acq is None:
+            return
+        differing = [
+            f"{f.name}: bundle {getattr(self._file_acq, f.name)} "
+            f"!= in force {getattr(acq, f.name)}"
+            for f in dataclasses.fields(AcquisitionParams)
+            if getattr(self._file_acq, f.name) != getattr(acq, f.name)
+        ]
+        if differing:
+            self.get_logger().warning(
+                f"acquisition differs from the bundle's frozen sonar.yaml "
+                f"({self._sonar_cfg_path}): " + "; ".join(differing) +
+                ". The bundle records the survey it was generated for; "
+                "regenerate it if this override is the intended acquisition.")
 
     def _stop_pinging(self) -> None:
         if self._timer is not None:
@@ -209,6 +256,12 @@ class SideScanSonarSimNode(Node):
                     "shadow_bins": round(c.shadow_bins, 1),
                     "visible": c.visible,
                     "ping_number": enc.ping_number,
+                    # Additive: a multipath image of the object named by
+                    # object_id, and the reflector that produced it. Absent
+                    # keys mean "direct path" for a consumer reading an
+                    # older stream, so nothing downstream has to change.
+                    "ghost": c.ghost,
+                    "via": c.via,
                 } for c in rendered.contacts]
         if self._gt_pub is not None and gt_payload:
             m = String()

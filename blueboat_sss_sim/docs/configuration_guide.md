@@ -11,6 +11,15 @@ Three YAML layers, all with realistic defaults so an empty file works:
 Unknown keys in the sonar `model:` section raise immediately (typo
 protection); world/mission sections ignore unknown keys.
 
+Two world/mission pairs ship. `default_world.yaml` + `default_mission.yaml`
+are the 4.0 m basin; `shallow_water_world.yaml` + `shallow_water_mission.yaml`
+are the same basin at 2.5 m for detection work — see §1.1.
+
+A mission's `world_config:` / `sonar_profile:` may be absolute, or relative to
+the working directory, or relative to the mission YAML's own directory (tried
+in that order). The last is what lets `ros2 run … generate_mission` work
+against a config in the installed share directory.
+
 ## 1. World config
 
 ```yaml
@@ -25,7 +34,7 @@ world:
 
 | Key | Default | Effect |
 |---|---|---|
-| `base_depth` | 4.0 | mean depth (m); the shallow-regime dial |
+| `base_depth` | 4.0 | mean depth (m); the shallow-regime dial — see §1.1 |
 | `slope.direction_deg`, `slope.grade` | 15, 0.015 | planar tilt |
 | `dunes.{enabled, wavelength, amplitude, direction_deg, irregularity}` | on, 6, 0.12, 30, 0.5 | sand-wave field; irregularity 0 = pure sine |
 | `roughness.{amplitude, octaves, cells}` | 0.05, 5, 12 | fBm micro-relief |
@@ -44,6 +53,43 @@ world:
 | `reflectivity_jitter` | 0.15 | per-instance acoustic variation |
 | `overrides.<type>` | — | per-type priors (`length_range`, `burial_range`, …) |
 
+### walls (optional)
+
+Reflecting boundaries of an enclosed basin. Absent — the default — is open
+water, and nothing about the scene changes.
+
+| Key | Default | Effect |
+|---|---|---|
+| `name` | required | identifies the wall in ghost ground truth (`via: "wall:<name>"`) and in `world.sdf`; must be unique |
+| `x0, y0, x1, y1` | required | the wall's plan segment; it extends from the seabed up to `top_z` |
+| `top_z` | 0.0 | world z of the top (0 = waterline). A ray passing above it is not reflected |
+| `reflectivity` | 0.5 | energy fraction returned per bounce: concrete quay ≈ 0.65, fendered pontoon ≈ 0.3 |
+| `thickness` | 0.30 | Gazebo visual only |
+
+Walls are acoustic reflectors and Gazebo visuals. They are **not** stamped
+into the height raster and carry no collision, so they produce ghosts but no
+direct echo and no shadow of their own (`sonar_model.md` A9), and they do not
+change hull dynamics. Nothing is rendered until the sonar profile also sets
+`model.wall_multipath_enabled` — the world says which walls exist, the sonar
+profile says whether the path is modelled. Unknown keys raise.
+
+### 1.2 The enclosed-basin world
+
+`config/enclosed_basin_world.yaml` is `default_world.yaml` plus three walls
+and nothing else changed; `config/enclosed_basin_sonar.yaml` is
+`default_sonar.yaml` with `wall_multipath_enabled: true` and nothing else
+changed; `config/enclosed_basin_mission.yaml` binds the pair with the
+default's seed, pattern and object density. `walls` consumes no RNG draws, so
+at the same seed the basin bundle places the *same* objects at the *same*
+poses as the default and the two differ only by the boundary and the ghosts
+it produces.
+
+Use it for the enclosed-basin regime study. A full survey of the shipped
+bundle yields ~200 ghost observations off the three walls, each carrying its
+own ground-truth contact naming the object it images and the reflector that
+made it: hard negatives for a detector, and a false-positive stimulus the
+metrics count separately rather than crediting to the object.
+
 ### materials (optional, or `config/materials.yaml`)
 
 Per material: `reflectivity` (0–1 mean backscatter), `texture_amp`,
@@ -51,14 +97,49 @@ Per material: `reflectivity` (0–1 mean backscatter), `texture_amp`,
 Built-ins: seabed `sand/mud/gravel/rocks/seagrass`; object
 `rubber/pvc/plastic/glass/metal/concrete/brickclay/rope/generic`.
 
+### 1.1 The shallow-regime world
+
+`config/shallow_water_world.yaml` is `default_world.yaml` with
+`base_depth: 2.5` and nothing else changed; `config/shallow_water_mission.yaml`
+binds it with the default's seed, pattern, sonar profile and object density.
+Generated depth spans 1.7–3.4 m against the default's 3.2–4.9 m.
+
+Use it for detection work. Waterfall shadow length goes as
+`h_obj · R / altitude`, so the same object seen at the same slant range casts a
+markedly longer shadow from lower down — measured across 47 paired
+(object, side) observations of a full lawnmower survey, every one is longer,
+median **×1.50** (range ×1.04–×1.76), tracking the `h·R/altitude` prediction.
+Contrast, not pixel size, is what limits object detectability at 4 m.
+
+`base_depth` consumes no RNG draws, so at the same seed the two configs place
+the *same* objects at the *same* poses with the same sizes and burial. Bundles
+generated from them differ only in altitude and can be compared object by
+object — which is what the smoke test's `[4]` section does.
+
+Per root `CLAUDE.md` CM-11 this improves synthetic detectability; it does not
+make synthetic imagery eligible for the headline detection claim.
+
 ## 2. Sonar config
 
 `acquisition:` mirrors the six real ROS parameters — see
-`docs/topics.md §2`; changing them here changes the launch-time defaults,
-and they can still be overridden per run via ROS parameters, exactly like
-on the real system. `num_results` up to 1200 (the device's 1/1200-range
-cross-track resolution) is fully supported end-to-end (renderer, encoder,
-raw framing, recorder).
+`docs/topics.md §2`. `generate_mission` freezes this section into the
+bundle's `sonar.yaml`, and `sss_sim_launch.py` passes those six values to the
+node explicitly, so **the bundle is what a run acquires at** — editing this
+file changes future bundles, not an existing one (NC #10). Each is still
+overridable per run exactly as on the real system
+(`ros2 launch … gain_index:=-1 range_length_mm:=30000`); the node then warns
+that the acquisition in force differs from what the bundle records.
+`num_results` up to 1200 (the device's 1/1200-range cross-track resolution) is
+fully supported end-to-end (renderer, encoder, raw framing, recorder).
+
+The shipped defaults (15 m, gain 4) are the power-calibration anchor, not the
+real node's defaults (20 m, gain −1 = device auto) — see `docs/topics.md §2`
+for why they are deliberately not aligned. `config/coverage_pass_sonar.yaml`
+is this file with `range_length_mm: 30000` and nothing else changed: the 30 m
+coverage-pass setting `project_synthesis.md` §8.5 reserves, against the
+default's 15 m revisit setting. Bind it from a mission with
+`sonar_profile: config/coverage_pass_sonar.yaml`. At 600 bins the wider swath
+gives 50 mm bins against the default's 25 mm and a 42 ms free-run period.
 
 `model:` (no hardware equivalent):
 
@@ -66,9 +147,10 @@ raw framing, recorder).
 |---|---|---|
 | Mounting | `sensor_depth_m`, `mount_x_m`, `mount_y_abs_m`, `beam_tilt_deg` (20), `vertical_aperture_deg` (50, spec), `horizontal_aperture_deg` (0.5, spec) | match the physical bracket; tilt+aperture set the usable swath |
 | Timing | `max_ping_rate_hz` (20, spec-sheet cap → 50 ms at 15 m) | set 0 to disable and reproduce the field capture's 22 ms free-run |
-| Acoustics | `lambert_exponent` (1.7), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (2.0), `tvg_compensation` (0.90), `beam_sidelobe_floor` (0.004), `specular_strength` (30, sized to clear a +8 dB FBR threshold over dark bottoms), `specular_width_deg` (8.0), `specular_looks` (25, coherent-return CV ≈ 0.2), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | raise `tvg_compensation` → flatter image; sidelobe/specular shape the first-bottom-return line (don't zero them if downstream bottom tracking must lock); `alongtrack_beam_lines: 1` = legacy infinitesimal azimuth beam |
-| Multipath | `multipath_enabled` (false), `multipath_gain` (0.12) | optional shallow-water second-bottom-echo ghost |
-| Calibration | `calibration_db_offset` (16), `base_scale` (110000), `gain_index_step_db` (3) | calibrated against the field capture (counts 0–62k, max_pwr_db 63.9) |
+| Acoustics | `lambert_exponent` (1.0), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (4.0), `tvg_compensation` (0.0), `beam_sidelobe_floor` (0.004), `specular_strength` (30, sized to clear a +8 dB FBR threshold over dark bottoms), `specular_width_deg` (8.0), `specular_looks` (25, coherent-return CV ≈ 0.2), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | raise `tvg_compensation` → flatter image; the default 0.0 is measured (the profile stream is pre-TVG), which puts the full two-way loss — ~24 dB across the swath at 15 m / 4 m altitude — in the data, and tiles remove its smooth part for display. Sidelobe/specular shape the first-bottom-return line (don't zero them if downstream bottom tracking must lock); `alongtrack_beam_lines: 1` = legacy infinitesimal azimuth beam. Only the product `spreading_exponent · (1 − tvg_compensation)` is determined, and `tvg_compensation` and `lambert_exponent` are further confounded on a flat seabed at one altitude (0.28 dB p-p at the fitted law) — tune one at a time against a known reference, not both together |
+| Multipath | `multipath_enabled` (false), `multipath_gain` (0.12) | optional shallow-water second-bottom-echo ghost, displaced +altitude in slant range |
+| Wall multipath | `wall_multipath_enabled` (false), `wall_multipath_gain` (1.0), `surface_mirror_enabled` (false), `surface_reflectivity` (0.9), `ghost_beam_lines` (1) | mirror-source ghosts off the world's `walls:` — see `sonar_model.md` §10. Costs ×1.25 per ping-side with one wall in range and ×1.50 with three, ×1.00 when all are out of range; `ghost_beam_lines: 5` costs ×2.17 and buys nothing a bounce has not already smeared. `surface_mirror_enabled` adds the Lloyd-mirror image, which the vertical pattern already attenuates to the sidelobe floor |
+| Calibration | `calibration_db_offset` (97.2), `max_span_db` (90) | `pwr_results` is normalised per ping onto `[min_pwr_db, max_pwr_db]`, so the counts carry no level and `calibration_db_offset` is the only level constant — fit it against the reported `max_pwr_db`, never against a count histogram. Measured to ±6 dB (the device's auto-gain regulates the real level). `max_span_db` is the device's own 90 dB clamp on that axis. See `sonar_model.md` §6 for which constants are measured, jointly determined, or undetermined |
 | Noise | `speckle` (true), `speckle_looks` (1 = fully-developed Exp(1); >1 = smoother multi-look Gamma), `noise_floor` (0.002), `watercolumn_noise` (0.002), `gain_drift_amp` (0 — deferred to the augmentation stage), `dropped_ping_prob` (0 — same) | zero everything for "clean physics" ablation images; keep `watercolumn_noise` well below the FBR peak |
 | Sampling | `sample_step_m` (0.05, coarse upper bound only) | the renderer refines the step to ~half the slant bin automatically, so 600- and 1200-bin runs are both fully populated |
 
@@ -87,7 +169,7 @@ mission:
   randomize: false        # true → draw seed/density/pattern per bundle
   world_config: config/default_world.yaml
   sonar_profile: config/default_sonar.yaml
-  gazebo_plugin_prefix: ignition   # or gz
+  gazebo_plugin_prefix: gz         # or ignition (Fortress)
   start: [0.0, 0.0]                # robot spawn, prepended as a transit
                                    # waypoint (null to disable)
   start_heading_deg: 0.0           # spawn heading; the lawnmower entry

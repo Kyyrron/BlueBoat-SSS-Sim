@@ -1,29 +1,29 @@
-# Simulated dual Cerulean Omniscan 450 SS (port + starboard).
-# `acquisition` mirrors the six run-dependent ROS parameters of the real
-# sss_node.py (identical names & semantics). `model` holds simulation-only
-# physics/noise knobs -- a real operator has no equivalent controls.
-# Acquisition defaults are deliberately NOT the real sss_node.py defaults
-# (20000 mm, gain_index -1). They are the simulator's *calibration point*: the
-# range and fixed gain that `model.calibration_db_offset` and the acoustic
-# constants are anchored to (NC #6). Aligning the numbers would move the default off that
-# anchor without matching either survey setting the project actually uses --
-# project_synthesis.md 8.5 reserves 30 m for coverage passes and 15 m for
-# revisit passes, and both are passed explicitly per run.
+# Coverage-pass sonar profile -- project_synthesis.md 8.5 reserved setting.
 #
-# What guarantees sim/real comparability is therefore explicitness, not equal
-# defaults: `sss_sim_launch.py` passes all six values from the mission bundle's
-# frozen copy of this file, and `config/coverage_pass_sonar.yaml` is the 30 m
-# coverage-pass profile. See root CLAUDE.md CM-2.
+# `config/default_sonar.yaml` with `range_length_mm: 30000` (30 m per side) and
+# NOTHING else changed, mirroring how `shallow_water_world.yaml` differs from
+# `default_world.yaml` by one knob. 8.5 reserves 30 m for coverage passes and
+# 15 m for revisit passes; the default profile is the 15 m revisit setting and
+# is also the power-calibration anchor (NC #6), so the coverage setting lives
+# here rather than moving the default off its anchor.
+#
+# Bind it from a mission with `sonar_profile: config/coverage_pass_sonar.yaml`;
+# the bundle then freezes it and `sss_sim_launch.py` passes it to the node.
+#
+# Note the wider swath halves cross-track resolution at 600 bins (50 mm bins
+# against the default's 25 mm) and slows the free-run ping period to 42 ms;
+# 8.5 covers the trade (range setting does not change resolution at a given
+# ground range, but it does change ping rate and along-track sampling).
 acquisition:
   range_start_mm: 0
-  range_length_mm: 15000    # 15 m, as in the captured field data
+  range_length_mm: 30000    # 30 m coverage pass (project_synthesis 8.5)
   msec_per_ping: 0          # 0 = free run (device-native)
   gain_index: 4             # calibration anchor. -1 = device auto-gain, as on
                             # the real node; the simulator has no AGC, so it
                             # resolves to 4 and reports 4 (the profile's
                             # gain_index is uint16 and cannot carry -1).
                             # Ladder covers 0-7 (4-7 measured); else rejected.
-  num_results: 600          # 1/600 of range (25 mm bins). The device
+  num_results: 600          # 1/600 of range (50 mm bins at 30 m). The device
                             # supports up to 1/1200: set 1200 for
                             # high-res runs (12.5 mm bins); the renderer,
                             # encoder and raw framing scale automatically.
@@ -83,25 +83,6 @@ model:
   # First-order model, OFF by default.
   multipath_enabled: false
   multipath_gain: 0.12
-
-  # Wall / surface multipath: mirror-source ghosts off the basin boundaries
-  # the *world* config declares under `walls:` (the world says which walls
-  # exist and how reflective each is; these knobs say whether the path is
-  # modelled and how strongly). A ghost lands at its true folded path length
-  # and carries its own ground-truth contact. OFF by default -- see
-  # config/enclosed_basin_mission.yaml for the profile that turns it on.
-  wall_multipath_enabled: false
-  wall_multipath_gain: 1.0      # global scale on every ghost, on top of each
-                                # wall's own reflectivity
-  surface_mirror_enabled: false # also mirror across z=0. The air/water
-                                # interface reflects almost perfectly, but the
-                                # path leaves the transducer upward, so the
-                                # vertical pattern sees it at -depression and
-                                # only the sidelobe floor passes
-  surface_reflectivity: 0.9     # pressure-release interface
-  ghost_beam_lines: 1           # azimuth lines per ghost render (1 =
-                                # infinitesimal beam). The cost lever: ghosts
-                                # are dim and already smeared by the bounce
 
   # Noise
   speckle: true

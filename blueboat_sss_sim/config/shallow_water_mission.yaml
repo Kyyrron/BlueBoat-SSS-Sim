@@ -1,8 +1,11 @@
-# One mission = one self-contained run bundle (world + trajectory + sonar).
+# Shallow-regime run bundle: `default_mission.yaml` bound to the 2.5 m world
+# instead of the 4.0 m default. Same seed, same pattern, same sonar profile and
+# same object density, so a bundle from this config and one from
+# `default_mission.yaml` differ only in altitude and are directly comparable.
 mission:
   seed: 7
   randomize: false            # true => draw seed / density / pattern randomly
-  world_config: config/default_world.yaml
+  world_config: config/shallow_water_world.yaml
   sonar_profile: config/default_sonar.yaml
   gazebo_plugin_prefix: gz   # gz (Garden/Harmonic) | ignition (Fortress)
 
@@ -13,11 +16,12 @@ mission:
   lawnmower:
     bbox: [-30.0, -20.0, 30.0, 20.0]
     spacing: 8.0              # < 2 x usable swath for overlap
+                              # (usable ground swath at 15 m slant is 14.8 m
+                              #  here vs 14.5 m at 4 m depth -- unchanged)
     speed: 1.0                # [m/s]
     heading_deg: 0.0
   spiral:  {center: [0.0, 0.0], r_max: 25.0, spacing: 8.0, speed: 1.0}
   random:  {bbox: [-30.0, -20.0, 30.0, 20.0], n_legs: 14, speed: 1.0}
-  # waypoints: {points: [[-20, -10], [20, -10], [20, 10]], speed: 1.0}
 
 # Inline world overrides applied on top of world_config (section-wise merge):
 world_overrides:

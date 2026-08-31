@@ -17,7 +17,7 @@ from .sdf_writer import write_world_sdf
 
 def generate_world(config_path: str | Path, out_dir: str | Path,
                    seed: int | None = None,
-                   plugin_prefix: str = "ignition") -> SceneModel:
+                   plugin_prefix: str = "gz") -> SceneModel:
     """Programmatic API used by the mission generator and the CLI."""
     with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
@@ -37,7 +37,7 @@ def main() -> None:
     ap.add_argument("--config", required=True, help="world YAML config")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--seed", type=int, default=None, help="override config seed")
-    ap.add_argument("--plugin-prefix", choices=["ignition", "gz"], default="ignition")
+    ap.add_argument("--plugin-prefix", choices=["gz", "ignition"], default="gz")
     args = ap.parse_args()
 
     scene = generate_world(args.config, args.out, args.seed, args.plugin_prefix)

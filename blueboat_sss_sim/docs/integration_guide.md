@@ -38,19 +38,26 @@ The YOLO dataset accumulates in `~/runs/r1/dataset/` and is finalized
 
 ## 3. Composition with the existing launch files
 
-`full_mission_launch.py` includes `blueboat_description/world_launch.py`
-with a `world:=<bundle>/world.sdf` argument. If your `world_launch.py`
-does not yet expose a `world` argument, either:
+`full_mission_launch.py` starts Gazebo on the **bundle's** `world.sdf`
+itself, because `blueboat_description/world_launch.py` hard-codes the
+stock world and declares no `world` argument. It reproduces that launch
+file's three responsibilities against the bundle:
 
-* add one line declaring the argument and pass it to the Gazebo process
-  (the generated `world.sdf` embeds the same plugin block as the stock
-  world, so everything else is unchanged), or
-* set `use_existing_world_launch:=false`, which starts
-  `ign gazebo -r <bundle>/world.sdf` directly and you launch the robot
-  spawn separately as you do today.
+* `sl.gz_launch(<bundle>/world.sdf, "-r")` — which also registers the
+  world name (`generated_ocean`) that the model bridges resolve against;
+* the `/clock` and `/ocean_current` bridges;
+* `blueboat_description/upload_rov_launch.py`, which spawns the robot and
+  bridges `/blueboat/odom`, `pose_gt`, `joint_states` and
+  `cmd_thruster{1,2}`.
 
-The generated world uses `ignition-gazebo-*` plugin names (Fortress). For
-Garden/Harmonic set `gazebo_plugin_prefix: gz` in the mission YAML.
+No file in `blueboat_description` is modified. Pass
+`use_stock_world:=true` to load the stock description world instead — the
+boat spawns and drives, but the seabed and objects the sonar renders
+against are not in the Gazebo scene.
+
+The generated world uses `gz-sim-*` plugin names (Garden/Harmonic), which
+is the `gazebo_plugin_prefix: gz` default. Set `ignition` in the mission
+YAML for a Fortress machine.
 
 ## 4. Mission path service vs. the existing one
 
@@ -109,7 +116,39 @@ records the resolved configuration. Point all recorders at one shared
 `dataset_dir` to accumulate a single training set (tile names are prefixed
 by `run_name`, so set it per run).
 
-## 8. Verifying an install
+## 8. Measuring a mission
+
+Detection metrics come out of the renderer's own ground truth, with no ROS
+and no field session:
+
+```bash
+# The bundle's intended path -- reproducible from the seed alone
+ros2 run blueboat_sss_sim mission_metrics --bundle ~/runs/r3 --out ~/metrics/r3
+
+# The path a real run actually tracked, from its recorded .svlog
+ros2 run blueboat_sss_sim mission_metrics --bundle ~/runs/r3 \
+    --source svlog --input ~/sessions/2026-08-30/run.svlog --out ~/metrics/r3_real
+
+# What the node actually published (a dump of ground_truth/contacts;
+# that topic carries no pose, so aspect is reported as unavailable)
+ros2 run blueboat_sss_sim mission_metrics --bundle ~/runs/r3 \
+    --source jsonl --input contacts.jsonl --out ~/metrics/r3_pub
+```
+
+Writes `metrics.json` + `metrics.md` into `--out`; the bundle and the
+recording are only ever read. Every object in `scene_manifest.yaml` is
+accounted for as detected, ensonified-but-below-criterion, or never
+ensonified, and the criterion in force (`geometric` / `resolved` /
+`shadowed`) is named in both files. The `content_digest` covers everything
+except provenance, so the same bundle regenerated from its seed into a
+different directory compares equal.
+
+The `.svlog` path needs the position track the recording carries as mavlink
+`LOCAL_POSITION_NED` (id 150). In simulation that comes from
+`mavros_shim_node`, so launch with `with_mavros_shim:=true` if the run is
+going to be measured this way.
+
+## 9. Verifying an install
 
 `python3 -m test.smoke_test` from the package source root runs the whole
 ROS-free pipeline (world → render → encode → decode → label → export) and

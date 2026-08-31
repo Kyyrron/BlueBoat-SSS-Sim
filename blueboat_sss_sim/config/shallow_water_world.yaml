@@ -1,0 +1,43 @@
+# Shallow-regime world: same 80 x 60 m basin, seabed and litter field as
+# `default_world.yaml`, at 2.5 m instead of 4.0 m mean depth. Ships alongside
+# the default rather than replacing it.
+#
+# Why a second config: waterfall shadow length goes as h_obj * R / altitude, so
+# a lower altitude lengthens every object shadow at the same slant range. That
+# is the dominant lever on synthetic object contrast, and detector evaluation
+# happens in the waterfall domain. It also matches the thesis regime (1-3 m
+# enclosed shallow water) more closely than the 4 m default.
+#
+# Everything except `terrain.base_depth` is identical to `default_world.yaml`,
+# on purpose: with the same seed the RNG reaches object placement in the same
+# state (base_depth is a constant offset and consumes no draws), so bundles
+# generated from the two configs carry the *same* objects at the *same* poses
+# and differ only in altitude. That is what makes them directly comparable.
+world:
+  seed: 42
+  size: [80.0, 60.0]        # [m] x, y
+  origin: [-40.0, -30.0]    # world coords of the min corner
+  resolution: 0.10          # raster cell [m] (0.10 ~ 2.5x finer than a range bin)
+
+terrain:
+  base_depth: 2.5           # [m] mean water depth (thesis shallow regime, 1-3 m)
+  slope: {direction_deg: 15.0, grade: 0.015}
+  dunes:
+    enabled: true
+    wavelength: 6.0         # [m]
+    amplitude: 0.12         # [m]
+    direction_deg: 30.0
+    irregularity: 0.5       # 0 = pure sine, 1 = strongly modulated
+  roughness: {amplitude: 0.05, octaves: 5, cells: 12}
+  materials:
+    layout: patches         # uniform | patches
+    patch_cells: 6
+    composition: {sand: 0.50, mud: 0.20, gravel: 0.15, rocks: 0.10, seagrass: 0.05}
+
+objects:
+  density_per_hectare: 60
+  margin_m: 3.0
+  min_separation_m: 1.0
+  size_scale: 1.0
+  burial_scale: 1.0
+  reflectivity_jitter: 0.15

@@ -27,10 +27,16 @@ simulator lineage):
    sigma(R) = R*theta/2.355 -- point targets blur along-track
    proportionally to range, as with the real beam.
 
+5. **Wall / surface multipath** (optional, off by default): each
+   reflecting boundary declared by the world config contributes a mirror
+   source, rendered by the same passes and summed into the same range
+   bins, so a basin's ghost returns land at their true folded path length
+   with per-ghost ground truth attached. See sonar/multipath.py.
+
 Known simplifications (see docs/sonar_model.md for the full list):
-straight rays, single-bounce direct path (an optional first-order
-second-bottom-echo multipath ghost can be enabled), static scene,
-stop-and-hop pings (no intra-ping motion).
+straight rays, static scene, stop-and-hop pings (no intra-ping motion),
+and reflections only to first order -- the direct path plus one bounce
+per mirror source.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from ..worldgen.scene import SceneModel
 from . import acoustics
 from .config import (SPEED_OF_SOUND_MPS, AcquisitionParams,
                      SonarModelConfig)
+from .multipath import crossing_mask, mirror_sources, point_crosses
 
 
 class SonarRenderer(abc.ABC):
@@ -68,6 +75,9 @@ class _PingGeometry:
     cos_incidence: np.ndarray
     reflectivity: np.ndarray
     altitude: float
+    px: np.ndarray               # world x of each ground sample
+    py: np.ndarray               # world y of each ground sample
+    seabed_z: np.ndarray         # seabed z at each ground sample
 
 
 class GeometricRenderer(SonarRenderer):
@@ -100,32 +110,49 @@ class GeometricRenderer(SonarRenderer):
         self._line_offsets = (np.linspace(-half_fp, half_fp, self._n_lines)
                               if self._n_lines > 1 else np.array([0.0]))
 
+        # Ghost renders get their own (by default coarser) azimuth sampling:
+        # a multipath ghost is dim and already smeared by the bounce, so
+        # paying the direct path's line count once per mirror source buys
+        # nothing. This is the cost lever when a basin has several walls.
+        gk = max(int(model.ghost_beam_lines), 1)
+        self._n_ghost_lines = gk if gk % 2 == 1 else gk + 1
+        self._ghost_offsets = (
+            np.linspace(-half_fp, half_fp, self._n_ghost_lines)
+            if self._n_ghost_lines > 1 else np.array([0.0]))
+
     # ------------------------------------------------------------------ API
     def render(self, side: Side, vehicle_pose: Pose3D, t_sim: float) -> RenderedPing:
         sensor = self._sensor_pose(side, vehicle_pose)
-
-        # Integrate the azimuth beam: one ground line per along-track
-        # offset, each sample weighted by the range-dependent azimuth
-        # pattern. The centre line (offset 0) provides altitude and
-        # ground-truth geometry.
         acq = self._acq
-        num_d = np.zeros(acq.num_results, dtype=np.float64)   # diffuse
-        num_s = np.zeros(acq.num_results, dtype=np.float64)   # coherent specular
-        den = np.zeros(acq.num_results, dtype=np.float64)
-        center_geom: _PingGeometry | None = None
-        for u in self._line_offsets:
-            geom = self._ping_geometry(side, sensor, along_offset=float(u))
-            if u == 0.0:
-                center_geom = geom
-            self._shade_into(geom, side, sensor, float(u), num_d, num_s, den)
-        assert center_geom is not None
+
+        # Direct path. Look/forward directions are passed explicitly rather
+        # than re-derived downstream, because a mirror source's are reflected
+        # and cannot be recovered from a yaw plus a side sign.
+        look = sensor.yaw + side.sign * np.pi / 2.0
+        roll_toward = -side.sign * sensor.roll
+        num_d, num_s, den, center_geom = self._integrate(
+            sensor, look, sensor.yaw, roll_toward, 1.0,
+            self._line_offsets, self._n_lines, None)
+
         safe = np.maximum(den, 1e-12)
         power = np.where(den > 1e-12, num_d / safe, 0.0)
         specular = np.where(den > 1e-12, num_s / safe, 0.0)
 
         power = self._pulse_smear(power)
         specular = self._pulse_smear(specular)
+        # The second-bottom-echo ghost images the *direct* response only, so
+        # it is applied before wall ghosts are summed in -- the two multipath
+        # features stay independent instead of ghosting each other.
         power = self._apply_multipath(power, center_geom.altitude)
+
+        contacts = self._ground_truth_contacts(
+            side, sensor, look, sensor.yaw, center_geom,
+            center_geom.altitude)
+        ghost_power, ghost_contacts = self._render_ghosts(
+            side, sensor, center_geom.altitude)
+        if ghost_power is not None:
+            power = power + ghost_power
+        contacts += ghost_contacts
 
         ping = Ping(
             side=side,
@@ -137,8 +164,33 @@ class GeometricRenderer(SonarRenderer):
             start_mm=acq.range_start_mm,
             length_mm=acq.range_length_mm,
         )
-        contacts = self._ground_truth_contacts(side, sensor, center_geom)
         return RenderedPing(ping=ping, contacts=contacts)
+
+    # --------------------------------------------------- azimuth integration
+    def _integrate(self, origin: Pose3D, look: float, fwd: float,
+                   roll_toward: float, depression_sign: float,
+                   line_offsets: np.ndarray, n_lines: int,
+                   wall) -> tuple[np.ndarray, np.ndarray, np.ndarray,
+                                  _PingGeometry]:
+        """Integrate the azimuth beam for one source (direct or mirrored).
+
+        One ground line per along-track offset, each sample weighted by the
+        range-dependent azimuth pattern. The centre line (offset 0) provides
+        altitude and ground-truth geometry.
+        """
+        acq = self._acq
+        num_d = np.zeros(acq.num_results, dtype=np.float64)   # diffuse
+        num_s = np.zeros(acq.num_results, dtype=np.float64)   # coherent specular
+        den = np.zeros(acq.num_results, dtype=np.float64)
+        center_geom: _PingGeometry | None = None
+        for u in line_offsets:
+            geom = self._ping_geometry(origin, look, fwd, along_offset=float(u))
+            if u == 0.0:
+                center_geom = geom
+            self._shade_into(geom, origin, roll_toward, depression_sign,
+                             float(u), n_lines, wall, num_d, num_s, den)
+        assert center_geom is not None
+        return num_d, num_s, den, center_geom
 
     # ------------------------------------------------------ sensor mounting
     def _sensor_pose(self, side: Side, p: Pose3D) -> Pose3D:
@@ -155,16 +207,16 @@ class GeometricRenderer(SonarRenderer):
         )
 
     # --------------------------------------------------------- geometry pass
-    def _ping_geometry(self, side: Side, sensor: Pose3D,
+    def _ping_geometry(self, sensor: Pose3D, look: float, fwd: float,
                        along_offset: float = 0.0) -> _PingGeometry:
         acq = self._acq
         r_max = acq.range_max_m
 
         # Athwartship look direction and along-track (heading) direction
-        # in the world frame.
-        look = sensor.yaw + side.sign * np.pi / 2.0
+        # in the world frame, given explicitly: for a mirror source both are
+        # reflected and neither follows from the pose's yaw.
         dx, dy = np.cos(look), np.sin(look)
-        fx, fy = np.cos(sensor.yaw), np.sin(sensor.yaw)
+        fx, fy = np.cos(fwd), np.sin(fwd)
 
         # Ground-line samples (horizontal distance y_k from the transducer),
         # shifted along-track by `along_offset` for azimuth-beam integration.
@@ -198,11 +250,14 @@ class GeometricRenderer(SonarRenderer):
 
         return _PingGeometry(slant=slant, visible=visible,
                              depression=depression, cos_incidence=cos_inc,
-                             reflectivity=rho, altitude=max(altitude, 0.05))
+                             reflectivity=rho, altitude=max(altitude, 0.05),
+                             px=px, py=py, seabed_z=z_k)
 
     # ----------------------------------------------------------- shading pass
-    def _shade_into(self, g: _PingGeometry, side: Side, sensor: Pose3D,
-                    along_offset: float, num_d: np.ndarray, num_s: np.ndarray,
+    def _shade_into(self, g: _PingGeometry, origin: Pose3D,
+                    roll_toward_side: float, depression_sign: float,
+                    along_offset: float, n_lines: int, wall,
+                    num_d: np.ndarray, num_s: np.ndarray,
                     den: np.ndarray) -> None:
         """Accumulate one ground line's weighted contributions into the
         per-bin numerators (diffuse, coherent specular) and denominator
@@ -216,25 +271,33 @@ class GeometricRenderer(SonarRenderer):
 
         Diffuse (Lambert) and coherent specular contributions are kept
         separate because their fluctuation statistics differ (see
-        sonar/noise.py)."""
+        sonar/noise.py).
+
+        ``depression_sign`` is ``-1`` for a source mirrored an odd number of
+        times in ``z = 0``: that path leaves the real transducer *upward*, so
+        the vertical pattern must be evaluated on the other side of
+        horizontal. ``wall``, when given, restricts the contribution to the
+        samples the finite wall actually reflects toward."""
         acq, cfg = self._acq, self._cfg
 
-        roll_toward_side = -side.sign * sensor.roll  # roll pushing fan down
         bs = acoustics.backscatter(g.reflectivity, g.cos_incidence,
                                    cfg.lambert_exponent)
         # Specular near-normal-incidence lobe: dominates at/near nadir and
         # produces the bright first-bottom-return line that FBR/bottom
         # tracking downstream locks onto.
         spec = acoustics.specular(g.reflectivity, g.cos_incidence, cfg)
-        w = acoustics.beam_weight(g.depression, cfg, roll_toward_side)
+        w = acoustics.beam_weight(depression_sign * g.depression, cfg,
+                                  roll_toward_side)
         rng_resp = acoustics.net_range_response(g.slant, cfg)
 
         env = w * rng_resp * g.visible
+        if wall is not None:
+            env = env * crossing_mask(wall, origin, g.px, g.py, g.seabed_z)
         contrib_d = bs * env
         contrib_s = spec * env
 
         # Azimuth (along-track) beam weight per sample.
-        if self._n_lines > 1:
+        if n_lines > 1:
             sigma = np.maximum(g.slant * self._theta_h / 2.355, 1e-4)
             az_w = np.exp(-0.5 * (along_offset / sigma) ** 2)
         else:
@@ -294,20 +357,77 @@ class GeometricRenderer(SonarRenderer):
         ghost[shift:] = power[: power.size - shift]
         return power + cfg.multipath_gain * ghost
 
+    # -------------------------------------------------------- wall multipath
+    def _render_ghosts(self, side: Side, sensor: Pose3D, altitude: float
+                       ) -> tuple[np.ndarray | None, list[GroundTruthContact]]:
+        """Mirror-source ghosts off the basin walls and the water surface.
+
+        Each virtual source is rendered exactly like the direct path and its
+        response summed into the *same* range bins -- the bin it lands in is
+        the folded path length, so a ghost sits where its physics puts it.
+
+        **Where the energy goes, and what statistics it carries.** Ghost power
+        joins the ping's *diffuse* channel and never the coherent specular
+        one. Two consequences, both wanted: the coherent first-bottom-return
+        channel that downstream bottom tracking locks onto is untouched by
+        this feature (NC #4 holds by construction, not by tuning), and a ghost
+        carries fully-developed Exp(1) speckle rather than the low-CV
+        coherent statistic -- right, because a ghost of the nadir return has
+        bounced off a rough boundary and decorrelated. The direct field's own
+        statistics are unchanged either way (NC #5).
+        """
+        cfg = self._cfg
+        if not cfg.wall_multipath_enabled:
+            return None, []
+        sources = mirror_sources(
+            self._scene.walls, sensor, side, self._acq.range_max_m,
+            wall_gain=cfg.wall_multipath_gain,
+            surface_enabled=cfg.surface_mirror_enabled,
+            surface_reflectivity=cfg.surface_reflectivity)
+        if not sources:
+            return None, []
+
+        total = np.zeros(self._acq.num_results, dtype=np.float64)
+        contacts: list[GroundTruthContact] = []
+        for src in sources:
+            num_d, num_s, den, geom = self._integrate(
+                src.origin, src.look, src.fwd, src.roll_toward_side,
+                src.depression_sign, self._ghost_offsets,
+                self._n_ghost_lines, src.wall)
+            safe = np.maximum(den, 1e-12)
+            ghost = np.where(den > 1e-12, (num_d + num_s) / safe, 0.0)
+            total += src.gain * self._pulse_smear(ghost)
+            # Shadow length is governed by the source's height over the
+            # seabed at the object, which the fold preserves -- the mirror's
+            # own "altitude" would be measured outside the map.
+            geom.altitude = altitude
+            contacts += self._ground_truth_contacts(
+                side, src.origin, src.look, src.fwd, geom, altitude,
+                via=src.name, wall=src.wall)
+        return total, contacts
+
     # ------------------------------------------------------------ ground truth
     def _ground_truth_contacts(self, side: Side, sensor: Pose3D,
-                               g: _PingGeometry) -> list[GroundTruthContact]:
+                               look: float, fwd: float, g: _PingGeometry,
+                               altitude: float, via: str = "",
+                               wall=None) -> list[GroundTruthContact]:
         """Which scene objects does *this* ping insonify, and where?
 
         An object is 'in this ping' if its centre lies within half the
         along-track resolution cell (beam footprint + object length) of the
         ping's ground line. Shadow length uses the classic flat-bottom
-        approximation  L_s = h_obj * r / altitude."""
+        approximation  L_s = h_obj * r / altitude.
+
+        Called once for the direct path and once per mirror source. In the
+        mirrored case ``sensor``/``look``/``fwd`` describe the virtual
+        transducer, so the geometry falls out unchanged and every ghost
+        arrives labelled with the object it images and the reflector that
+        produced it -- ghosts are ground truth here, not unlabelled clutter.
+        """
         acq, cfg = self._acq, self._cfg
         contacts: list[GroundTruthContact] = []
-        look = sensor.yaw + side.sign * np.pi / 2.0
         dxl, dyl = np.cos(look), np.sin(look)
-        fwd_x, fwd_y = np.cos(sensor.yaw), np.sin(sensor.yaw)
+        fwd_x, fwd_y = np.cos(fwd), np.sin(fwd)
         half_beam = np.radians(cfg.horizontal_aperture_deg) / 2.0
 
         for o in self._scene.objects:
@@ -325,6 +445,10 @@ class GeometricRenderer(SonarRenderer):
             slant = float(np.hypot(across, sensor.z - z_obj))
             if slant > acq.range_max_m:
                 continue
+            # A finite wall only ghosts what it actually reflects toward.
+            if wall is not None and not point_crosses(wall, sensor, o.x, o.y,
+                                                      z_obj):
+                continue
 
             # Occlusion check against rendered visibility near the object.
             k = int(np.clip(round(across / self._ds) - 1,
@@ -334,9 +458,10 @@ class GeometricRenderer(SonarRenderer):
 
             bin_m = acq.bin_size_m
             extent_bins = max(o.footprint_radius * 2.0, bin_m) / bin_m
-            shadow_m = o.effective_height * slant / max(g.altitude, 0.1)
+            shadow_m = o.effective_height * slant / max(altitude, 0.1)
             contacts.append(GroundTruthContact(
                 object_id=o.object_id, object_type=o.type, side=side,
                 slant_range_m=slant, extent_bins=float(extent_bins),
-                shadow_bins=float(shadow_m / bin_m), visible=visible))
+                shadow_bins=float(shadow_m / bin_m), visible=visible,
+                ghost=bool(via), via=via))
         return contacts

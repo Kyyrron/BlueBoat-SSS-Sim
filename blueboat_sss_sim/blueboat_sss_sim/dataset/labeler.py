@@ -23,6 +23,10 @@ from ..core.types import GroundTruthContact
 from .waterfall import PingRow
 
 
+#: Class name carried by every multipath ghost under ``ghost_mode="class"``.
+GHOST_CLASS = "ghost"
+
+
 @dataclass
 class LabelConfig:
     box_mode: str = "highlight_shadow"       # "highlight" | "highlight_shadow"
@@ -30,6 +34,33 @@ class LabelConfig:
     pad_bins: float = 3.0
     pad_rows: float = 2.0
     class_names: list[str] | None = None     # fixed class order; None = discover
+    ghost_mode: str = "class"                # what a multipath ghost is
+                                             # labelled as:
+                                             #   "class"    -> one extra
+                                             #     "ghost" class (default):
+                                             #     the detector is taught to
+                                             #     reject it, which is the
+                                             #     whole value of a ghost as
+                                             #     a hard negative
+                                             #   "skip"     -> no box at all
+                                             #   "per_type" -> "ghost_<type>"
+                                             #   "as_real"  -> the mirrored
+                                             #     object's own class. Teaches
+                                             #     that a ghost IS the object;
+                                             #     present for completeness,
+                                             #     not recommended
+
+    def ghost_class_for(self, object_type: str) -> str | None:
+        """Class name a ghost of ``object_type`` carries, or None to drop it."""
+        if self.ghost_mode == "skip":
+            return None
+        if self.ghost_mode == "per_type":
+            return f"ghost_{object_type}"
+        if self.ghost_mode == "as_real":
+            return object_type
+        if self.ghost_mode == "class":
+            return GHOST_CLASS
+        raise ValueError(f"unknown ghost_mode {self.ghost_mode!r}")
 
 
 @dataclass
@@ -71,18 +102,26 @@ class TileLabeler:
     def label_tile(self, rows: list[PingRow]) -> list[YoloBox]:
         cfg = self._cfg
         h = len(rows)
-        per_object: dict[int, list[tuple[int, GroundTruthContact]]] = defaultdict(list)
+        # Keyed on (object_id, via), never object_id alone: an object and its
+        # own multipath ghost are two features at two ranges, and merging them
+        # would draw one box spanning the empty water between.
+        per_object: dict[tuple[int, str],
+                         list[tuple[int, GroundTruthContact]]] = defaultdict(list)
         for r_i, row in enumerate(rows):
             for c in row.contacts:
                 if c.visible:
-                    per_object[c.object_id].append((r_i, c))
+                    per_object[c.group_key].append((r_i, c))
 
         boxes: list[YoloBox] = []
         for _, hits in per_object.items():
             if len(hits) < cfg.min_rows:
                 continue
-            rows_hit = np.array([r for r, _ in hits], dtype=float)
             c0 = hits[0][1]
+            class_name = (cfg.ghost_class_for(c0.object_type) if c0.ghost
+                          else c0.object_type)
+            if class_name is None:
+                continue
+            rows_hit = np.array([r for r, _ in hits], dtype=float)
             bins = np.array([c.slant_range_m / self._bin_m for _, c in hits])
             ext = np.array([c.extent_bins for _, c in hits])
             shad = np.array([c.shadow_bins for _, c in hits])
@@ -99,11 +138,11 @@ class TileLabeler:
             if x1 - x0 < 1 or y1 - y0 < 1:
                 continue
             boxes.append(YoloBox(
-                class_id=self._class_id(c0.object_type),
+                class_id=self._class_id(class_name),
                 x_center=(x0 + x1) / 2 / self._n,
                 y_center=(y0 + y1) / 2 / h,
                 width=(x1 - x0) / self._n,
                 height=(y1 - y0) / h,
                 object_id=c0.object_id,
-                object_type=c0.object_type))
+                object_type=class_name))
         return boxes

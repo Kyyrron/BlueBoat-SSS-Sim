@@ -1,0 +1,60 @@
+# Enclosed-basin sonar profile: `default_sonar.yaml` with wall multipath ON
+# and nothing else changed -- same 15 m acquisition, same calibration anchor
+# (NC #6), so imagery from this profile is directly comparable to the default's
+# and differs only by the ghosts the basin walls put into it.
+acquisition:
+  range_start_mm: 0
+  range_length_mm: 15000
+  msec_per_ping: 0
+  gain_index: 4
+  num_results: 600
+  pulse_len_percent: 0.002
+
+model:
+  sensor_depth_m: 0.15
+  mount_x_m: 0.0
+  mount_y_abs_m: 0.20
+  beam_tilt_deg: 20.0
+  vertical_aperture_deg: 50.0
+  horizontal_aperture_deg: 0.5
+  max_ping_rate_hz: 20.0
+
+  # Range law, fitted against the Shiraishi-jima corpus. Only the product
+  # spreading_exponent * (1 - tvg_compensation) is determined; the split is
+  # fixed by taking spreading at its physical two-way-intensity value, which
+  # makes tvg_compensation 0 -- the profile the device reports is pre-TVG.
+  lambert_exponent: 1.0       # not separated from site geometry by the corpus
+  absorption_db_per_m: 0.10   # ~450 kHz seawater; not separated from spreading
+  spreading_exponent: 4.0     # two-way intensity spreading, r^-4
+  tvg_compensation: 0.0
+  beam_sidelobe_floor: 0.004
+  specular_strength: 30.0
+  specular_width_deg: 8.0
+  specular_looks: 25
+  pulse_smearing: true
+  alongtrack_beam_lines: 5
+  calibration_db_offset: 97.2
+  max_span_db: 90.0
+
+  multipath_enabled: false
+  multipath_gain: 0.12
+
+  # The one difference from default_sonar.yaml.
+  wall_multipath_enabled: true
+  wall_multipath_gain: 1.0
+  surface_mirror_enabled: false   # the direct-path calibration is anchored
+                                  # without it; enable to add the Lloyd-mirror
+                                  # image, which the vertical pattern already
+                                  # attenuates to the sidelobe floor
+  surface_reflectivity: 0.9
+  ghost_beam_lines: 1
+
+  speckle: true
+  speckle_looks: 1
+  noise_floor: 6.79e-07
+  watercolumn_noise: 6.79e-07
+  gain_drift_amp: 0.0
+  gain_drift_period_s: 45.0
+  dropped_ping_prob: 0.0
+
+  sample_step_m: 0.05

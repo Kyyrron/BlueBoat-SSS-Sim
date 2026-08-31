@@ -9,7 +9,11 @@ For anyone extending the package. Read `architecture.md` first.
   +x); anything user/hardware-facing uses compass degrees
   (`enu_yaw_to_compass_deg`, 0 = North, CW) — conversion lives in
   `core/geometry.py` only.
-* **Sides.** `Side.PORT.sign = +1` (+y in body frame), `STARBOARD = −1`.
+* **Sides.** `Side.PORT.sign = +1` (+y in body frame), `STARBOARD = −1`;
+  `Side.PORT.channel = 0`, `STARBOARD = 1` — the channel number the
+  encoder writes to byte 34 of the raw frame and to
+  `OmniscanProfile.channel_number`, which is what `.svlog` writers and
+  readers route on (never the topic or the `src` device tag).
   Transducer heading = vehicle heading ∓ 90°.
 * **Randomness.** Every stochastic component takes a
   `numpy.random.Generator`; nothing touches the global RNG. World content
@@ -26,13 +30,17 @@ For anyone extending the package. Read `architecture.md` first.
 1. `core/types.py` — every dataclass that crosses module boundaries.
 2. `worldgen/scene.py` — `SceneModel`: the single source of truth;
    `generate_scene` composes `terrain.py` + `objects.py`.
-3. `sonar/renderer.py` — `GeometricRenderer.render()` is ~100 lines and
-   contains the entire acoustic pipeline for one ping; `acoustics.py`
-   holds the pure formulas.
+3. `sonar/renderer.py` — `GeometricRenderer.render()` contains the entire
+   acoustic pipeline for one ping; `acoustics.py` holds the pure formulas
+   and `multipath.py` the wall/surface mirror sources (the same geometry
+   and shading passes, run from a reflected transducer).
 4. `sonar/encoder.py` — quantisation + Ping-Protocol framing;
    `parse_frame` is its own unit test oracle.
 5. `dataset/` — pure functions from ping streams to YOLO tiles.
-6. `ros/sss_sim_node.py` — the thin shell wiring 1–5 to topics/timers.
+6. `analysis/` — the renderer's ground truth turned into detection
+   metrics; `contacts.py` is the one record type, `metrics.py` the pure
+   computation over it.
+7. `ros/sss_sim_node.py` — the thin shell wiring 1–6 to topics/timers.
 
 ## 3. Common extensions
 
@@ -55,6 +63,15 @@ instantiate it in `sss_sim_node._start_pinging`. Everything downstream
 (noise, encoding, topics, dataset) is renderer-agnostic. Keep
 ground-truth contact emission if you want auto-labeling to survive.
 
+### Add a reflecting boundary
+Declare it under `walls:` in the world config and set
+`model.wall_multipath_enabled` in the sonar profile — no code change. The
+wall travels in `scene_manifest.yaml`, so the renderer, the labeler and the
+Gazebo world read one list. A ghost renders through the same passes as the
+direct path, so it needs nothing of its own; it carries a ground-truth
+contact naming the object it images and the reflector that made it.
+See `sonar_model.md` §10.
+
 ### Tune realism
 All noise/physics knobs are in the sonar YAML (`configuration_guide.md
 §2`); zeroing the noise group yields clean-physics images for ablation.
@@ -68,6 +85,11 @@ All noise/physics knobs are in the sonar YAML (`configuration_guide.md
   change; it needs only numpy/scipy/yaml/PIL.
 * Frame-level: `parse_frame(encode(...))` round-trips are the contract
   for the raw stream; extend those checks if you touch `encoder.py`.
+* Metrics: `mission_metrics --bundle <dir> --out <dir>` replays the
+  bundle's own trajectory, so its numbers are reproducible from the seed —
+  the same bundle, and a bundle regenerated from that seed, must print the
+  same content digest. If a change moves that digest, it changed the
+  ground truth, not just the code.
 * In-graph: `ros2 topic hz /side_scan_sonar/port/profile` should match
   `ping_period_s()` (≈45 Hz per side at 15 m free-run… i.e. 22 ms), and
   `ros2 topic echo --once .../raw | head` should start with `[66, 82,`

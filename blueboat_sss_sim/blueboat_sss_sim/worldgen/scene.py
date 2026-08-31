@@ -25,12 +25,41 @@ import numpy as np
 import yaml
 
 from ..core.geometry import bilinear_sample
-from ..core.types import GridSpec, PlacedObject
+from ..core.types import GridSpec, PlacedObject, Wall
 from .materials import MaterialLibrary
 from .objects import ObjectFieldConfig, place_objects, rasterize_objects
 from .terrain import TerrainConfig, TerrainRasters, synthesize_terrain
 
 MANIFEST_VERSION = 1
+
+_WALL_KEYS = {f.name for f in dataclasses.fields(Wall)}
+
+
+def _walls_from_list(items: Any) -> list[Wall]:
+    """Parse the world config's ``walls:`` list.
+
+    Unknown keys raise here rather than being ignored: a misspelt
+    ``reflectivty`` would otherwise silently leave the wall at its default and
+    the ghost at the wrong strength, which is exactly the kind of quiet wrong
+    answer the sonar config's own key check exists to prevent.
+    """
+    walls: list[Wall] = []
+    for i, item in enumerate(items):
+        bad = set(item) - _WALL_KEYS
+        if bad:
+            raise KeyError(f"Unknown wall keys in walls[{i}]: {sorted(bad)}")
+        w = Wall(**{k: v for k, v in item.items()})
+        w.name = str(w.name)
+        if w.length < 1e-6:
+            raise ValueError(f"wall '{w.name}' has zero length")
+        if not 0.0 <= w.reflectivity <= 1.0:
+            raise ValueError(f"wall '{w.name}' reflectivity {w.reflectivity} "
+                             "is outside 0..1")
+        walls.append(w)
+    names = [w.name for w in walls]
+    if len(set(names)) != len(names):
+        raise ValueError(f"wall names must be unique, got {names}")
+    return walls
 
 
 @dataclass
@@ -43,6 +72,7 @@ class WorldConfig:
     resolution: float = 0.10                          # raster cell [m]
     terrain: TerrainConfig = dataclasses.field(default_factory=TerrainConfig)
     objects: ObjectFieldConfig = dataclasses.field(default_factory=ObjectFieldConfig)
+    walls: list[Wall] = dataclasses.field(default_factory=list)
     material_overrides: dict[str, Any] = dataclasses.field(default_factory=dict)
 
     @classmethod
@@ -55,6 +85,7 @@ class WorldConfig:
             resolution=float(w.get("resolution", 0.10)),
             terrain=TerrainConfig.from_dict(d.get("terrain", {})),
             objects=ObjectFieldConfig.from_dict(d.get("objects", {})),
+            walls=_walls_from_list(d.get("walls", []) or []),
             material_overrides=dict(d.get("materials", {})),
         )
 
@@ -79,6 +110,7 @@ class SceneModel:
     material_id: np.ndarray             # uint8[ny, nx]
     material_names: list[str]
     objects: list[PlacedObject]
+    walls: list[Wall] = dataclasses.field(default_factory=list)
     seed: int = 0
     config_snapshot: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -107,6 +139,7 @@ class SceneModel:
             "material_names": self.material_names,
             "config": self.config_snapshot,
             "objects": [dataclasses.asdict(o) for o in self.objects],
+            "walls": [dataclasses.asdict(w) for w in self.walls],
         }
         with open(manifest, "w", encoding="utf-8") as f:
             yaml.safe_dump(doc, f, sort_keys=False)
@@ -127,6 +160,12 @@ class SceneModel:
             material_id=data["material_id"],
             material_names=list(doc["material_names"]),
             objects=[PlacedObject(**o) for o in doc["objects"]],
+            # Optional: a bundle generated before walls existed carries no
+            # "walls" key and loads as a wall-free basin. The manifest
+            # version deliberately does NOT move for an additive key --
+            # SceneModel.load rejects any other version outright, and every
+            # bundle already on disk would stop loading.
+            walls=[Wall(**w) for w in (doc.get("walls") or [])],
             seed=int(doc.get("seed", 0)),
             config_snapshot=dict(doc.get("config", {})),
         )
@@ -150,6 +189,7 @@ def generate_scene(cfg: WorldConfig,
         material_id=terrain.material_id,
         material_names=terrain.material_names,
         objects=objects,
+        walls=list(cfg.walls),
         seed=cfg.seed,
         config_snapshot=dict(raw_config or {}),
     )

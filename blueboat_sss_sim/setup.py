@@ -34,6 +34,8 @@ setup(
             "generate_world = blueboat_sss_sim.worldgen.generate:main",
             "generate_mission = blueboat_sss_sim.mission.generate:main",
             "export_scene_maps = blueboat_sss_sim.worldgen.export_maps:main",
+            "mission_metrics = blueboat_sss_sim.analysis.cli:main",
+            "sss_calibration_report = blueboat_sss_sim.analysis.calibration_cli:main",
         ],
     },
 )

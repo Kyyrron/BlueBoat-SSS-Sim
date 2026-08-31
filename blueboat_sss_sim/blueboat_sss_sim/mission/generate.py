@@ -34,6 +34,20 @@ def _load(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def _resolve(p: Path, anchor: Path) -> Path:
+    """Resolve a relative config path: cwd first, then next to the mission YAML.
+
+    The shipped mission configs reference ``config/<file>.yaml``, which only
+    resolves from the package source root. Falling back to the mission YAML's
+    own directory is what lets a bundle be generated from the installed share
+    directory, where the cwd is not the package source root.
+    """
+    if p.is_absolute() or p.exists():
+        return p
+    beside = anchor / p.name        # mission YAML already lives in config/
+    return beside if beside.exists() else anchor / p
+
+
 def _randomize(doc: dict[str, Any], rng: np.random.Generator) -> dict[str, Any]:
     m = doc.setdefault("mission", {})
     m["seed"] = int(rng.integers(0, 2 ** 31 - 1))
@@ -64,7 +78,9 @@ def generate_mission(mission_yaml: str | Path, out_dir: str | Path,
     mission_seed = int(m.get("seed", 0))
 
     # ---- world: base config + inline overrides ---------------------------
-    base_world = Path(m.get("world_config", "config/default_world.yaml"))
+    anchor = Path(mission_yaml).resolve().parent
+    base_world = _resolve(Path(m.get("world_config",
+                                     "config/default_world.yaml")), anchor)
     world_doc = _load(base_world)
     for section, patch in (doc.get("world_overrides") or {}).items():
         node = world_doc.setdefault(section, {})
@@ -78,7 +94,7 @@ def generate_mission(mission_yaml: str | Path, out_dir: str | Path,
         yaml.safe_dump(world_doc, f, sort_keys=False)
     scene = generate_world(tmp_world_cfg, out,
                            plugin_prefix=str(m.get("gazebo_plugin_prefix",
-                                                   "ignition")))
+                                                   "gz")))
 
     # ---- trajectory --------------------------------------------------------
     if speed is not None:
@@ -89,7 +105,8 @@ def generate_mission(mission_yaml: str | Path, out_dir: str | Path,
     traj.save_yaml(out / "trajectory.yaml")
 
     # ---- sonar profile ------------------------------------------------------
-    sonar_src = Path(m.get("sonar_profile", "config/default_sonar.yaml"))
+    sonar_src = _resolve(Path(m.get("sonar_profile",
+                                    "config/default_sonar.yaml")), anchor)
     shutil.copyfile(sonar_src, out / "sonar.yaml")
 
     # ---- snapshot ------------------------------------------------------------

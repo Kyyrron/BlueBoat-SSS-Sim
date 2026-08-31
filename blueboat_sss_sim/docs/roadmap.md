@@ -8,14 +8,13 @@ Replace straight-ray `slant = hypot(y, dz)` with a two-layer SVP ray step
 in `GeometricRenderer._ping_geometry`. Mostly relevant beyond ~30 m range
 or strong thermoclines; low priority for the 15 m shallow regime.
 
-## 2. Wall / surface multipath (high thesis value)
-The enclosed-basin regime's signature artifact (quay walls, pontoons).
-Model as mirror-image sources: reflect the transducer across configured
-vertical planes (add `walls:` to the world config) and across z = 0,
-render each virtual source with a reflection-loss factor, and sum into the
-same range bins. Produces the ghost returns and false-positive stimuli the
-thesis's C4 characterization needs — and gives the detector hard negatives
-for free, with per-ghost ground truth.
+## 2. Wall / surface multipath — **shipped**
+Implemented in `sonar/multipath.py`, off by default
+(`model.wall_multipath_enabled`); world config carries `walls:`. See
+`sonar_model.md` §10 and A9. What remains out of scope, and why it is here
+rather than done: the wall's **own** direct echo and shadow, which the 2.5-D
+heightfield cannot represent and which needs the mesh path below; and
+composed bounces beyond the first-order mirror set.
 
 ## 3. Mesh-accurate targets (medium)
 For cavity-bearing targets (wrecks, pipes on trestles) the 2.5-D stamp is
@@ -44,10 +43,14 @@ If world sizes or ping rates ever outgrow the CPU renderer, reimplement
 ranges + material IDs) behind the same ABC. The interface, noise stack,
 encoder and dataset layers are already backend-agnostic.
 
-## 8. Sim-to-real calibration loop
-With real Omniscan captures available (`sonar_data.txt` pipeline), fit
-`base_scale`, `calibration_db_offset`, `lambert_exponent`, noise floor and
-drift parameters by matching per-range intensity histograms between real
-and synthetic waterfalls of the same seabed type. Turns the model knobs
-from plausible defaults into measured values — the highest-leverage single
-step for training-data usefulness.
+## 8. Sim-to-real calibration over a known bottom
+The first pass is done: the encoder now carries the device's per-ping
+normalisation, and the range law, noise floor, gain ladder and level
+reference are fitted against the Shiraishi-jima harbour corpus
+(`docs/sonar_model.md` §6). What that corpus cannot give is the seabed:
+`lambert_exponent` is confounded with an unsampled bottom type, and the
+residual floor is set by site geometry — two real passes of the same water
+disagree by 1.8–3.1 dB RMS, against a 0.67 dB reduction floor. Closing that
+needs a capture over a **known, flat** bottom at two or more altitudes with
+the acquisition written down; `sss_calibration_report` runs the comparison
+as soon as one exists.

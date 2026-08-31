@@ -1,8 +1,9 @@
 """End-to-end simulated mission.
 
 Starts, in one command:
-  1. Gazebo on the mission bundle's generated ``world.sdf`` (via
-     ``blueboat_description``'s world launch or directly);
+  1. Gazebo on the mission bundle's generated ``world.sdf``, with the
+     ``/clock`` and ``/ocean_current`` bridges and the robot spawn
+     (``blueboat_description``'s ``upload_rov_launch.py``);
   2. the existing control stack (``simulation_interface``,
      ``master_control``, ``path_publisher``) unchanged -- with
      ``path_publisher``'s ``total_time`` sized automatically from the
@@ -18,9 +19,26 @@ Arguments
 ---------
 mission_dir       mission bundle directory (required)
 controller_type   controller for master_control        (default 'PID')
-use_existing_world_launch  include blueboat_description world_launch.py
-                  with a `world` argument               (default true)
+use_stock_world   load blueboat_description's stock world.sdf via its
+                  world_launch.py instead of the bundle's  (default false)
 quiet             filter known-noisy startup lines      (default true)
+
+range_start_mm / range_length_mm / msec_per_ping / gain_index /
+num_results / pulse_len_percent
+                  per-run acquisition overrides, forwarded to
+                  ``sss_sim_launch.py``. Empty (the default) means "use the
+                  mission bundle's frozen ``sonar.yaml`` value" -- the bundle
+                  is the authority for what a run acquired at (NC #10).
+
+World loading
+-------------
+``blueboat_description``'s ``world_launch.py`` hard-codes the stock
+``world.sdf`` and declares no ``world`` argument, so it cannot load a
+bundle world. This launch file therefore does that bring-up itself:
+``sl.gz_launch`` on the bundle's ``world.sdf`` -- which also registers the
+world name (``generated_ocean``) that the model bridges resolve against --
+then the same ``/clock`` and ``/ocean_current`` bridges and the same
+``upload_rov_launch.py`` include that the stock path provides.
 
 Verbosity policy (lesson learned)
 ---------------------------------
@@ -34,13 +52,18 @@ handler that drops only known-noisy lines by content (process
 started/finished bookkeeping, gz bridge creation spam, ``create``'s
 world-name polling, the one-shot ping-enable publisher chatter),
 wherever they originate -- including inside included launch files.
-Everything else, notably first-party INFO and all warnings/errors from
-any node, stays on screen.
+Everything else stays on screen: first-party INFO from master_control,
+simulation_interface, path_publisher, path_generation and
+side_scan_sonar, every ERROR, and Python tracebacks. The one deliberate
+exception is a WARN -- kdl_parser's "root link ... has an inertia"
+line from robot_state_publisher, which is on the list by name.
 """
 
 import logging
+import os
 
-from simple_launch import SimpleLauncher
+from launch.actions import SetEnvironmentVariable
+from simple_launch import GazeboBridge, SimpleLauncher
 
 # ---------------------------------------------------------------------------
 # Targeted screen-noise filter (see module docstring).
@@ -84,8 +107,17 @@ sl = SimpleLauncher(use_sim_time=True)
 
 sl.declare_arg("mission_dir", default_value="")
 sl.declare_arg("controller_type", default_value="PID")
-sl.declare_arg("use_existing_world_launch", default_value=True)
+sl.declare_arg("use_stock_world", default_value=False)
 sl.declare_arg("quiet", default_value=True)
+
+# The six run-dependent acquisition parameters, forwarded to sss_sim_launch.
+# Empty = use the mission bundle's frozen sonar.yaml value (NC #10).
+ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
+                    "gain_index", "num_results", "pulse_len_percent")
+for _a in ACQUISITION_ARGS:
+    sl.declare_arg(_a, default_value="",
+                   description=f"{_a} override; empty = use the mission "
+                               "bundle's frozen sonar.yaml value")
 
 
 def _mission_total_time(mission_dir: str) -> float:
@@ -119,15 +151,27 @@ def launch_setup():
     total_time = _mission_total_time(mission_dir)
 
     # 1. Gazebo + robot.
-    if sl.arg("use_existing_world_launch"):
+    if sl.arg("use_stock_world"):
         sl.include("blueboat_description", "world_launch.py",
-                   launch_arguments={"sliders": False,
-                                     "world": world_file})
+                   launch_arguments={"sliders": False})
     else:
-        from launch.actions import ExecuteProcess
-        sl.add_action(ExecuteProcess(
-            cmd=["gz", "sim", "-r", world_file],
-            output="log" if quiet else "screen"))
+        # The bundle's world.sdf references seabed.stl relatively; put the
+        # bundle on the resource path so the mesh resolves wherever Gazebo
+        # is started from.
+        sl.add_action(SetEnvironmentVariable(
+            "GZ_SIM_RESOURCE_PATH",
+            os.pathsep.join(filter(None, [
+                mission_dir, os.environ.get("GZ_SIM_RESOURCE_PATH", "")]))))
+        # gz_launch reads <world name> out of the SDF and registers it, which
+        # is what makes GazeboBridge.model_prefix() resolve; a bare Gazebo
+        # process would leave the bridges without a world name.
+        sl.gz_launch(world_file, "-r")
+        sl.create_gz_bridge([
+            GazeboBridge.clock(),
+            GazeboBridge("/ocean_current", "/current",
+                         "geometry_msgs/Vector3", GazeboBridge.ros2gz)])
+        sl.include("blueboat_description", "upload_rov_launch.py",
+                   launch_arguments={"sliders": False, "thr": "thrusters_ur"})
 
     # 2. Existing control stack, untouched (first-party: stays on screen).
     #    path_publisher's window now covers the whole mission.
@@ -148,7 +192,8 @@ def launch_setup():
                launch_arguments={"mission_dir": mission_dir,
                                  "with_recorder": False,
                                  "with_mission_path": False,
-                                 "quiet": quiet})
+                                 "quiet": quiet,
+                                 **{a: sl.arg(a) for a in ACQUISITION_ARGS}})
 
     return sl.launch_description()
 

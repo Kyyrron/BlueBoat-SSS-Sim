@@ -22,6 +22,7 @@ import yaml
 from PIL import Image
 
 from .labeler import YoloBox
+from .waterfall import WaterfallTileConfig
 
 
 @dataclass
@@ -31,9 +32,15 @@ class ExportConfig:
 
 
 class YoloDatasetWriter:
-    def __init__(self, root: str | Path, cfg: ExportConfig | None = None) -> None:
+    def __init__(self, root: str | Path, cfg: ExportConfig | None = None,
+                 tile_cfg: WaterfallTileConfig | None = None) -> None:
         self._root = Path(root)
         self._cfg = cfg or ExportConfig()
+        # Recorded so dataset.yaml can state how the pixels were made; pass the
+        # builder's own config when it is not the default.
+        tc = tile_cfg or WaterfallTileConfig()
+        self._range_equalised = tc.range_equalise
+        self._p_low, self._p_high = tc.p_low, tc.p_high
         for split in ("train", "val"):
             (self._root / "images" / split).mkdir(parents=True, exist_ok=True)
             (self._root / "labels" / split).mkdir(parents=True, exist_ok=True)
@@ -57,6 +64,20 @@ class YoloDatasetWriter:
             "train": "images/train",
             "val": "images/val",
             "names": {i: n for i, n in enumerate(class_names)},
+            # How the pixels were made. A consumer that inverts the display
+            # mapping (the augmentation stage does) has to be told, because
+            # assuming the wrong one mis-scales every intensity it computes.
+            # `db` is not `log`: the samples reaching the tile are already on
+            # the device's per-ping dB axis, so no log was applied on top.
+            "layout": "waterfall",
+            "intensity_mapping": "db",
+            "shadow_included": True,
+            "meta": {
+                "intensity_mapping": "db",
+                "range_equalised": bool(self._range_equalised),
+                "normalisation": "per-tile percentile",
+                "percentiles": [self._p_low, self._p_high],
+            },
         }
         p = self._root / "dataset.yaml"
         with open(p, "w", encoding="utf-8") as f:

@@ -1,5 +1,14 @@
 # Realism update notes — dual Omniscan 450 tuning request
 
+> **Superseded on the power-calibration point.** This document records the
+> tuning pass that set `base_scale` 110 000 against a single decoded frame.
+> Both `base_scale` and `gain_index_step_db` have since been retired: the
+> device normalises `pwr_results` per ping, so there is no linear-power →
+> counts scale, and the level is carried by `calibration_db_offset` alone.
+> `docs/sonar_model.md` §6 is current for the encoding and for which
+> constants are measured. The rest of this document still stands.
+
+
 Drop-in file replacements for `blueboat_sss_sim` (paths relative to the
 package root). Rebuild and **regenerate the mission bundle** (the bundle
 carries a copy of `sonar.yaml`, so old bundles keep the old model):

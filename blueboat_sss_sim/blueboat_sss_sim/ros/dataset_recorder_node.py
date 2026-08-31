@@ -53,11 +53,14 @@ class DatasetRecorderNode(Node):
         out = self.get_parameter("output_dir").value
         if not out:
             raise RuntimeError("parameter 'output_dir' is required")
-        self._writer = YoloDatasetWriter(out, ExportConfig(
-            val_fraction=float(self.get_parameter("val_fraction").value)))
         self._tile_cfg = WaterfallTileConfig(
             tile_pings=int(self.get_parameter("tile_pings").value),
             overlap_pings=int(self.get_parameter("overlap_pings").value))
+        self._writer = YoloDatasetWriter(
+            out,
+            ExportConfig(val_fraction=float(
+                self.get_parameter("val_fraction").value)),
+            self._tile_cfg)
         self._label_cfg = LabelConfig(
             box_mode=str(self.get_parameter("box_mode").value))
         self._run = str(self.get_parameter("run_name").value)
@@ -92,7 +95,11 @@ class DatasetRecorderNode(Node):
                 side=Side(c["side"]), slant_range_m=float(c["slant_range_m"]),
                 extent_bins=float(c["extent_bins"]),
                 shadow_bins=float(c["shadow_bins"]),
-                visible=bool(c["visible"])))
+                visible=bool(c["visible"]),
+                # Defaulted, not required: a stream from a bundle generated
+                # before wall multipath existed carries neither key.
+                ghost=bool(c.get("ghost", False)),
+                via=str(c.get("via", ""))))
 
     def _on_profile(self, msg: OmniscanProfile) -> None:
         side = Side(msg.side)
@@ -102,7 +109,12 @@ class DatasetRecorderNode(Node):
                 msg.num_results, msg.length_mm / 1000.0 / msg.num_results,
                 self._label_cfg)
         contacts = self._pending_contacts.pop((msg.side, msg.ping_number), [])
-        self._builders[side].add_ping(msg.pwr_results, contacts)
+        # The endpoints travel with the ping so the builder can stack absolute
+        # dB: pwr_results is normalised per ping, so rows are not otherwise
+        # commensurable with each other.
+        self._builders[side].add_ping(msg.pwr_results, contacts,
+                                      min_pwr_db=msg.min_pwr_db,
+                                      max_pwr_db=msg.max_pwr_db)
 
     # ------------------------------------------------------------------ output
     def _flush(self, final: bool = False) -> None:

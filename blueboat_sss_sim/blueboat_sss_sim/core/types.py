@@ -27,6 +27,18 @@ class Side(str, Enum):
         port looks to +y (left), starboard to -y (right)."""
         return +1.0 if self is Side.PORT else -1.0
 
+    @property
+    def channel(self) -> int:
+        """Device channel number: 0 = port, 1 = starboard.
+
+        The project-wide side identity carried in the packet itself, at
+        byte 34 of the framed Ping-Protocol profile and in
+        ``OmniscanProfile.channel_number``. Downstream ``.svlog`` writers
+        and readers route on this value rather than on the topic or the
+        ``src`` device tag, so it must be correct per side.
+        """
+        return 0 if self is Side.PORT else 1
+
 
 @dataclass(frozen=True)
 class Pose3D:
@@ -88,6 +100,18 @@ class GroundTruthContact:
     extent_bins: float            # approx. object extent in range bins
     shadow_bins: float            # approx. shadow length in range bins
     visible: bool                 # False if fully occluded / out of swath
+    ghost: bool = False           # True -> a multipath image, not the object
+    via: str = ""                 # reflector that produced it ("" = direct
+                                  # path; else the mirror-source name, e.g.
+                                  # "wall:quay_north" or "surface")
+
+    @property
+    def group_key(self) -> tuple[int, str]:
+        """Identity for aggregation: the same object seen down two different
+        paths is two contacts, never one. Grouping on ``object_id`` alone
+        would merge an object with its own ghost into a box spanning the gap
+        between them."""
+        return (self.object_id, self.via)
 
 
 @dataclass
@@ -124,6 +148,47 @@ class GridSpec:
             (np.asarray(x) - self.origin_x) / self.resolution,
             (np.asarray(y) - self.origin_y) / self.resolution,
         )
+
+
+@dataclass
+class Wall:
+    """One vertical reflecting boundary of an enclosed basin (quay, pontoon).
+
+    A finite segment in plan view, extending from the seabed up to ``top_z``.
+    Walls are *acoustic* scene furniture: they are not stamped into the height
+    raster (a 2.5-D heightfield cannot carry a vertical face), so they produce
+    multipath ghosts but no direct echo of their own -- see docs/sonar_model.md
+    assumption A9.
+
+    ``reflectivity`` is the fraction of incident energy the face returns, per
+    bounce; a concrete quay is high (~0.6), a fendered pontoon much lower.
+    """
+
+    name: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    top_z: float = 0.0            # world z of the wall top (0 = waterline)
+    reflectivity: float = 0.5     # 0..1 energy fraction returned per bounce
+    thickness: float = 0.30       # visual thickness in Gazebo [m]
+
+    @property
+    def length(self) -> float:
+        return float(np.hypot(self.x1 - self.x0, self.y1 - self.y0))
+
+    @property
+    def unit(self) -> tuple[float, float]:
+        """Unit vector along the wall, from end 0 to end 1."""
+        L = max(self.length, 1e-9)
+        return ((self.x1 - self.x0) / L, (self.y1 - self.y0) / L)
+
+    @property
+    def normal(self) -> tuple[float, float]:
+        """Unit normal of the wall plane (either face; sign is irrelevant --
+        the mirror reflection is symmetric in it)."""
+        ux, uy = self.unit
+        return (-uy, ux)
 
 
 @dataclass

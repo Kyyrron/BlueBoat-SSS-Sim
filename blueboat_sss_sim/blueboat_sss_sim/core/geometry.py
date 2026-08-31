@@ -36,6 +36,38 @@ def wrap_pi(a: np.ndarray | float) -> np.ndarray | float:
     return (np.asarray(a) + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def compass_deg_to_enu_yaw(heading_deg: float) -> float:
+    """Compass heading degrees (0 = +y/North, CW) -> ENU yaw (0 = +x, CCW).
+
+    Exact inverse of :func:`enu_yaw_to_compass_deg`, needed when a recorded
+    stream carries only the hardware-facing compass heading (as every
+    ``OmniscanProfile`` and every raw Ping-Protocol frame does) and the
+    ENU yaw has to be recovered for geometry.
+    """
+    return float(wrap_pi(np.radians(90.0 - heading_deg)))
+
+
+def reflect_point_across_line(px: float, py: float,
+                              ax: float, ay: float,
+                              nx: float, ny: float) -> tuple[float, float]:
+    """Mirror the point (px, py) in the line through (ax, ay) with unit
+    normal (nx, ny).
+
+    In 3D this is the reflection in the *vertical plane* standing on that
+    line, which leaves z untouched -- the mirror-source construction for a
+    quay wall (see :mod:`blueboat_sss_sim.sonar.multipath`).
+    """
+    d = (px - ax) * nx + (py - ay) * ny        # signed distance to the plane
+    return (px - 2.0 * d * nx, py - 2.0 * d * ny)
+
+
+def reflect_direction_across_line(dx: float, dy: float,
+                                  nx: float, ny: float) -> tuple[float, float]:
+    """Mirror a direction vector in a plane with unit normal (nx, ny)."""
+    d = dx * nx + dy * ny
+    return (dx - 2.0 * d * nx, dy - 2.0 * d * ny)
+
+
 def bilinear_sample(raster: np.ndarray, grid: GridSpec,
                     x: np.ndarray, y: np.ndarray,
                     fill: float = 0.0) -> np.ndarray:

@@ -12,8 +12,8 @@ Design choices:
 * The world-level plugin block is copied from the existing BlueBoat
   ``world.sdf`` so the vehicle spawns and behaves identically
   (physics, buoyancy, sensors, scene broadcaster). The plugin filename
-  prefix is configurable: ``ignition-gazebo`` (Fortress, current project
-  default) or ``gz-sim`` (Garden/Harmonic).
+  prefix is configurable: ``gz-sim`` (Garden/Harmonic, the default) or
+  ``ignition-gazebo`` (Fortress).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ..core.types import PlacedObject
+from ..core.types import PlacedObject, Wall
 from .materials import MaterialLibrary
 from .objects import CATALOG
 from .scene import SceneModel
@@ -119,17 +119,46 @@ def _object_sdf(o: PlacedObject, z_base: float, lib: MaterialLibrary) -> str:
     </model>"""
 
 
+def _wall_sdf(w: Wall, z_floor: float) -> str:
+    """One basin wall as a static, visual-only box.
+
+    Visual only, exactly like the litter objects above: the generated world
+    gives no object a collision, so a wall changes the Gazebo picture without
+    changing hull dynamics. It is emitted at all so that the Gazebo scene and
+    the acoustic scene cannot disagree about a structure this large -- the
+    renderer bounces ghosts off these same walls, read from the same manifest.
+    """
+    cx, cy = 0.5 * (w.x0 + w.x1), 0.5 * (w.y0 + w.y1)
+    h = max(w.top_z - z_floor, 0.05)
+    cz = z_floor + h / 2.0
+    yaw = float(np.arctan2(w.y1 - w.y0, w.x1 - w.x0))
+    return f"""
+    <model name="wall_{w.name}">
+      <static>true</static>
+      <pose>{cx:.3f} {cy:.3f} {cz:.3f} 0 0 {yaw:.4f}</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry><box><size>{w.length:.3f} {w.thickness:.3f} {h:.3f}</size></box></geometry>
+          <material>
+            <ambient>0.55 0.55 0.52 1</ambient>
+            <diffuse>0.55 0.55 0.52 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>"""
+
+
 def write_world_sdf(scene: SceneModel, out_dir: str | Path,
                     world_name: str = "generated_ocean",
-                    plugin_prefix: str = "ignition",
+                    plugin_prefix: str = "gz",
                     water_alpha: float = 0.4,
                     seabed_collision: bool = False,
                     material_overrides: dict | None = None) -> Path:
     """Write ``world.sdf`` + ``seabed.stl`` into ``out_dir``.
 
     Args:
-        plugin_prefix: ``"ignition"`` (Fortress; matches the current BlueBoat
-            world) or ``"gz"`` (Garden/Harmonic plugin naming).
+        plugin_prefix: ``"gz"`` (Garden/Harmonic plugin naming) or
+            ``"ignition"`` (Fortress).
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -156,6 +185,12 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
     objects_sdf = "".join(
         _object_sdf(o, float(scene.sample_height(np.array([o.x]), np.array([o.y]))[0]), lib)
         for o in scene.objects)
+    # Walls sit on the deepest point they span, so a sloping basin never
+    # leaves one floating above the seabed.
+    walls_sdf = "".join(
+        _wall_sdf(w, float(np.min(scene.sample_height(
+            np.linspace(w.x0, w.x1, 16), np.linspace(w.y0, w.y1, 16)))))
+        for w in scene.walls)
 
     sdf = f"""<?xml version="1.0" ?>
 <sdf version="1.6">
@@ -198,7 +233,7 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
         </visual>{collision_block}
       </link>
     </model>
-{objects_sdf}
+{objects_sdf}{walls_sdf}
   </world>
 </sdf>
 """

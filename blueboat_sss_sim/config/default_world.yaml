@@ -32,5 +32,15 @@ objects:
   # overrides:
   #   pipe_pvc: {length_range: [1.0, 4.0], burial_range: [0.0, 0.3]}
 
+# walls:                   # optional reflecting boundaries (enclosed basin).
+#                          # Absent = open water, which is the default.
+#                          # Each wall is a finite vertical segment from the
+#                          # seabed up to top_z; it produces multipath ghosts
+#                          # in the sonar image and a visual box in Gazebo.
+#                          # Needs model.wall_multipath_enabled in the sonar
+#                          # profile before any ghost is rendered.
+#   - {name: quay_north, x0: -30.0, y0: 22.0, x1: 30.0, y1: 22.0,
+#      top_z: 1.0, reflectivity: 0.6}
+
 # materials:               # optional acoustic-material overrides
 #   sand: {reflectivity: 0.6}

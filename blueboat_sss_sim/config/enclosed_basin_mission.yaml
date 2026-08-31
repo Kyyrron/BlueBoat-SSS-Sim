@@ -1,0 +1,29 @@
+# Enclosed-basin run bundle: `default_mission.yaml` bound to the walled world
+# and the wall-multipath sonar profile. Same seed, same pattern, same object
+# density, so a bundle from this config and one from `default_mission.yaml`
+# place the same objects at the same poses and differ only by the basin walls
+# and the ghosts they produce.
+#
+# This is the config for the enclosed-basin regime study: the ghost returns are
+# the false-positive stimulus, and every one of them carries its own
+# ground-truth contact naming the object it images and the wall that made it.
+mission:
+  seed: 7
+  randomize: false
+  world_config: config/enclosed_basin_world.yaml
+  sonar_profile: config/enclosed_basin_sonar.yaml
+  gazebo_plugin_prefix: gz
+
+  start: [0.0, 0.0]
+  pattern: lawnmower
+  lawnmower:
+    bbox: [-30.0, -20.0, 30.0, 20.0]
+    spacing: 8.0
+    speed: 1.0
+    heading_deg: 0.0
+  spiral:  {center: [0.0, 0.0], r_max: 25.0, spacing: 8.0, speed: 1.0}
+  random:  {bbox: [-30.0, -20.0, 30.0, 20.0], n_legs: 14, speed: 1.0}
+
+world_overrides:
+  objects:
+    density_per_hectare: 60

@@ -4,8 +4,9 @@ world bundle before committing to a full mission run.
 Arguments
 ---------
 mission_dir   mission/world bundle directory containing world.sdf (required)
-gz_cmd        Gazebo executable: 'ign gazebo' (Fortress) or 'gz sim'
-              (Garden/Harmonic).                    (default 'ign gazebo')
+gz_cmd        Gazebo executable, must match the installed generation:
+              'gz sim' (Garden/Harmonic) or 'ign gazebo' (Fortress).
+                                                    (default 'gz sim')
 paused        start paused                          (default false)
 """
 
@@ -14,7 +15,7 @@ from simple_launch import SimpleLauncher
 sl = SimpleLauncher()
 
 sl.declare_arg("mission_dir", default_value="")
-sl.declare_arg("gz_cmd", default_value="gz sim") 
+sl.declare_arg("gz_cmd", default_value="gz sim")
 sl.declare_arg("paused", default_value=False)
 
 

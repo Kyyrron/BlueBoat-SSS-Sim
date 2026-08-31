@@ -34,7 +34,8 @@ Python package: nothing in the existing simulator (`blueboat_description`,
 ```
 blueboat_sss_sim/
 ├── blueboat_sss_sim/
-│   ├── core/        types.py (Pose3D, Ping, Side, GridSpec, PlacedObject…)
+│   ├── core/        types.py (Pose3D, Ping, Side, GridSpec, PlacedObject,
+│   │                           Wall…)
 │   │                geometry.py (quaternions, heading conventions, bilinear)
 │   ├── worldgen/    noise.py → terrain.py → objects.py → scene.py
 │   │                sdf_writer.py (world.sdf + seabed.stl)
@@ -42,6 +43,7 @@ blueboat_sss_sim/
 │   ├── sonar/       config.py (AcquisitionParams = real node params,
 │   │                           SonarModelConfig = physics/noise knobs)
 │   │                acoustics.py (backscatter, beam, TVG)
+│   │                multipath.py (wall/surface mirror sources)
 │   │                noise.py (speckle, gain drift, dropouts)
 │   │                renderer.py (SonarRenderer ABC + GeometricRenderer)
 │   │                encoder.py (u16 quantisation + Ping-Protocol frames)
@@ -49,11 +51,16 @@ blueboat_sss_sim/
 │   │                → exporter.py (Ultralytics layout)
 │   ├── mission/     patterns.py (lawnmower/spiral/random/waypoints)
 │   │                generate.py (generate_mission CLI → run bundle)
+│   ├── analysis/    svlog_reader.py (.svlog → pose track, read-only)
+│   │                contacts.py (replay / svlog / jsonl → observations)
+│   │                metrics.py (P(detect) vs range and aspect)
+│   │                → report.py → cli.py (mission_metrics CLI)
 │   └── ros/         sss_sim_node.py       ← replaces sss_node.py
 │                    dataset_recorder_node.py
 │                    sss_path_generation.py ← replaces path_generation.py
 │                    mavros_shim_node.py    (optional)
 ├── config/          default_world / default_sonar / default_mission / materials
+│                 shallow_water_world / shallow_water_mission (2.5 m variant)
 ├── launch/          sss_sim_launch, sim_world_launch, full_mission_launch
 ├── docs/            this documentation set
 ├── msg_reference/   OmniscanProfile.msg (reference copy only)
@@ -99,7 +106,7 @@ nothing else.
 | Object `CATALOG` | `worldgen/objects.py` | add litter classes (mask primitive + material + size priors) |
 | `build_pattern` | `mission/patterns.py` | add survey patterns |
 | `WaterfallTileConfig` / `LabelConfig` | `dataset/` | change tiling or labeling policy |
-| plugin prefix (`ignition`/`gz`) | `sdf_writer.py`, mission YAML | target Gazebo Garden/Harmonic |
+| plugin prefix (`gz` default / `ignition`) | `sdf_writer.py`, mission YAML | target Gazebo Fortress instead of Garden/Harmonic |
 
 ## 6. Why not a Gazebo sensor plugin? (decision record)
 

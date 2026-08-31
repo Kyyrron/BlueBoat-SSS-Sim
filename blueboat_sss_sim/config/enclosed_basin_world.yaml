@@ -1,0 +1,54 @@
+# Enclosed-basin world: `default_world.yaml` with a `walls:` block and nothing
+# else changed. Same seed, same terrain, same objects at the same poses --
+# `walls` consumes no RNG draws, so a bundle from this config and one from
+# `default_world.yaml` differ only by the basin boundary and pair object for
+# object, exactly as `shallow_water_world.yaml` pairs with the default.
+#
+# The walls enclose the 60 x 40 m survey box of `default_mission.yaml` at 2 m
+# clearance, so a lawnmower leg running at y = +/-20 sees the nearer quay at
+# 2 m and the far one at 42 m. At the default 15 m range only the near wall is
+# in the receive window; the far one is culled by the renderer, which is what
+# the ghosts of a real basin do too.
+#
+# Walls are acoustic reflectors and Gazebo visuals; they are NOT stamped into
+# the height raster (a 2.5-D heightfield carries no vertical face) and have no
+# collision, exactly like the litter objects. See docs/sonar_model.md A9.
+world:
+  seed: 42
+  size: [80.0, 60.0]
+  origin: [-40.0, -30.0]
+  resolution: 0.10
+
+terrain:
+  base_depth: 4.0
+  slope: {direction_deg: 15.0, grade: 0.015}
+  dunes:
+    enabled: true
+    wavelength: 6.0
+    amplitude: 0.12
+    direction_deg: 30.0
+    irregularity: 0.5
+  roughness: {amplitude: 0.05, octaves: 5, cells: 12}
+  materials:
+    layout: patches
+    patch_cells: 6
+    composition: {sand: 0.50, mud: 0.20, gravel: 0.15, rocks: 0.10, seagrass: 0.05}
+
+objects:
+  density_per_hectare: 60
+  margin_m: 3.0
+  min_separation_m: 1.0
+  size_scale: 1.0
+  burial_scale: 1.0
+  reflectivity_jitter: 0.15
+
+# Finite vertical segments, seabed up to `top_z` (0.0 = waterline).
+# `reflectivity` is the energy fraction returned per bounce: a concrete quay
+# is a strong reflector, a fendered timber pontoon much weaker.
+walls:
+  - {name: quay_north, x0: -32.0, y0:  22.0, x1: 32.0, y1:  22.0,
+     top_z: 1.2, reflectivity: 0.65}
+  - {name: quay_south, x0: -32.0, y0: -22.0, x1: 32.0, y1: -22.0,
+     top_z: 1.2, reflectivity: 0.65}
+  - {name: pontoon_east, x0: 32.0, y0: -22.0, x1: 32.0, y1: 22.0,
+     top_z: 0.4, reflectivity: 0.30}
