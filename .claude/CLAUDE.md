@@ -171,12 +171,20 @@ Parameters: `output_dir` (required), `tile_pings` (512), `overlap_pings` (64),
 `box_mode` (`highlight_shadow`), `val_fraction` (0.15), `autosave_period_s` (5),
 `run_name`.
 
-### 3.4 `mavros_shim_node` — optional
+### 3.4 `mavros_shim_node` — on by default in the launches
 
 Subscribes `/blueboat/odom`; publishes `/mavros/global_position/compass_hdg`
 (`Float64`), `/mavros/imu/data` (`Imu`), `/mavros/local_position/pose`
-(`PoseStamped`). Only needed for tooling written against MAVROS names; the sonar
-interface does not need it (vehicle heading is inside every `OmniscanProfile`).
+(`PoseStamped`), and `/mavros/global_position/global` (`NavSatFix`,
+BEST_EFFORT sensor-data QoS, throttled to ~5 Hz) — synthesized from the ENU
+position about the node parameters `sim_origin_lat` / `sim_origin_lon`
+(equirectangular inverse; defaults 43.6961 / 7.3080, matching the GCS `--sim`
+origin). The NavSatFix + compass pair is what lets the BlueBoat GCS's
+GPS-anchored map anchor against the simulator exactly as against the real
+boat, which is why `sss_sim_launch.py` now defaults `with_mavros_shim` to
+**true** (pass `with_mavros_shim:=false` to drop the MAVROS names). The sonar
+interface itself still does not need it (vehicle heading is inside every
+`OmniscanProfile`).
 
 ### 3.5 CLI entry points
 

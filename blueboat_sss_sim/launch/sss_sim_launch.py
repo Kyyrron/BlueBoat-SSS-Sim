@@ -15,7 +15,11 @@ Arguments
 mission_dir     mission bundle directory (from `generate_mission`); provides
                 scene, sonar config and trajectory. Required.
 with_recorder   also run the YOLO dataset recorder            (default false)
-with_mavros_shim  republish heading/imu under MAVROS names    (default false)
+with_mavros_shim  republish heading/imu/GPS under MAVROS names (default true;
+                  the BlueBoat GCS's GPS-anchored map needs
+                  /mavros/global_position/global + compass_hdg to anchor)
+sim_origin_lat  geographic latitude of the ENU world origin   (default 43.6961)
+sim_origin_lon  geographic longitude of the ENU world origin  (default 7.3080)
 with_mission_path run the RequestPath mission service         (default false)
                   (leave false if another path_generation runs;
                   the two serve the same service name)
@@ -51,7 +55,9 @@ ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
 
 sl.declare_arg("mission_dir", default_value="")
 sl.declare_arg("with_recorder", default_value=False)
-sl.declare_arg("with_mavros_shim", default_value=False)
+sl.declare_arg("with_mavros_shim", default_value=True)
+sl.declare_arg("sim_origin_lat", default_value=43.6961)
+sl.declare_arg("sim_origin_lon", default_value=7.3080)
 sl.declare_arg("with_mission_path", default_value=False)
 sl.declare_arg("dataset_dir", default_value="")
 sl.declare_arg("auto_ping", default_value=True)
@@ -110,7 +116,9 @@ def launch_setup():
                 parameters={"output_dir": dataset_dir})
 
     if sl.arg("with_mavros_shim"):
-        sl.node("blueboat_sss_sim", "mavros_shim_node")
+        sl.node("blueboat_sss_sim", "mavros_shim_node",
+                parameters={"sim_origin_lat": sl.arg("sim_origin_lat"),
+                            "sim_origin_lon": sl.arg("sim_origin_lon")})
 
     if sl.arg("with_mission_path"):
         sl.node("blueboat_sss_sim", "sss_path_generation", output="screen",
