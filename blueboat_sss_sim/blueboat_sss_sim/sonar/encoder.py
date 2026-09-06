@@ -60,11 +60,15 @@ assert set(ANALOG_GAIN_TABLE) == set(range(MAX_GAIN_INDEX + 1))
 def gain_step_db(gain_index: int) -> float:
     """Receive gain at ``gain_index``, in dB relative to the calibration index.
 
-    The ladder is the device's own reported ``analog_gain``, so this replaces
-    the flat per-index dB step the model used to assume: the measured ratios
-    are +2.82, +2.29 and +2.83 dB across 4->5->6->7, not a constant.
+    The ladder is the device's own reported ``analog_gain``, an *amplitude*
+    gain: the reported-dB axis moves by ``20 log10`` of its ratio. MEASURED
+    on the corpus receiver floor (the far decile of the 72-126 m files,
+    where nothing but noise is left): the floor steps +5.6 / +4.6 / +5.7 dB
+    across 4->5->6->7, against 20 log10 of the table = +5.65 / +4.58 /
+    +5.67. (A 10 log10 step, +2.8 dB, was the earlier assumption; it does
+    not reproduce the floor shift.)
     """
-    return 10.0 * np.log10(ANALOG_GAIN_TABLE[gain_index]
+    return 20.0 * np.log10(ANALOG_GAIN_TABLE[gain_index]
                            / ANALOG_GAIN_TABLE[CALIBRATION_GAIN_INDEX])
 
 
@@ -108,6 +112,22 @@ class PingEncoder:
         self._channel = side.channel
         self._ping_number = 0
         self._frame_id = f"sss_{side.value}_link"
+
+    def reconfigure(self, acquisition: AcquisitionParams,
+                    model: SonarModelConfig) -> None:
+        """Apply new acquisition/model settings without touching the counter.
+
+        The real device numbers pings from power-up; a ping-enable cycle (or
+        a range change) never restarts its counter. The simulator's node
+        keeps one encoder per side for its whole life and reconfigures it
+        here on every enable.
+        """
+        self._acq = acquisition
+        self._cfg = model
+
+    @property
+    def ping_number(self) -> int:
+        return self._ping_number
 
     # ------------------------------------------------------------------
     def encode(self, ping: Ping, gain_multiplier: float = 1.0) -> EncodedPing:

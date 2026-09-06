@@ -1,20 +1,24 @@
-"""``mission_metrics`` CLI: a mission bundle -> detection metrics.
+"""``mission_metrics`` CLI: a world folder + trajectory -> detection metrics.
 
 Three sources, one metric path::
 
-    # The bundle's own trajectory, deterministic from the seed
-    python3 -m blueboat_sss_sim.analysis.cli --bundle ~/runs/r3 --out ~/metrics/r3
+    # Replay a trajectory over a world, deterministic from the seed
+    python3 -m blueboat_sss_sim.analysis.cli --world ~/worlds/beach/w1 \\
+        --trajectory ~/.config/blueboat_mcs/trajectories/beach.yaml \\
+        --out ~/metrics/w1
 
     # The path a real run actually tracked
-    python3 -m blueboat_sss_sim.analysis.cli --bundle ~/runs/r3 \\
-        --source svlog --input run.svlog --out ~/metrics/r3_real
+    python3 -m blueboat_sss_sim.analysis.cli --world ~/worlds/beach/w1 \\
+        --source svlog --input run.svlog --out ~/metrics/w1_real
 
     # What the node actually published (no pose, so no aspect)
-    python3 -m blueboat_sss_sim.analysis.cli --bundle ~/runs/r3 \\
-        --source jsonl --input contacts.jsonl --out ~/metrics/r3_pub
+    python3 -m blueboat_sss_sim.analysis.cli --world ~/worlds/beach/w1 \\
+        --source jsonl --input contacts.jsonl --out ~/metrics/w1_pub
 
-Reads the bundle and the recording; writes only into ``--out``. Bundles and
-recordings are write-once (CM-7 / NC #10).
+A legacy mission bundle still works: its frozen ``trajectory.yaml`` and
+``sonar.yaml`` are the defaults when ``--trajectory``/``--sonar`` are not
+given. Reads the world and the recording; writes only into ``--out``.
+Worlds and recordings are write-once (CM-7 / NC #10).
 """
 
 from __future__ import annotations
@@ -32,8 +36,15 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--bundle", required=True,
-                    help="mission bundle directory (scene.npz + manifest)")
+    ap.add_argument("--world", "--bundle", dest="bundle", required=True,
+                    help="world folder or legacy mission bundle "
+                         "(scene.npz + manifest)")
+    ap.add_argument("--trajectory", default=None,
+                    help="trajectory YAML to replay (required for a world "
+                         "folder; legacy bundles carry their own)")
+    ap.add_argument("--sonar", default=None,
+                    help="sonar profile YAML (default: the bundle's frozen "
+                         "copy, else the package default)")
     ap.add_argument("--out", required=True,
                     help="output directory for metrics.json / metrics.md")
     ap.add_argument("--source", default="replay",
@@ -52,12 +63,13 @@ def main() -> None:
 
     bundle = Path(args.bundle)
     if args.source == "replay":
-        obs = from_replay(bundle, max_pings=args.max_pings)
+        obs = from_replay(bundle, max_pings=args.max_pings,
+                          trajectory=args.trajectory, sonar_yaml=args.sonar)
     else:
         if not args.input:
             ap.error(f"--input is required for --source {args.source}")
-        obs = (from_svlog(args.input, bundle) if args.source == "svlog"
-               else from_jsonl(args.input))
+        obs = (from_svlog(args.input, bundle, sonar_yaml=args.sonar)
+               if args.source == "svlog" else from_jsonl(args.input))
 
     scene = SceneModel.load(bundle)
     m = compute_metrics(obs, scene, criterion=args.criterion,

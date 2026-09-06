@@ -47,6 +47,10 @@ import numpy as np
 from ..core.geometry import (reflect_direction_across_line,
                              reflect_point_across_line)
 from ..core.types import Pose3D, Side, Wall
+from .config import OMNISCAN_FREQ_HZ, SPEED_OF_SOUND_MPS
+
+#: Acoustic wavenumber at the Omniscan's frequency [rad/m] (~1900).
+WAVENUMBER = 2.0 * np.pi * OMNISCAN_FREQ_HZ / SPEED_OF_SOUND_MPS
 
 #: Name carried by the water-surface image on ground-truth contacts.
 SURFACE_NAME = "surface"
@@ -73,8 +77,9 @@ class MirrorSource:
     fwd: float                    # world-frame along-track angle [rad]
     depression_sign: float
     roll_toward_side: float
-    gain: float
+    gain: float                   # two bounces: reflectivity^2 * wall_gain
     wall: Optional[Wall] = None
+    gain_single: float = 0.0      # one bounce: reflectivity * wall_gain
 
 
 def mirror_sources(walls: list[Wall], sensor: Pose3D, side: Side,
@@ -100,6 +105,16 @@ def mirror_sources(walls: list[Wall], sensor: Pose3D, side: Side,
         signed = (sensor.x - w.x0) * nx + (sensor.y - w.y0) * ny
         if abs(signed) > range_max_m:
             continue
+        # Finite segment: a wall whose nearest *point* (not plane) lies
+        # beyond the window reflects nothing into it either. A curved quay
+        # flattened into a dozen short chords would otherwise keep every
+        # chord's infinite plane alive and cost a mirror render each.
+        ux, uy = w.unit
+        s = (sensor.x - w.x0) * ux + (sensor.y - w.y0) * uy
+        s = min(max(s, 0.0), w.length)
+        if np.hypot(sensor.x - (w.x0 + s * ux),
+                    sensor.y - (w.y0 + s * uy)) > range_max_m:
+            continue
         # A fan pointing away from the wall never bounces off it. The mirror
         # image of such a fan looks away from the basin, so every sample of it
         # would fail the crossing test -- cull it here instead of paying for a
@@ -122,7 +137,11 @@ def mirror_sources(walls: list[Wall], sensor: Pose3D, side: Side,
             fwd=float(np.arctan2(fy, fx)),
             depression_sign=1.0,          # a vertical plane keeps the tilt
             roll_toward_side=-roll_toward,  # handedness flips with the frame
-            gain=float(w.reflectivity * wall_gain),
+            # The folded path meets the face twice (out and back), so the
+            # image carries the per-bounce reflectivity squared; the
+            # single-bounce band (seabed -> face -> transducer) once.
+            gain=float(w.reflectivity ** 2 * wall_gain),
+            gain_single=float(w.reflectivity * wall_gain),
             wall=w))
 
     if surface_enabled and surface_reflectivity > 0.0:
@@ -167,8 +186,33 @@ def crossing_mask(wall: Wall, origin: Pose3D, px: np.ndarray, py: np.ndarray,
     cz = origin.z + t * (pz - origin.z)
     s = (cx - wall.x0) * ux + (cy - wall.y0) * uy
     within = (s >= 0.0) & (s <= wall.length)
-    below_top = cz <= wall.top_z
-    return opposite & inside_segment & within & below_top
+    # Between the face's bottom and its top: a quay reaches the seabed, a
+    # pontoon stops at its draft and lets the ray under it.
+    on_face = (cz <= wall.top_z) & (cz >= wall.z_bottom)
+    return opposite & inside_segment & within & on_face
+
+
+def bounce_weight(wall: Wall, origin: Pose3D, px: np.ndarray, py: np.ndarray,
+                  pz: np.ndarray, diffuse_fraction: float) -> np.ndarray:
+    """Energy fraction of **one** bounce surviving the face's roughness.
+
+    The coherent (mirror) part of a reflection off a rough face falls with
+    the Rayleigh roughness parameter ``Gamma = 2 k sigma_h cos(theta)``,
+    ``theta`` the angle from the face normal, as ``exp(-Gamma^2)`` in power
+    (Eckart 1953, Urick 1983 ch. 5). At 450 kHz (k ~ 1900 rad/m) a
+    millimetre-rough quay keeps its mirror only near grazing -- which is
+    exactly the band just beyond the face, where the mirrored seabed sits.
+    The rest is scattered incoherently; ``diffuse_fraction`` is the share of
+    it that still reaches the mirror geometry (lumped, set against the
+    corpus: docs/sonar_model.md section 11).
+    """
+    nx, ny = wall.normal
+    dx, dy, dz = px - origin.x, py - origin.y, pz - origin.z
+    norm = np.sqrt(dx * dx + dy * dy + dz * dz)
+    cos_face = np.abs(dx * nx + dy * ny) / np.maximum(norm, 1e-9)
+    gamma = 2.0 * WAVENUMBER * float(wall.roughness_m) * cos_face
+    coherent = np.exp(-gamma * gamma)
+    return coherent + float(diffuse_fraction) * (1.0 - coherent)
 
 
 def point_crosses(wall: Wall, origin: Pose3D, x: float, y: float,

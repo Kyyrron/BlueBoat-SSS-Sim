@@ -15,7 +15,25 @@ Namespace: node name `side_scan_sonar` → private topics resolve under
 | `/side_scan_sonar/ping/enable` | `std_msgs/Bool` | sub | `true` start / `false` stop; params re-read on every enable |
 | `/side_scan_sonar/ground_truth/contacts` | `std_msgs/String` (JSON) | pub | **simulation-only extra**, additive |
 | `/blueboat/odom` | `nav_msgs/Odometry` | sub | pose source (parameter `odom_topic`) |
-| `/mission/full_path` | `nav_msgs/Path` | pub (latched) | complete mission for RViz, from `sss_path_generation` (set the display's Durability to Transient Local) |
+
+`sea_state_node` (simulation only, on by default in the launches since
+2026-09-03 — `docs/sea_state_model.md`):
+
+| Topic | Type | Dir | Notes |
+|---|---|---|---|
+| `/current` | `geometry_msgs/Vector3` | pub | world-frame water velocity (current + wave orbital), bridged to gz `/ocean_current` for the boat's `Hydrodynamics` plugin; exact zeros for the null preset |
+| `/world/<w>/wrench` | `ros_gz_interfaces/EntityWrench` | pub | one-shot wave wrench per physics step on the boat model, bridged to gz `ApplyLinkWrench`; nothing is published while waves are calm |
+| `/world/<w>/wrench/clear` | `ros_gz_interfaces/Entity` | pub | hygiene at start/stop |
+| `/sim/sea_state` | `std_msgs/String` (JSON) | pub | 2 Hz, **TRANSIENT_LOCAL depth 1** (latched): `{t_sim, current{preset,label,mean_speed_mps,from_deg,from,toward,instant{speed_mps,from_deg,vx,vy}}, waves{preset,label,douglas,hs_m,tp_s,from_deg,from,toward,eta_m,status: active|calm|idle|unavailable,reason,events_per_hour,event: null|{hs_m,tp_s,from_deg,t_remaining_s,envelope}}, water_velocity[3], wrench{fz,mx,my,fx,fy,mz}, blend, schedule{name,keyframes,interpolation,t_s,next_t_sim,next}, summary, wrench_messages, pose_age_ms}` — what the MCS "SEA STATE" box shows (`fx,fy,mz` and `pose_age_ms` are additive since 2026-09-05) |
+| `/sim/sea_state/command` | `std_msgs/String` (JSON) | sub | `{"current": {"preset"|"speed_mps",…,"from_deg"}, "waves": {…}, "ramp_s": 20}` or `{"schedule": <blueboat_sea_schedule/1 doc>, "t0": "now"}`; the node ramps, never steps |
+| `/sim/sea_state/markers` | `visualization_msgs/MarkerArray` | pub | RViz arrows + text (the Gazebo GUI gets the same through `gz service /marker_array`) |
+
+`mavros_shim_node` additionally republishes odom-derived navigation under
+MAVROS names (`/mavros/global_position/global` — NavSatFix about the
+world's GPS anchor, ~5 Hz, BEST_EFFORT — plus `compass_hdg`, `imu/data`,
+`local_position/pose`). This package serves **no** `/path_request`
+service: `blueboat_control`'s `path_generation` is the only server
+(missions belong to MCS/Control).
 
 QoS on all sonar pubs: BEST_EFFORT, KEEP_LAST, depth 10 — identical to the
 real node (subscribers must match reliability).
@@ -46,9 +64,11 @@ an attempt to mirror the real node's defaults, which match neither survey
 setting the project uses (`project_synthesis.md` §8.5 reserves 30 m for
 coverage passes, 15 m for revisit passes). Comparability rests on the
 acquisition being **explicit**, not on equal defaults: `sss_sim_launch.py`
-passes all six from the mission bundle's frozen `sonar.yaml`, each overridable
-per run (`gain_index:=-1`, `range_length_mm:=30000`, …), and the node warns at
-every enable when what is in force differs from what the bundle records.
+passes all six from the resolved sonar profile (explicit `sonar_config:=` >
+a legacy bundle's frozen `sonar.yaml` > `config/default_sonar.yaml`), each
+overridable per run (`gain_index:=-1`, `range_length_mm:=30000`, …), and
+the node warns at every enable when what is in force differs from what the
+named profile records.
 
 `gain_index: -1` carries the real device's meaning — auto-gain. It is a
 **command-only** sentinel: the profile's `gain_index` is `uint16`, so the
@@ -63,6 +83,16 @@ express most real acquisitions; 0–3 are unmeasured estimates.
 
 Simulation-only: `scene_dir` (required), `sonar_config`, `odom_topic`,
 `publish_ground_truth`, `seed`.
+
+`sea_state_node` parameters: `current`, `current_from_deg`, `waves`,
+`waves_from_deg` (preset names from `config/sea_states.yaml` + compass
+FROM bearings), `schedule_file`, `seed`, `rate_hz` (100 = the physics
+rate), `max_step_size` (read from the world's `world.sdf` when `world_dir`
+is given), `world_name` ("" = discover), `world_dir` (mean depth from
+`depth.npz`, physics step), `depth_m`, `target_entity` (`blueboat`),
+`target_entity_type`, `presets_file`, `enable_waves`, `enable_gz_markers`,
+`marker_arrow_axis`, `ramp_s`, `odom_topic`. The launch files set them
+from `sea_*` arguments (`docs/sea_state_model.md` §8).
 
 ## 3. OmniscanProfile fields
 
@@ -143,5 +173,5 @@ bundle generated before wall multipath existed should default them
 (`ghost` false, `via` empty). Aggregate on `(object_id, via)`, never
 `object_id` alone, or an object merges with its own ghost.
 
-Consumed by `dataset_recorder_node` for auto-labeling and by
-`analysis.contacts.from_jsonl`; ignorable by everything else.
+Consumed by `analysis.contacts.from_jsonl` (dump the topic to JSONL for
+`mission_metrics --source jsonl`); ignorable by everything else.

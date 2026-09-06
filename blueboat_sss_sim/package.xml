@@ -4,9 +4,12 @@
   <name>blueboat_sss_sim</name>
   <version>1.0.0</version>
   <description>
-    Synthetic Side Scan Sonar experimentation platform for the BlueBoat USV
-    simulator: procedural world generation, drop-in simulated Omniscan 450
-    interface, mission generation and automatic YOLO dataset export.
+    Synthetic Side Scan Sonar platform for the BlueBoat USV: a GUI world
+    builder producing GPS-anchored Gazebo worlds (anchored to MCS survey
+    paths, with authored bathymetry, reflective walls and a litter-object
+    catalog), plus a drop-in simulated Omniscan 450 interface. The world
+    builder GUI additionally needs PySide6 (pip, no rosdep key); everything
+    else runs without it.
   </description>
   <maintainer email="killian.bertrand2002@gmail.com">Killian BERTRAND</maintainer>
   <license>Apache-2.0</license>

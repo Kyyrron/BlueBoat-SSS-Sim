@@ -41,9 +41,9 @@ from typing import Iterator, Optional
 import numpy as np
 
 from ..core.geometry import enu_yaw_to_compass_deg
+from ..core.trajectory import load_trajectory
 from ..core.types import Pose3D, Side
-from ..mission.patterns import WaypointTrajectory
-from ..sonar.config import SonarConfig
+from ..sonar.config import SonarConfig, find_default_sonar_yaml
 from ..sonar.renderer import GeometricRenderer
 from ..worldgen.scene import SceneModel
 
@@ -100,10 +100,38 @@ def _look_heading_deg(pose: Pose3D, side: Side) -> float:
     return float((enu_yaw_to_compass_deg(pose.yaw) - side.sign * 90.0) % 360.0)
 
 
-def _renderer_for(bundle: Path) -> tuple[SceneModel, SonarConfig,
-                                         GeometricRenderer]:
-    scene = SceneModel.load(bundle)
-    cfg = SonarConfig.from_yaml(bundle / "sonar.yaml")
+def resolve_sonar_yaml(world_dir: Path,
+                       sonar_yaml: str | Path | None = None) -> Path:
+    """The sonar profile for a world: explicit > the directory's own frozen
+    ``sonar.yaml`` (legacy mission bundles) > the package default."""
+    if sonar_yaml:
+        return Path(sonar_yaml)
+    frozen = world_dir / "sonar.yaml"
+    if frozen.exists():
+        return frozen
+    return find_default_sonar_yaml()
+
+
+def resolve_trajectory(world_dir: Path,
+                       trajectory: str | Path | None = None) -> Path:
+    """The trajectory file for a replay: explicit > the directory's own
+    ``trajectory.yaml`` (legacy mission bundles). World folders carry no
+    trajectory -- missions belong to MCS -- so one must be named."""
+    if trajectory:
+        return Path(trajectory)
+    frozen = world_dir / "trajectory.yaml"
+    if frozen.exists():
+        return frozen
+    raise FileNotFoundError(
+        f"{world_dir} carries no trajectory.yaml -- pass the trajectory "
+        "file to replay (an MCS blueboat_trajectory/1 YAML or a "
+        "waypoints/speed YAML)")
+
+
+def _renderer_for(world_dir: Path, sonar_yaml: str | Path | None = None
+                  ) -> tuple[SceneModel, SonarConfig, GeometricRenderer]:
+    scene = SceneModel.load(world_dir)
+    cfg = SonarConfig.from_yaml(resolve_sonar_yaml(world_dir, sonar_yaml))
     return scene, cfg, GeometricRenderer(scene, cfg.acquisition, cfg.model)
 
 
@@ -120,6 +148,10 @@ def _observations_at(renderer: GeometricRenderer, pose: Pose3D, side: Side,
     """
     look = _look_heading_deg(pose, side)
     for c in renderer.render(side, pose, t).contacts:
+        if c.object_type == "wall":
+            # A wall face's own echo is ground truth for the image, not a
+            # litter target: it has no manifest entry and no detection metric.
+            continue
         yield ContactObservation(
             object_id=c.object_id, object_type=c.object_type, side=c.side,
             ping_number=ping_number, t_sim=t, slant_range_m=c.slant_range_m,
@@ -129,18 +161,22 @@ def _observations_at(renderer: GeometricRenderer, pose: Pose3D, side: Side,
 
 
 # ------------------------------------------------------------------ sources
-def from_replay(bundle: str | Path, max_pings: int | None = None
-                ) -> ObservationSet:
-    """Replay the bundle's own trajectory through the renderer.
+def from_replay(bundle: str | Path, max_pings: int | None = None,
+                trajectory: str | Path | None = None,
+                sonar_yaml: str | Path | None = None) -> ObservationSet:
+    """Replay a trajectory over a world folder through the renderer.
 
-    Deterministic: same bundle in, same observations out, byte for byte.
-    ``max_pings`` caps the number of ping cycles (both sides per cycle), which
-    is what keeps the smoke test's run inside its time budget; ``None`` walks
-    the whole mission.
+    Deterministic: same world + trajectory in, same observations out, byte
+    for byte. ``trajectory`` names the path to fly (either project schema;
+    a legacy bundle's own ``trajectory.yaml`` is the fallback) and
+    ``sonar_yaml`` the acquisition profile (default: the frozen bundle
+    copy, else the package default). ``max_pings`` caps the number of ping
+    cycles (both sides per cycle), which is what keeps the smoke test's
+    run inside its time budget; ``None`` walks the whole mission.
     """
     bundle = Path(bundle)
-    scene, cfg, renderer = _renderer_for(bundle)
-    traj = WaypointTrajectory.load_yaml(bundle / "trajectory.yaml")
+    scene, cfg, renderer = _renderer_for(bundle, sonar_yaml)
+    traj = load_trajectory(resolve_trajectory(bundle, trajectory))
     period = cfg.acquisition.ping_period_s(cfg.model.max_ping_rate_hz)
 
     n = int(traj.duration / period)
@@ -161,7 +197,8 @@ def from_replay(bundle: str | Path, max_pings: int | None = None
                f"{traj.name} {traj.total_length:.0f} m")
 
 
-def from_svlog(path: str | Path, bundle: str | Path) -> ObservationSet:
+def from_svlog(path: str | Path, bundle: str | Path,
+               sonar_yaml: str | Path | None = None) -> ObservationSet:
     """Re-derive contacts along the pose track recorded in a ``.svlog``.
 
     The log supplies where the vehicle actually was and where each transducer
@@ -172,7 +209,7 @@ def from_svlog(path: str | Path, bundle: str | Path) -> ObservationSet:
     from . import svlog_reader                     # local: keeps import cheap
 
     path, bundle = Path(path), Path(bundle)
-    scene, _cfg, renderer = _renderer_for(bundle)
+    scene, _cfg, renderer = _renderer_for(bundle, sonar_yaml)
     profiles, paired = svlog_reader.pose_track(path)
 
     obs: list[ContactObservation] = []
@@ -208,6 +245,8 @@ def from_jsonl(path: str | Path) -> ObservationSet:
             cycles += 1
             t = float(doc.get("t_sim", 0.0))
             for c in doc.get("contacts", []):
+                if str(c.get("type")) == "wall":
+                    continue                     # wall face echo, not a target
                 obs.append(ContactObservation(
                     object_id=int(c["object_id"]),
                     object_type=str(c["type"]),

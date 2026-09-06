@@ -10,12 +10,13 @@
 
 
 Drop-in file replacements for `blueboat_sss_sim` (paths relative to the
-package root). Rebuild and **regenerate the mission bundle** (the bundle
-carries a copy of `sonar.yaml`, so old bundles keep the old model):
+package root). Rebuild and **regenerate the world** (a legacy bundle
+carries a frozen copy of `sonar.yaml`, so old bundles keep the old model;
+worlds built by the builder resolve the package profile at launch):
 
 ```bash
 colcon build --packages-select blueboat_sss_sim && source install/setup.bash
-ros2 run blueboat_sss_sim generate_mission --config ... --out ~/runs/r2
+ros2 run blueboat_sss_sim world_builder     # or generate_world --config ...
 ```
 
 Each task was analyzed against the ground truth available in this project

@@ -10,11 +10,11 @@ warning prefers over a binary rate.
 The point is timing: every one of these can be computed **before** a field
 session, which is the project's scarcest resource (root ``CLAUDE.md`` CM-14).
 
-Layering: like ``core/``, ``worldgen/``, ``sonar/``, ``dataset/`` and
-``mission/``, this package imports **no ROS**. The ``.svlog`` reader parses a
-documented byte format rather than importing anything from ``BlueBoat-SSS``
-(CM-3 / NC #8), and every entry point is read-only: bundles and recordings are
-write-once (CM-7 / NC #10).
+Layering: like ``core/``, ``worldgen/`` and ``sonar/``, this package
+imports **no ROS**. The ``.svlog`` reader parses a documented byte format
+rather than importing anything from ``BlueBoat-SSS`` (CM-3 / NC #8), and
+every entry point is read-only: worlds and recordings are write-once
+(CM-7 / NC #10).
 
 Results derived here are simulation-derived and are reported as such
 (CM-13); they support the policy comparison, never an unqualified empirical
@@ -29,6 +29,8 @@ from .contacts import (ContactObservation, from_jsonl, from_replay,
 from .metrics import (CRITERIA, DetectionCriterion, MissionMetrics,
                       compute_metrics)
 from .report import write_report
+from .svlog_compare import (FileStats, SubsetStats, reduce_file,
+                            compare as compare_svlogs, write_compare)
 
 __all__ = [
     "ContactObservation", "from_replay", "from_svlog", "from_jsonl",
@@ -37,4 +39,5 @@ __all__ = [
     "REDUCTION_FLOOR_DB",
     "DetectionCriterion", "CRITERIA", "MissionMetrics", "compute_metrics",
     "write_report",
+    "FileStats", "SubsetStats", "reduce_file", "compare_svlogs", "write_compare",
 ]

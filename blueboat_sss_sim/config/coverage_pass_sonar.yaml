@@ -38,11 +38,11 @@ model:
   vertical_aperture_deg: 50.0   # spec: 50 deg beam height
   horizontal_aperture_deg: 0.5  # spec: 0.5 deg along-track beam
 
-  # Timing -- spec-sheet cap vs field capture (documented tension):
-  # the Omniscan 450 spec lists max ping rate 20 Hz; the team's own field
-  # capture shows 22 ms (45 Hz) free-run per channel at 15 m. Default
-  # follows the spec (period = 50 ms at 15 m); set 0 to disable the cap
-  # and reproduce the captured device behaviour.
+  # Timing -- the device law, MEASURED on all seven corpus recordings:
+  # period = max(50 ms, 2R/c + 3 ms). 20 pings/s up to 30 m (18.4 m and
+  # 20 m files sit at exactly 50 ms), range-limited beyond (54 ms at 38 m,
+  # 131 ms at 95.6 m, 170 ms at 125.6 m), as the spec sheet states. This
+  # is the 20 Hz cap; 0 disables it (experiment knob only).
   max_ping_rate_hz: 20.0
 
   # Acoustics
@@ -66,8 +66,13 @@ model:
                                 # far steadier than diffuse speckle, which is
                                 # what lets bottom tracking lock ping-to-ping
   pulse_smearing: true          # convolve pings with the c*tau/2 range
-                                # resolution (~3 bins) like the real
-                                # matched-filter output
+                                # resolution like the real matched-filter
+                                # output; the pulse follows the device law
+                                # (1.2-1.5 sample periods, 44 us floor)
+  range_filter_bins: 3          # receive-chain envelope floor on that
+                                # kernel (corpus lag-1 range correlation
+                                # 0.30-0.68; a 3-bin boxcar on the complex
+                                # field gives ~0.35)
   # Along-track 0.5 deg beam: ground lines integrated across the azimuth
   # footprint (odd number; 1 = legacy infinitesimal-beam behaviour)
   alongtrack_beam_lines: 5
@@ -88,10 +93,43 @@ model:
   speckle: true
   speckle_looks: 1            # 1 = fully-developed (Rayleigh-amplitude)
                               # speckle; >1 = smoother multi-look Gamma
+  # Single-look speckle comes from a ground-fixed scatterer field (a random
+  # phasor per ground cell, summed coherently per bin, pulse convolved on the
+  # complex field): the bin statistic is Exp(1) as before, but the texture is
+  # correlated along range (pulse) and along track (footprint overlap) as the
+  # corpus measures (lag-1 0.3-0.7 both ways). false = legacy per-bin draw.
+  coherent_scatterers: true
+  scatterer_cell_m: 0.01      # seed-class parameter: changing it changes
+                              # every image
+  scatterer_seed: 0
+  # Direct wall echo (closes the former assumption A9): a quay's wet face
+  # returns a bright coherent line at its own slant range and occludes the
+  # seabed behind it. Strict no-op without walls; strength not
+  # corpus-determined (no wall geometry ground truth in the corpus).
+  wall_echo_enabled: true
+  wall_echo_strength: 30.0
+  wall_echo_obliquity_floor: 0.1
+  # Wall face + multipath fidelity (2026-09-03, anchored on the
+  # fullHarbourCleanExample quay: face +21 dB over the seabed before it,
+  # 1.5-4 m beyond ~-12 dB, 6-12 m beyond ~-23 dB -- docs/sonar_model.md
+  # section 11). Ghosts carry reflectivity^2 (two bounces) times the
+  # Rayleigh roughness law; the single-bounce band folds the seabed in
+  # front of a quay into the strip just beyond its face.
+  wall_face_diffuse: 0.5
+  wall_pontoon_specular: 0.15
+  wall_corner_gain: 1.0
+  wall_diffuse_fraction: 0.04
   # Fitted as one number with the range law: puts the water column 26 dB below
   # the bottom return, as the corpus does across three range settings.
-  noise_floor: 6.79e-07
-  watercolumn_noise: 6.79e-07   # keep well below the FBR peak
+  # MEASURED separately on the corpus at gain 4 (2026-09-02). The receiver
+  # floor is the far decile of the 72-126 m recordings, -6.1 dB reported
+  # (mean of dB; -3.6 dB as the linear mean this constant is); the water
+  # column is the 1-3 m band, 25.3 dB reported (27.8 dB linear mean). Both
+  # are `10**((level - calibration_db_offset)/10)`. The former single fitted
+  # value (6.79e-7, 38.5 dB) never reached the real floor and hid the range
+  # law beyond ~20 m.
+  noise_floor: 8.3e-11
+  watercolumn_noise: 1.15e-07   # 40 dB under the FBR peak
   # Radiometric/link degradations are deferred to the downstream
   # augmentation stage per the tuning request -- OFF in the base model
   # (set >0 to re-enable here):

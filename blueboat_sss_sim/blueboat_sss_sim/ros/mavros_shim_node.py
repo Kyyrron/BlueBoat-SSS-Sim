@@ -63,6 +63,12 @@ class MavrosShimNode(Node):
             QoSPresetProfiles.SENSOR_DATA.value)
         self._last_fix_stamp = -1e18
 
+        # The whole node is driven by this subscription -- without it every
+        # publisher above stays silent (that exact regression shipped once).
+        self.create_subscription(
+            Odometry, str(self.get_parameter("odom_topic").value),
+            self._on_odom, 10)
+
     def _on_odom(self, msg: Odometry) -> None:
         q = msg.pose.pose.orientation
         _, _, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)

@@ -1,0 +1,24 @@
+# Example sea-state timeline for the simulated BlueBoat.
+#
+# Pass it at launch (full_mission_launch.py / sea_state_launch.py
+# sea_schedule:=<this file>) or send it live on /sim/sea_state/command as
+# {"schedule": <this document>, "t0": "now"}. t_s is seconds since the
+# schedule origin (launch, or the moment the command arrives). Between
+# keyframes the numeric fields are interpolated linearly ("hold" keeps each
+# keyframe until the next); every block takes a preset name from
+# config/sea_states.yaml plus a from-direction (degrees or a compass name),
+# or explicit fields (speed_mps, hs_m, tp_s, ...) for a custom state.
+format: blueboat_sea_schedule/1
+name: example_building_sea
+seed: 7
+interpolation: linear
+keyframes:
+  - t_s: 0
+    current: {preset: weak, from: NE}
+    waves: {preset: rippled, from: E}
+  - t_s: 300
+    current: {preset: moderate, from: NE}
+    waves: {preset: smooth, from: E}
+  - t_s: 900
+    current: {preset: strong, from_deg: 60}
+    waves: {preset: slight, from_deg: 100}

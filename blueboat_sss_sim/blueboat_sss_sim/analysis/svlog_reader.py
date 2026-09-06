@@ -9,10 +9,21 @@ module reads the two packet kinds the metrics need and ignores the rest:
   Decoded by :func:`blueboat_sss_sim.sonar.encoder.parse_frame`, the same
   function the simulator's own round-trip oracle uses.
 * **id 150** mavlink2rest JSON envelope. ``LOCAL_POSITION_NED`` messages carry
-  the vehicle position track on the *autopilot* ``time_boot_ms`` clock.
+  the vehicle position track on the *autopilot* ``time_boot_ms`` clock;
+  ``GLOBAL_POSITION_INT`` the GPS fixes (lat/lon degE7, ``hdg`` cdeg) and
+  ``ATTITUDE`` roll/pitch/yaw, on the same clock.
 
 Together those give a per-ping pose: position interpolated from id-150,
 heading straight off the ping itself.
+
+**Two clock regimes.** A SonarView-native recording carries a live
+``time_boot_ms`` (25 Hz in the field corpus); a recording written by
+``sss_processor_node`` carries **one frozen value** on every envelope (3
+of the 7 corpus files). On a frozen clock no skew can be estimated and no
+interpolation is meaningful, so :func:`pose_track` / :func:`gps_track`
+pair every profile with the most recent fix **in file order** instead --
+the rule the GCS's own loader applies -- and :class:`SvlogStreams`
+reports ``clock_frozen`` so a consumer can say which regime it used.
 
 Scope, deliberately: this is **not** a general ``.svlog`` loader. The GCS owns
 that (``blueboat_gcs/core/svlog.py``), including per-segment counter offsets,
@@ -91,6 +102,12 @@ class ProfileRecord:
     max_pwr_db: float = 0.0
     pwr_results: np.ndarray | None = field(default=None, compare=False, repr=False)
 
+    # --- always populated (cheap header fields) ----------------------------
+    transducer_heading_deg: float = 0.0
+    pulse_duration_sec: float = 0.0
+    #: Packet index in the file -- the only order a frozen clock leaves.
+    order: int = -1
+
 
 @dataclass(frozen=True)
 class PositionRecord:
@@ -100,6 +117,62 @@ class PositionRecord:
     x: float          # ENU east
     y: float          # ENU north
     z: float          # ENU up
+    order: int = -1   # packet index in the file
+
+
+@dataclass(frozen=True)
+class GpsRecord:
+    """An id-150 ``GLOBAL_POSITION_INT`` fix (degrees, metres)."""
+
+    order: int
+    time_boot_ms: int
+    lat: float
+    lon: float
+    alt_m: float
+    relative_alt_m: float
+    hdg_deg: float            # NaN when the autopilot reports 65535 / none
+    vx_mps: float
+    vy_mps: float
+
+
+@dataclass(frozen=True)
+class AttitudeRecord:
+    """An id-150 ``ATTITUDE`` sample (radians, rad/s)."""
+
+    order: int
+    time_boot_ms: int
+    roll: float
+    pitch: float
+    yaw: float
+    rollspeed: float
+    pitchspeed: float
+    yawspeed: float
+
+
+@dataclass
+class SvlogStreams:
+    """Everything one ordered pass over a recording yields.
+
+    Iterating it gives ``(profiles, positions, skew_ms)`` so the historical
+    ``profiles, positions, skew = read_streams(path)`` unpacking keeps
+    working.
+    """
+
+    profiles: list[ProfileRecord]
+    positions: list[PositionRecord]
+    gps: list[GpsRecord]
+    attitude: list[AttitudeRecord]
+    skew_ms: int
+    #: ``time_boot_ms`` took a single value on every position / GPS
+    #: envelope: the skew is meaningless (reported 0) and consumers pair
+    #: by file order.
+    clock_frozen: bool
+    n_packets: int = 0
+
+    def __iter__(self):
+        yield self.profiles
+        yield self.positions
+        yield self.skew_ms
 
 
 # --------------------------------------------------------------- framing
@@ -154,9 +227,9 @@ def _side_from_packet(decoded: dict) -> Side:
     return Side.PORT if rel < 0.0 else Side.STARBOARD
 
 
-def read_streams(path: str | Path, with_power: bool = False
-                 ) -> tuple[list[ProfileRecord], list[PositionRecord], int]:
-    """One ordered pass over the file: profiles, positions, and the clock skew.
+def read_svlog(path: str | Path, with_power: bool = False) -> SvlogStreams:
+    """One ordered pass over the file: profiles, positions, GPS fixes,
+    attitude samples, the clock skew and the clock regime.
 
     The three come out of a single pass because the skew can only be estimated
     *in file order*. The sonar devices and the autopilot do not share a clock
@@ -171,14 +244,21 @@ def read_streams(path: str | Path, with_power: bool = False
 
     A log with no positions, or none interleaved with a profile, yields skew 0
     -- which is also the correct answer for a simulated log, whose two clocks
-    are the same sim clock.
+    are the same sim clock. A log whose ``time_boot_ms`` never changes (a
+    processor-written recording) also yields skew 0, with ``clock_frozen``
+    set: the votes would all be one meaningless constant.
     """
     profiles: list[ProfileRecord] = []
     positions: list[PositionRecord] = []
+    gps: list[GpsRecord] = []
+    attitude: list[AttitudeRecord] = []
     votes: list[int] = []
+    boot_values: set[int] = set()
     last_profile_ts: int | None = None
+    order = -1
 
     for pkt in iter_packets(path):
+        order += 1
         if pkt.packet_id == OS_MONO_PROFILE_ID:
             d = parse_frame(pkt.raw)
             last_profile_ts = int(d["timestamp_ms"])
@@ -199,6 +279,9 @@ def read_streams(path: str | Path, with_power: bool = False
                 ping_number=int(d["ping_number"]),
                 timestamp_ms=last_profile_ts,
                 vehicle_heading_deg=float(d["vehicle_heading_deg"]),
+                transducer_heading_deg=float(d["transducer_heading_deg"]),
+                pulse_duration_sec=float(d["pulse_duration_sec"]),
+                order=order,
                 **extra,
             ))
         elif pkt.packet_id == MAVLINK_WRAPPER_ID:
@@ -206,20 +289,70 @@ def read_streams(path: str | Path, with_power: bool = False
                 msg = json.loads(pkt.payload.decode("utf-8")).get("message", {})
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue                               # not our envelope shape
-            if msg.get("type") != "LOCAL_POSITION_NED":
-                continue
-            boot = int(msg["time_boot_ms"])
-            positions.append(PositionRecord(
-                time_boot_ms=boot,
-                x=float(msg["y"]),                     # NED east  -> ENU x
-                y=float(msg["x"]),                     # NED north -> ENU y
-                z=-float(msg["z"]),                    # NED down  -> ENU up
-            ))
+            mtype = msg.get("type")
+            try:
+                if mtype == "LOCAL_POSITION_NED":
+                    boot = int(msg["time_boot_ms"])
+                    positions.append(PositionRecord(
+                        time_boot_ms=boot,
+                        x=float(msg["y"]),             # NED east  -> ENU x
+                        y=float(msg["x"]),             # NED north -> ENU y
+                        z=-float(msg["z"]),            # NED down  -> ENU up
+                        order=order,
+                    ))
+                elif mtype == "GLOBAL_POSITION_INT":
+                    boot = int(msg["time_boot_ms"])
+                    hdg = msg.get("hdg")
+                    hdg_deg = (float("nan") if hdg is None or int(hdg) == 65535
+                               else float(hdg) / 100.0)
+                    gps.append(GpsRecord(
+                        order=order, time_boot_ms=boot,
+                        lat=float(msg["lat"]) / 1e7,
+                        lon=float(msg["lon"]) / 1e7,
+                        alt_m=float(msg.get("alt", 0)) / 1000.0,
+                        relative_alt_m=float(msg.get("relative_alt", 0)) / 1000.0,
+                        hdg_deg=hdg_deg,
+                        vx_mps=float(msg.get("vx", 0)) / 100.0,
+                        vy_mps=float(msg.get("vy", 0)) / 100.0,
+                    ))
+                elif mtype == "ATTITUDE":
+                    attitude.append(AttitudeRecord(
+                        order=order, time_boot_ms=int(msg["time_boot_ms"]),
+                        roll=float(msg["roll"]), pitch=float(msg["pitch"]),
+                        yaw=float(msg["yaw"]),
+                        rollspeed=float(msg.get("rollspeed", 0.0)),
+                        pitchspeed=float(msg.get("pitchspeed", 0.0)),
+                        yawspeed=float(msg.get("yawspeed", 0.0))))
+                    continue
+                else:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                continue                               # malformed message
+            boot_values.add(boot)
             if last_profile_ts is not None:
                 votes.append(last_profile_ts - boot)
 
-    skew = int(np.median(votes)) if votes else 0
-    return profiles, positions, skew
+    clock_frozen = bool(boot_values) and len(boot_values) <= 1
+    skew = int(np.median(votes)) if votes and not clock_frozen else 0
+    return SvlogStreams(profiles, positions, gps, attitude, skew,
+                        clock_frozen, n_packets=order + 1)
+
+
+def read_streams(path: str | Path, with_power: bool = False
+                 ) -> tuple[list[ProfileRecord], list[PositionRecord], int]:
+    """``(profiles, positions, skew_ms)`` -- see :func:`read_svlog`."""
+    s = read_svlog(path, with_power=with_power)
+    return s.profiles, s.positions, s.skew_ms
+
+
+def pair_by_order(profile_order: np.ndarray, item_order: np.ndarray
+                  ) -> np.ndarray:
+    """Index of the last item written *before* each profile (file order);
+    a profile preceding every item takes the first one."""
+    item_order = np.asarray(item_order)
+    idx = np.searchsorted(item_order, np.asarray(profile_order),
+                          side="right") - 1
+    return np.clip(idx, 0, max(len(item_order) - 1, 0))
 
 
 def read_profiles(path: str | Path,
@@ -255,11 +388,22 @@ def pose_track(path: str | Path) -> tuple[list[ProfileRecord],
     Returns ``(profiles, [(index into profiles, pose)])``. Profiles falling
     outside the position track's time span are dropped rather than
     extrapolated: a pose guessed past the end of the track would place pings on
-    seabed the vehicle never passed over.
+    seabed the vehicle never passed over. On a frozen autopilot clock every
+    profile takes the most recent position **in file order** instead
+    (within one ping period of the truth at the corpus's 25 Hz).
     """
-    profiles, positions, skew = read_streams(path)
+    s = read_svlog(path)
+    profiles, positions, skew = s.profiles, s.positions, s.skew_ms
     if not profiles or not positions:
         return profiles, []
+
+    if s.clock_frozen:
+        idx = pair_by_order(np.array([p.order for p in profiles]),
+                            np.array([p.order for p in positions]))
+        return profiles, [
+            (i, Pose3D(x=positions[j].x, y=positions[j].y, z=positions[j].z,
+                       yaw=compass_deg_to_enu_yaw(prof.vehicle_heading_deg)))
+            for i, (prof, j) in enumerate(zip(profiles, idx))]
 
     pos_t = np.array([p.time_boot_ms + skew for p in positions],
                      dtype=np.float64)
@@ -281,3 +425,35 @@ def pose_track(path: str | Path) -> tuple[list[ProfileRecord],
             yaw=compass_deg_to_enu_yaw(prof.vehicle_heading_deg),
         )))
     return profiles, paired
+
+
+def gps_track(path: str | Path, streams: SvlogStreams | None = None
+              ) -> tuple[SvlogStreams, np.ndarray, np.ndarray, np.ndarray]:
+    """Every profile paired with a GPS position.
+
+    Returns ``(streams, index, lat, lon)`` -- ``index`` into
+    ``streams.profiles`` for the profiles that could be placed. On a live
+    clock lat/lon are interpolated onto the profile's own clock after the
+    boot skew, and profiles outside the fix track's span are dropped; on a
+    frozen clock every profile takes the most recent fix in file order.
+    ``streams`` may be passed to avoid a second read.
+    """
+    s = streams if streams is not None else read_svlog(path)
+    if not s.profiles or not s.gps:
+        return s, np.empty(0, int), np.empty(0), np.empty(0)
+    if s.clock_frozen:
+        idx = pair_by_order(np.array([p.order for p in s.profiles]),
+                            np.array([g.order for g in s.gps]))
+        lat = np.array([s.gps[j].lat for j in idx])
+        lon = np.array([s.gps[j].lon for j in idx])
+        return s, np.arange(len(s.profiles)), lat, lon
+    gt = np.array([g.time_boot_ms + s.skew_ms for g in s.gps], dtype=np.float64)
+    order = np.argsort(gt, kind="stable")
+    gt = gt[order]
+    glat = np.array([s.gps[i].lat for i in order])
+    glon = np.array([s.gps[i].lon for i in order])
+    pt = np.array([p.timestamp_ms for p in s.profiles], dtype=np.float64)
+    inside = (pt >= gt[0]) & (pt <= gt[-1])
+    index = np.flatnonzero(inside)
+    return (s, index, np.interp(pt[index], gt, glat),
+            np.interp(pt[index], gt, glon))

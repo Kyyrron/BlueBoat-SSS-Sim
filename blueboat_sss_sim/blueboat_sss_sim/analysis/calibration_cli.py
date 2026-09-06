@@ -22,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core.trajectory import load_trajectory
 from ..core.types import Pose3D, Side
-from ..mission.patterns import WaypointTrajectory
 from ..sonar.config import SonarConfig
 from ..sonar.encoder import PingEncoder
 from ..sonar.noise import apply_ping_noise
@@ -45,22 +45,124 @@ SITE_FLOOR_DB = 3.1
 
 
 def simulate_profiles(bundle: Path, n_pings: int, seed: int,
-                      t0: float = 0.0, dt: float = 0.5
+                      t0: float = 0.0, dt: float = 0.5,
+                      trajectory: str | Path | None = None,
+                      sonar_yaml: str | Path | None = None
                       ) -> list[ProfileRecord]:
-    """Render the bundle and encode it into the same record type as a log.
+    """Render the world and encode it into the same record type as a log.
 
     Going through :class:`PingEncoder` rather than reading the renderer's
     float power directly is the point: the comparison must see exactly the
     bytes a downstream consumer would, normalisation and all.
+    ``trajectory``/``sonar_yaml`` name the flown path and the acquisition;
+    a legacy mission bundle's own frozen copies are the fallback.
     """
+    from .contacts import resolve_sonar_yaml
+
+    cfg = SonarConfig.from_yaml(resolve_sonar_yaml(Path(bundle), sonar_yaml))
+    return _simulate_with(Path(bundle), cfg, n_pings, seed, trajectory,
+                          t0=t0, dt=dt)
+
+
+def _curve_key(c: RangeCurve) -> tuple:
+    return (c.side.value, c.altitude_band_m)
+
+
+def nadir_profile(profiles: list[ProfileRecord], out_to_m: float = 2.0
+                  ) -> dict | None:
+    """Mean absolute dB over the first ``out_to_m`` of slant range.
+
+    The near field is where the transmit-pulse ringing lives (measured on
+    the corpus: ~55 dB at the transducer decaying to ~33 dB by 1 m), and
+    it is the region the sim's ``ringing_level_db``/``ringing_decay_db_per_m``
+    model — so real and simulated streams are reduced to the same
+    summary: dB at bin 0, at 0.5 m and 1.0 m, and the distance at which
+    the profile has decayed 10 dB below its own near-field peak.
+    """
+    curves, r_axis = [], None
+    for p in profiles:
+        if p.pwr_results is None or p.num_results == 0 or p.length_mm == 0:
+            continue
+        bin_m = p.length_mm / 1000.0 / max(p.num_results - 1, 1)
+        n = int(out_to_m / bin_m) + 1
+        if n < 4 or n > p.pwr_results.size:
+            continue
+        db = (p.min_pwr_db + p.pwr_results[:n].astype(np.float64) / 65535.0
+              * (p.max_pwr_db - p.min_pwr_db))
+        if r_axis is None:
+            r_axis = np.arange(n) * bin_m
+        m = min(n, db.size, r_axis.size)
+        curves.append(db[:m])
+    if not curves or r_axis is None:
+        return None
+    m = min(c.size for c in curves)
+    mean = np.mean([c[:m] for c in curves], axis=0)
+    r = r_axis[:m]
+
+    def at(dist: float) -> float:
+        return float(mean[min(int(dist / (r[1] - r[0])), m - 1)])
+
+    peak = float(mean.max())
+    below = np.nonzero(mean < peak - 10.0)[0]
+    settle_m = float(r[below[0]]) if below.size else float(r[-1])
+    return {"n_pings": len(curves),
+            "db_at_transducer": round(float(mean[0]), 2),
+            "db_at_0_5m": round(at(0.5), 2),
+            "db_at_1m": round(at(1.0), 2),
+            "settle_10db_m": round(settle_m, 2)}
+
+
+def fit_beam_tilt(bundle: Path, real_curves: list[RangeCurve],
+                  band: tuple[float, float], seed: int,
+                  trajectory: str | Path | None,
+                  sonar_yaml: str | Path | None,
+                  tilts_deg=tuple(np.arange(5.0, 42.5, 2.5)),
+                  n_pings: int = 60) -> list[dict]:
+    """Constrain the (unpublished) bracket tilt from the corpus.
+
+    The BlueBoat integration kit's mounting tilt is not documented, so
+    the effective ``beam_tilt_deg`` is fit by re-rendering the bundle at
+    a ladder of tilts and scoring each against the closest real curve —
+    the tilt shapes the whole per-range response, so the residual over
+    the scoring band is the natural objective.
+    """
+    from .contacts import resolve_sonar_yaml
+
+    lo, hi = band
+    rows = []
+    cfg_path = resolve_sonar_yaml(Path(bundle), sonar_yaml)
+    for tilt in tilts_deg:
+        cfg = SonarConfig.from_yaml(cfg_path)
+        cfg.model.beam_tilt_deg = float(tilt)
+        profs = _simulate_with(bundle, cfg, n_pings, seed, trajectory)
+        sim = reduce_profiles(profs, min_pings=10)
+        best = None
+        for s in sim:
+            cands = [c for c in real_curves if c.side is s.side
+                     and c.slant_r_m[-1] >= hi
+                     and abs(c.altitude_band_m - s.altitude_band_m)
+                     <= MAX_ALT_GAP_M]
+            for c in cands:
+                res = compare(c, s, lo, hi)
+                if best is None or res.rms_db < best:
+                    best = res.rms_db
+        rows.append({"beam_tilt_deg": float(tilt),
+                     "rms_db": round(best, 3) if best is not None else None})
+    return rows
+
+
+def _simulate_with(bundle: Path, cfg: SonarConfig, n_pings: int, seed: int,
+                   trajectory: str | Path | None,
+                   t0: float = 0.0, dt: float = 0.5) -> list[ProfileRecord]:
+    """Render ``n_pings`` per side under an explicit SonarConfig."""
+    from .contacts import resolve_trajectory
+
     scene = SceneModel.load(bundle)
-    cfg = SonarConfig.from_yaml(bundle / "sonar.yaml")
     acq, model = cfg.acquisition, cfg.model
-    traj = WaypointTrajectory.load_yaml(bundle / "trajectory.yaml")
+    traj = load_trajectory(resolve_trajectory(Path(bundle), trajectory))
     rr = GeometricRenderer(scene, acq, model)
     rng = np.random.default_rng(seed)
     bin_r = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
-
     out: list[ProfileRecord] = []
     for side in (Side.PORT, Side.STARBOARD):
         enc = PingEncoder(side, acq, model)
@@ -70,7 +172,8 @@ def simulate_profiles(bundle: Path, n_pings: int, seed: int,
             ping = rr.render(side, Pose3D(x, y, 0.0, 0.0, 0.0, yaw), t).ping
             ping.power = apply_ping_noise(ping.power, bin_r < ping.altitude_m,
                                           1.0, model, rng,
-                                          specular=ping.specular)
+                                          specular=ping.specular,
+                                          texture=ping.texture)
             e = enc.encode(ping)
             out.append(ProfileRecord(
                 side=side, ping_number=e.ping_number,
@@ -84,16 +187,19 @@ def simulate_profiles(bundle: Path, n_pings: int, seed: int,
     return out
 
 
-def _curve_key(c: RangeCurve) -> tuple:
-    return (c.side.value, c.altitude_band_m)
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--svlog", required=True, help="real recording (read-only)")
-    ap.add_argument("--bundle", required=True, help="mission bundle (read-only)")
+    ap.add_argument("--bundle", "--world", dest="bundle", required=True,
+                    help="world folder or legacy mission bundle (read-only)")
+    ap.add_argument("--trajectory", default=None,
+                    help="trajectory YAML to fly (required for a world "
+                         "folder; legacy bundles carry their own)")
+    ap.add_argument("--sonar", default=None,
+                    help="sonar profile YAML (default: the bundle's frozen "
+                         "copy, else the package default)")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--sim-pings", type=int, default=200,
                     help="ping cycles to render per side (default: 200)")
@@ -102,11 +208,16 @@ def main() -> None:
     ap.add_argument("--band", type=float, nargs=2, default=(6.0, 14.5),
                     metavar=("LO", "HI"),
                     help="slant-range band to score over, metres")
+    ap.add_argument("--fit-tilt", action="store_true",
+                    help="scan beam_tilt_deg over 5..40 deg and report the "
+                         "residual per tilt (constrains the unpublished "
+                         "BlueBoat bracket tilt from the corpus; slower)")
     args = ap.parse_args()
 
     real_profiles = read_profiles(args.svlog, with_power=True)
     sim_profiles = simulate_profiles(Path(args.bundle), args.sim_pings,
-                                     args.seed)
+                                     args.seed, trajectory=args.trajectory,
+                                     sonar_yaml=args.sonar)
 
     real = reduce_profiles(real_profiles,
                            altitude_band_m=args.altitude_band_m)
@@ -146,6 +257,16 @@ def main() -> None:
         })
     scored = [r for r in rows if r["geometry_comparable"]]
 
+    # Near-field / nadir column: the transmit-ringing region the sim's
+    # ringing model reproduces (fix for the nadir-gap realism gap).
+    nadir_real = nadir_profile(real_profiles)
+    nadir_sim = nadir_profile(sim_profiles)
+
+    tilt_rows = []
+    if args.fit_tilt:
+        tilt_rows = fit_beam_tilt(Path(args.bundle), real, (lo, hi),
+                                  args.seed, args.trajectory, args.sonar)
+
     doc = {
         "svlog": str(Path(args.svlog).resolve()),
         "bundle": str(Path(args.bundle).resolve()),
@@ -160,6 +281,8 @@ def main() -> None:
              "range_length_mm": c.length_mm, "n_pings": c.n_pings}
             for c in sorted(real, key=_curve_key)],
         "residuals": rows,
+        "nadir_profile": {"real": nadir_real, "sim": nadir_sim},
+        "beam_tilt_fit": tilt_rows,
     }
 
     out = Path(args.out)
@@ -188,6 +311,26 @@ def main() -> None:
                   f"{r['real_altitude_band_m']:.0f} m | {r['n_real_pings']} | "
                   f"{r['n_sim_pings']} | {r['rms_db']:.2f} | "
                   f"{r['p2p_db']:.2f} | {'yes' if r['above_reduction_floor'] else 'no'} |")
+    md += ["", "## Near-field / nadir column (first 2 m of slant range)", "",
+           "The transmit-ringing region: the corpus measures ~55 dB at the "
+           "transducer decaying to ~33 dB by 1 m, which the sim reproduces "
+           "with `ringing_level_db`/`ringing_decay_db_per_m`.", "",
+           "| stream | pings | dB @ 0 | dB @ 0.5 m | dB @ 1 m | 10 dB settle |",
+           "|---|---|---|---|---|---|"]
+    for name, prof in (("real", nadir_real), ("simulated", nadir_sim)):
+        if prof:
+            md.append(f"| {name} | {prof['n_pings']} | "
+                      f"{prof['db_at_transducer']:.1f} | "
+                      f"{prof['db_at_0_5m']:.1f} | {prof['db_at_1m']:.1f} | "
+                      f"{prof['settle_10db_m']:.2f} m |")
+    if tilt_rows:
+        md += ["", "## Beam-tilt fit (unpublished bracket tilt, "
+               "constrained from the corpus)", "",
+               "| beam_tilt_deg | best RMS dB |", "|---|---|"]
+        for r in tilt_rows:
+            md.append(f"| {r['beam_tilt_deg']:.1f} | "
+                      + (f"{r['rms_db']:.2f} |" if r["rms_db"] is not None
+                         else "— |"))
     md += ["", "## Device normalisation invariants", "",
            "| stream | pings | one full-scale bin | zero minimum | span ≤ 90 dB |",
            "|---|---|---|---|---|"]
@@ -216,6 +359,17 @@ def main() -> None:
         print("  no comparable geometry in this pairing: the bundle's altitude "
               "and range do not overlap the recording's. Compare a bundle "
               "generated at the recording's depth and range setting.")
+    for name, prof in (("real", nadir_real), ("sim", nadir_sim)):
+        if prof:
+            print(f"  nadir {name}: {prof['db_at_transducer']:.1f} dB at the "
+                  f"transducer, {prof['db_at_1m']:.1f} dB at 1 m, 10 dB "
+                  f"settle {prof['settle_10db_m']:.2f} m")
+    fitted = [r for r in tilt_rows if r["rms_db"] is not None]
+    if fitted:
+        best = min(fitted, key=lambda r: r["rms_db"])
+        print(f"  beam-tilt fit: best {best['beam_tilt_deg']:.1f} deg at "
+              f"{best['rms_db']:.2f} dB RMS "
+              f"({len(fitted)} tilts scored)")
     print(f"  wrote {out / 'calibration.json'}")
     print(f"         {out / 'calibration.md'}")
 

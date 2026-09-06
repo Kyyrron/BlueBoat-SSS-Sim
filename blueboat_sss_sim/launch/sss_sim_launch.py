@@ -1,48 +1,43 @@
-"""Launch the simulated Side Scan Sonar stack.
+"""Launch the simulated Side Scan Sonar stack over a world folder.
 
-Composable with the existing simulator launch: start your simulator as
-usual, then include (or run alongside) this launch with the mission bundle
-directory. Nothing in the existing launch files needs modification.
-
-The simulator's output stops at SSS data (profiles + raw + ground-truth
-contacts) per the target pipeline; the YOLO dataset recorder is a
-downstream AI-stage tool and is therefore **off by default** (task 3).
-Enable it explicitly with ``with_recorder:=true`` only when you want the
-sim itself to write a dataset.
+Composable with the existing simulator launch: start Gazebo on the
+world's ``world.sdf`` as usual (``sim_world_launch.py`` or the full
+``full_mission_launch.py``), then include or run this alongside. Nothing
+in any neighbour package needs modification.
 
 Arguments
 ---------
-mission_dir     mission bundle directory (from `generate_mission`); provides
-                scene, sonar config and trajectory. Required.
-with_recorder   also run the YOLO dataset recorder            (default false)
-with_mavros_shim  republish heading/imu/GPS under MAVROS names (default true;
-                  the BlueBoat GCS's GPS-anchored map needs
+world_dir       world folder (from the ``world_builder`` GUI or
+                ``generate_world``); provides the scene. Required.
+sonar_config    sonar profile YAML (default: the world folder's own frozen
+                ``sonar.yaml`` if one exists -- legacy mission bundles --
+                else the package ``config/default_sonar.yaml``)
+with_mavros_shim  republish heading/imu/GPS under MAVROS names (default
+                  true; the BlueBoat GCS's GPS-anchored map needs
                   /mavros/global_position/global + compass_hdg to anchor)
-sim_origin_lat  geographic latitude of the ENU world origin   (default 43.6961)
-sim_origin_lon  geographic longitude of the ENU world origin  (default 7.3080)
-with_mission_path run the RequestPath mission service         (default false)
-                  (leave false if another path_generation runs;
-                  the two serve the same service name)
-dataset_dir     recorder output (default <mission_dir>/dataset)
+sim_origin_lat  geographic latitude of the ENU world origin (default "":
+                taken from the world's own geo anchor; the legacy
+                43.6961 fallback applies only to unanchored worlds)
+sim_origin_lon  geographic longitude, same resolution as the latitude
 auto_ping       enable pinging automatically at startup       (default true)
 quiet           route helper one-shot output to log           (default true)
 
 Acquisition parameters
 ----------------------
-The six run-dependent device parameters are passed to the node **explicitly**,
-read from the bundle's frozen ``sonar.yaml``. The bundle is the authority for
-what a run acquired at (NC #10), so a launch never silently images a different
-swath or gain than the bundle records -- which is what makes a sim-vs-real
-comparison meaningful (root CLAUDE.md CM-2), since the simulator's own defaults
-(15 m, gain 4 -- the power-calibration anchor) differ from the real
-``sss_node.py`` defaults (20 m, gain -1 = device auto).
+The six run-dependent device parameters are passed to the node
+**explicitly**, read from the resolved sonar profile, so a run's
+acquisition is always traceable to a named file rather than to node
+defaults -- which is what makes a sim-vs-real comparison meaningful (root
+CLAUDE.md CM-2), since the simulator's own defaults (15 m, gain 4 -- the
+power-calibration anchor) differ from the real ``sss_node.py`` defaults
+(20 m, gain -1 = device auto).
 
 Each may still be overridden per run, exactly as on the real system:
 
     range_start_mm  range_length_mm  msec_per_ping
     gain_index      num_results      pulse_len_percent
 
-An empty override (the default) means "take the bundle's value".
+An empty override (the default) means "take the profile's value".
 """
 
 from simple_launch import SimpleLauncher
@@ -53,23 +48,40 @@ sl = SimpleLauncher(use_sim_time=True)
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
                     "gain_index", "num_results", "pulse_len_percent")
 
-sl.declare_arg("mission_dir", default_value="")
-sl.declare_arg("with_recorder", default_value=False)
+#: Legacy origin (the GCS bench simulator's) for worlds without a geo anchor.
+LEGACY_ORIGIN = (43.6961, 7.3080)
+
+sl.declare_arg("world_dir", default_value="")
+sl.declare_arg("sonar_config", default_value="")
 sl.declare_arg("with_mavros_shim", default_value=True)
-sl.declare_arg("sim_origin_lat", default_value=43.6961)
-sl.declare_arg("sim_origin_lon", default_value=7.3080)
-sl.declare_arg("with_mission_path", default_value=False)
-sl.declare_arg("dataset_dir", default_value="")
+sl.declare_arg("sim_origin_lat", default_value="")
+sl.declare_arg("sim_origin_lon", default_value="")
 sl.declare_arg("auto_ping", default_value=True)
 sl.declare_arg("quiet", default_value=True)
 for _a in ACQUISITION_ARGS:
     sl.declare_arg(_a, default_value="",
-                   description=f"{_a} override; empty = use the mission "
-                               "bundle's frozen sonar.yaml value")
+                   description=f"{_a} override; empty = use the resolved "
+                               "sonar profile's value")
+
+
+def resolve_sonar_config(world_dir, sonar_config=None) -> str:
+    """The sonar profile in force: explicit > the folder's own frozen
+    ``sonar.yaml`` (legacy bundles) > the package default. Module scope,
+    launch-free, so the smoke test exercises the same resolution."""
+    from pathlib import Path
+
+    from blueboat_sss_sim.sonar.config import find_default_sonar_yaml
+
+    if sonar_config:
+        return str(sonar_config)
+    frozen = Path(world_dir) / "sonar.yaml"
+    if frozen.exists():
+        return str(frozen)
+    return str(find_default_sonar_yaml())
 
 
 def resolve_acquisition(sonar_yaml, overrides=None):
-    """Bundle acquisition values, with non-empty overrides applied.
+    """Profile acquisition values, with non-empty overrides applied.
 
     Returns a ``{param: value}`` mapping ready to hand to the node. Kept at
     module scope, with no launch dependencies, so the offline smoke test can
@@ -89,46 +101,74 @@ def resolve_acquisition(sonar_yaml, overrides=None):
     return acq
 
 
+def resolve_world_anchor(world_dir):
+    """The world's GPS anchor ``(lat0, lon0)`` from its manifest, or None.
+
+    Module scope and launch-free like ``resolve_acquisition``, for the same
+    reason. A world built by the ``world_builder`` GUI always carries one;
+    a legacy bundle or a bare ``generate_world`` output may not.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    manifest = Path(world_dir) / "scene_manifest.yaml"
+    if not manifest.exists():
+        return None
+    with open(manifest, "r", encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    a = (doc.get("geo") or {}).get("anchor") or {}
+    if "lat0" in a and "lon0" in a:
+        return float(a["lat0"]), float(a["lon0"])
+    return None
+
+
 def launch_setup():
-    mission_dir = sl.arg("mission_dir")
-    if not mission_dir:
-        raise RuntimeError("launch argument 'mission_dir' is required")
-    dataset_dir = sl.arg("dataset_dir") or f"{mission_dir}/dataset"
+    world_dir = sl.arg("world_dir")
+    if not world_dir:
+        raise RuntimeError("launch argument 'world_dir' is required")
     quiet = bool(sl.arg("quiet"))
 
     # Simulated sonar (drop-in replacement for the real sss_node.py).
-    # Acquisition comes from the bundle's frozen sonar.yaml, so the run
-    # images what the bundle records rather than the node's own defaults.
+    # Acquisition comes from the resolved profile, passed explicitly, so
+    # the run images what a named file records, never silent defaults.
+    sonar_yaml = resolve_sonar_config(world_dir, sl.arg("sonar_config"))
     acquisition = resolve_acquisition(
-        f"{mission_dir}/sonar.yaml",
-        {a: sl.arg(a) for a in ACQUISITION_ARGS})
+        sonar_yaml, {a: sl.arg(a) for a in ACQUISITION_ARGS})
     sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
             parameters={
-                "scene_dir": mission_dir,
-                "sonar_config": f"{mission_dir}/sonar.yaml",
+                "scene_dir": world_dir,
+                "sonar_config": sonar_yaml,
                 "odom_topic": "/blueboat/odom",
                 "publish_ground_truth": True,
                 **acquisition,
             })
 
-    if sl.arg("with_recorder"):
-        sl.node("blueboat_sss_sim", "dataset_recorder_node", output="screen",
-                parameters={"output_dir": dataset_dir})
-
     if sl.arg("with_mavros_shim"):
+        # Origin priority: explicit launch args > the world's own anchor >
+        # the legacy constant (with a warning -- GPS from such a run is
+        # geographically meaningless).
+        lat, lon = sl.arg("sim_origin_lat"), sl.arg("sim_origin_lon")
+        if str(lat) == "" or str(lon) == "":
+            anchor = resolve_world_anchor(world_dir)
+            if anchor is not None:
+                lat, lon = anchor
+            else:
+                lat, lon = LEGACY_ORIGIN
+                import logging
+                logging.getLogger("sss_sim_launch").warning(
+                    "world %s carries no geo anchor; the MAVROS shim will "
+                    "publish GPS about the legacy origin %s", world_dir,
+                    LEGACY_ORIGIN)
         sl.node("blueboat_sss_sim", "mavros_shim_node",
-                parameters={"sim_origin_lat": sl.arg("sim_origin_lat"),
-                            "sim_origin_lon": sl.arg("sim_origin_lon")})
-
-    if sl.arg("with_mission_path"):
-        sl.node("blueboat_sss_sim", "sss_path_generation", output="screen",
-                parameters={"trajectory_file": f"{mission_dir}/trajectory.yaml"})
+                parameters={"sim_origin_lat": float(lat),
+                            "sim_origin_lon": float(lon)})
 
     if sl.arg("auto_ping"):
         # One-shot ping enable a few seconds after the graph is up (same
         # command an operator issues on the real system). Its publisher
         # chatter ("beginning loop", "publishing #1: ...") goes to the log
-        # file when quiet (task 1).
+        # file when quiet.
         from launch.actions import ExecuteProcess, TimerAction
         sl.add_action(TimerAction(period=5.0, actions=[ExecuteProcess(
             cmd=["ros2", "topic", "pub", "--once",

@@ -24,15 +24,23 @@ from typing import Any, Mapping
 import numpy as np
 import yaml
 
+from ..core.geo import GeoAnchor
 from ..core.geometry import bilinear_sample
 from ..core.types import GridSpec, PlacedObject, Wall
+from .depth import DepthConfig, build_height
 from .materials import MaterialLibrary
 from .objects import ObjectFieldConfig, place_objects, rasterize_objects
 from .terrain import TerrainConfig, TerrainRasters, synthesize_terrain
 
 MANIFEST_VERSION = 1
 
+#: Stated in the manifest's ``geo:`` block so a consumer can verify it uses
+#: the same conversion (the project-wide equirectangular convention).
+GEO_CONVENTION = "equirectangular_wgs84_r6378137"
+
 _WALL_KEYS = {f.name for f in dataclasses.fields(Wall)}
+#: Wall kinds the renderer models (core.types.Wall docstring).
+WALL_KINDS = ("quay", "pontoon")
 
 
 def _walls_from_list(items: Any) -> list[Wall]:
@@ -55,6 +63,13 @@ def _walls_from_list(items: Any) -> list[Wall]:
         if not 0.0 <= w.reflectivity <= 1.0:
             raise ValueError(f"wall '{w.name}' reflectivity {w.reflectivity} "
                              "is outside 0..1")
+        if w.kind not in WALL_KINDS:
+            raise ValueError(f"wall '{w.name}' kind {w.kind!r} is not one of "
+                             f"{sorted(WALL_KINDS)}")
+        if w.kind == "pontoon" and not w.draft_m > 0.0:
+            raise ValueError(f"pontoon '{w.name}' needs a positive draft_m")
+        if w.roughness_m < 0.0:
+            raise ValueError(f"wall '{w.name}' roughness_m must be >= 0")
         walls.append(w)
     names = [w.name for w in walls]
     if len(set(names)) != len(names):
@@ -74,12 +89,16 @@ class WorldConfig:
     objects: ObjectFieldConfig = dataclasses.field(default_factory=ObjectFieldConfig)
     walls: list[Wall] = dataclasses.field(default_factory=list)
     material_overrides: dict[str, Any] = dataclasses.field(default_factory=dict)
+    geo: GeoAnchor | None = None                      # GPS of world (0, 0)
+    depth: DepthConfig | None = None                  # authored bathymetry
+    limits_collision: bool = False                    # invisible border boxes
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "WorldConfig":
         w = d.get("world", d)
         return cls(
             seed=int(w.get("seed", 42)),
+            limits_collision=bool(w.get("limits_collision", False)),
             size=tuple(w.get("size", (80.0, 60.0))),
             origin=tuple(w.get("origin", (-40.0, -30.0))),
             resolution=float(w.get("resolution", 0.10)),
@@ -87,6 +106,8 @@ class WorldConfig:
             objects=ObjectFieldConfig.from_dict(d.get("objects", {})),
             walls=_walls_from_list(d.get("walls", []) or []),
             material_overrides=dict(d.get("materials", {})),
+            geo=GeoAnchor.from_dict(d.get("geo")),
+            depth=DepthConfig.from_dict(d.get("depth")),
         )
 
     @classmethod
@@ -113,6 +134,7 @@ class SceneModel:
     walls: list[Wall] = dataclasses.field(default_factory=list)
     seed: int = 0
     config_snapshot: dict[str, Any] = dataclasses.field(default_factory=dict)
+    geo_anchor: GeoAnchor | None = None               # GPS of world (0, 0)
 
     # ---- queries used by the sonar renderer -------------------------------
     def sample_height(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -141,6 +163,12 @@ class SceneModel:
             "objects": [dataclasses.asdict(o) for o in self.objects],
             "walls": [dataclasses.asdict(w) for w in self.walls],
         }
+        if self.geo_anchor is not None:
+            # Additive, like "walls": the version does not move, and a
+            # consumer that ignores the block sees the same local-metres
+            # world as before.
+            doc["geo"] = {"anchor": self.geo_anchor.to_dict(),
+                          "convention": GEO_CONVENTION}
         with open(manifest, "w", encoding="utf-8") as f:
             yaml.safe_dump(doc, f, sort_keys=False)
         return npz, manifest
@@ -168,18 +196,38 @@ class SceneModel:
             walls=[Wall(**w) for w in (doc.get("walls") or [])],
             seed=int(doc.get("seed", 0)),
             config_snapshot=dict(doc.get("config", {})),
+            geo_anchor=GeoAnchor.from_dict(
+                (doc.get("geo") or {}).get("anchor")),
         )
 
 
 def generate_scene(cfg: WorldConfig,
                    raw_config: Mapping[str, Any] | None = None) -> SceneModel:
-    """World config -> fully populated SceneModel (deterministic per seed)."""
-    rng = np.random.default_rng(cfg.seed)
+    """World config -> fully populated SceneModel (deterministic per seed).
+
+    For a world with authored bathymetry (a ``depth:`` section), terrain
+    and object placement draw from *separate* RNG streams derived from the
+    seed, so editing the bathymetry (a preset parameter, a different depth
+    file) never moves the objects -- which is what lets two worlds
+    differing only in depth be compared object-by-object. A legacy config
+    without ``depth:`` keeps the single historical stream, bit-identical
+    to what every existing bundle was generated with.
+    """
+    if cfg.depth is not None:
+        rng_terrain = np.random.default_rng([cfg.seed, 0])
+        rng_objects = np.random.default_rng([cfg.seed, 1])
+    else:
+        rng_terrain = rng_objects = np.random.default_rng(cfg.seed)
     grid = cfg.grid()
     materials = MaterialLibrary(cfg.material_overrides or None)
 
-    terrain: TerrainRasters = synthesize_terrain(grid, cfg.terrain, materials, rng)
-    objects = place_objects(grid, cfg.objects, materials, rng)
+    base = None
+    if cfg.depth is not None:
+        base = build_height(grid, cfg.depth, cfg.walls, cfg.geo, rng_terrain)
+    terrain: TerrainRasters = synthesize_terrain(
+        grid, cfg.terrain, materials, rng_terrain, base_height=base)
+    objects = place_objects(grid, cfg.objects, materials, rng_objects,
+                            height=terrain.height)
     rasterize_objects(objects, grid, terrain.height, terrain.reflectivity)
 
     return SceneModel(
@@ -192,4 +240,5 @@ def generate_scene(cfg: WorldConfig,
         walls=list(cfg.walls),
         seed=cfg.seed,
         config_snapshot=dict(raw_config or {}),
+        geo_anchor=cfg.geo,
     )

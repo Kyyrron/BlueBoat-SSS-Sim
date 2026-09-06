@@ -22,8 +22,46 @@ from typing import Any, Mapping
 import yaml
 
 SPEED_OF_SOUND_MPS = 1500.0
+
+
+def find_default_sonar_yaml() -> Path:
+    """The package's default sonar profile, ``config/default_sonar.yaml``.
+
+    World folders carry no frozen ``sonar.yaml`` (unlike the retired
+    mission bundles): the acquisition in force is the package profile plus
+    explicit per-run overrides. Resolution order: the source tree (three
+    levels up from this file), then the installed ament share directory.
+    """
+    src = Path(__file__).resolve().parents[2] / "config" / "default_sonar.yaml"
+    if src.exists():
+        return src
+    try:
+        from ament_index_python.packages import get_package_share_directory
+        cand = (Path(get_package_share_directory("blueboat_sss_sim"))
+                / "config" / "default_sonar.yaml")
+        if cand.exists():
+            return cand
+    except Exception:
+        pass
+    raise FileNotFoundError(
+        "config/default_sonar.yaml not found in the source tree or the "
+        "installed share directory")
 OMNISCAN_FREQ_HZ = 451_127          # observed on the real device
-DEVICE_PROCESSING_MS = 2.0          # free-run overhead beyond two-way travel
+DEVICE_PROCESSING_MS = 3.0          # free-run overhead beyond two-way travel:
+                                    # MEASURED 2.5-3.5 ms on every corpus file
+                                    # past the 30 m cap (38 m -> 54 ms, 40 ->
+                                    # 56, 52 -> 73, 72 -> 99, 80 -> 110,
+                                    # 95.6 -> 131, 125.6 -> 170 ms)
+MIN_PING_PERIOD_S = 0.050           # spec + corpus: 20 pings/s up to 30 m
+                                    # (18.4 m and 20 m recordings sit at
+                                    # exactly 50 ms), range-limited beyond
+PULSE_MIN_S = 44.3e-6               # shortest transmit pulse the device
+                                    # reports (18-27 m at 1200 bins)
+PULSE_SAMPLE_PERIODS = {600: 1.2, 1200: 1.5}
+                                    # MEASURED pulse length in sample periods
+                                    # (2R/c / num_results): 106.4 us @40 m/600,
+                                    # 212.8 @80 m/600, 64.3 @38 m/1200,
+                                    # 159.6 @95.6 m/1200, 208.4 @125.6 m/1200
 
 AUTO_GAIN_INDEX = -1                # command sentinel: "let the device choose"
 CALIBRATION_GAIN_INDEX = 4          # the index the power model is anchored at
@@ -92,18 +130,16 @@ class AcquisitionParams:
         return self.range_length_mm / 1000.0 / max(self.num_results, 1)
 
     def ping_period_s(self, max_ping_rate_hz: float = 0.0) -> float:
-        """Effective ping period.
+        """Effective ping period -- the device law, measured on the corpus.
 
-        Floors: the commanded ``msec_per_ping`` and the physical two-way
-        travel time + device processing (22 ms at 15 m, as decoded from the
-        real capture's device timestamps). If ``max_ping_rate_hz`` > 0 the
-        period is additionally floored at 1/rate -- used to enforce the
-        20 Hz maximum ping rate from the Omniscan 450 spec sheet.
-
-        NOTE: the spec-sheet 20 Hz cap and the field capture's observed
-        22 ms (45 Hz) free-run at 15 m are in tension; the cap is therefore
-        a *configurable* model parameter (``model.max_ping_rate_hz``, 0 to
-        disable and reproduce the captured behaviour)."""
+        ``period = max(msec_per_ping, 2R/c + DEVICE_PROCESSING_MS,
+        1/max_ping_rate_hz)``. The Omniscan 450 pings at 20 pings/s up to
+        30 m and is range-limited beyond (spec sheet); all seven corpus
+        recordings follow exactly that: 50 ms at 18.4 m and 20 m, then
+        two-way travel plus ~3 ms (54 ms at 38 m ... 131 ms at 95.6 m,
+        170 ms at 125.6 m). ``max_ping_rate_hz`` is the 20 Hz cap; 0
+        disables it (a model knob, kept for experiments -- the device itself
+        never exceeds 20 Hz)."""
         two_way = 2.0 * self.range_max_m / SPEED_OF_SOUND_MPS
         free_run = two_way + DEVICE_PROCESSING_MS / 1000.0
         period = max(self.msec_per_ping / 1000.0, free_run)
@@ -112,8 +148,21 @@ class AcquisitionParams:
         return period
 
     def pulse_duration_s(self, max_ping_rate_hz: float = 0.0) -> float:
-        """Device convention: pulse length as a fraction of the ping window."""
-        return self.pulse_len_percent * self.ping_period_s(max_ping_rate_hz)
+        """Transmit-pulse length, as the device reports it.
+
+        MEASURED law: the pulse spans a fixed number of *sample periods*
+        (``2R/c / num_results``): 1.2 at 600 bins, 1.5 at 1200 bins, with a
+        44.3 us floor -- reproducing every ``pulse_duration_sec`` in the
+        corpus to within 1 us. ``pulse_len_percent`` keeps its real-node name
+        and default and scales the pulse relative to the device default
+        (0.002 -> x1.0). ``max_ping_rate_hz`` is accepted for signature
+        compatibility and unused: the pulse is set by range and bin count,
+        not by the ping period."""
+        two_way = 2.0 * self.range_max_m / SPEED_OF_SOUND_MPS
+        sample_period = two_way / max(int(self.num_results), 1)
+        m = PULSE_SAMPLE_PERIODS.get(int(self.num_results), 1.2)
+        scale = float(self.pulse_len_percent) / 0.002
+        return max(PULSE_MIN_S, scale * m * sample_period)
 
 
 @dataclass
@@ -129,12 +178,12 @@ class SonarModelConfig:
     horizontal_aperture_deg: float = 0.5   # Omniscan 450 spec: 0.5 deg azimuth
 
     # Timing.
-    max_ping_rate_hz: float = 20.0         # Omniscan 450 spec-sheet cap.
-                                           # CAUTION: the team's own field
-                                           # capture shows 22 ms (45 Hz)
-                                           # free-run at 15 m; set 0 to
-                                           # disable the cap and reproduce
-                                           # the captured device behaviour.
+    max_ping_rate_hz: float = 20.0         # Omniscan 450 cap: 20 pings/s up
+                                           # to 30 m, range-limited beyond.
+                                           # MEASURED on all seven corpus
+                                           # files (see AcquisitionParams.
+                                           # ping_period_s). 0 disables the
+                                           # cap -- an experiment knob only.
 
     # Acoustic model.
     lambert_exponent: float = 1.0          # default when material info absent.
@@ -174,10 +223,33 @@ class SonarModelConfig:
                                            # bottom tracking lock ping-to-ping
     pulse_smearing: bool = True            # convolve each ping with the
                                            # transmit-pulse range resolution
-                                           # c*tau/2 (~3 bins at 100 us /
-                                           # 25 mm bins): widens + stabilises
-                                           # the FBR onset ramp, as the real
-                                           # matched-filter output does
+                                           # c*tau/2 (1.2-1.5 bins on the
+                                           # device law) floored at
+                                           # range_filter_bins: widens +
+                                           # stabilises the FBR onset ramp,
+                                           # as the real matched-filter
+                                           # output does
+    range_filter_bins: int = 3             # receive-chain range envelope
+                                           # (matched filter + decimation),
+                                           # the floor of the smear kernel.
+                                           # Sized from the corpus lag-1
+                                           # range correlation 0.30-0.68
+                                           # (a 3-bin boxcar on the complex
+                                           # field gives 0.44)
+    # Transmit-pulse ringing: the bright decaying core right under the
+    # transducer that every real ping carries (MEASURED on
+    # diffDepthCompensation.svlog: the profile leaves the transducer at
+    # ~55 dB — brighter than any seabed return — decaying through 43 dB
+    # at 0.27 m to 33 dB by 1 m; the GCS's 0.75 m nadir blank exists for
+    # exactly this artefact). Modelled as an exponential decay in the
+    # reported-dB domain at the calibration gain, added to the *coherent*
+    # channel (low CV, like the real ringing) before noise. Level 0
+    # disables it. It lives entirely inside the water column at survey
+    # altitudes, so the FBR and the level anchor are untouched — and the
+    # processor's find_noise_window_start ringing-settle logic finally
+    # has the artefact it was written for.
+    ringing_level_db: float = 55.0         # reported dB at r = 0 (gain 4)
+    ringing_decay_db_per_m: float = 22.0   # (55-33) dB over the first metre
     alongtrack_beam_lines: int = 5         # ground lines integrated across the
                                            # 0.5 deg azimuth footprint (odd;
                                            # 1 = legacy infinitesimal beam)
@@ -199,9 +271,11 @@ class SonarModelConfig:
     # Wall / surface multipath: mirror-source ghosts off the basin boundaries
     # declared by the *world* config's `walls:` (the world says what walls
     # exist and how reflective they are; these knobs say whether the path is
-    # modelled at all). OFF by default -- a realism feature must not move an
-    # existing result silently.
-    wall_multipath_enabled: bool = False
+    # modelled at all). ON by default since 2026-09-01 (user decision): it is
+    # a strict no-op in any world without walls, so no wall-less result
+    # moves, and a walled world gets its physical reflections without a
+    # special profile.
+    wall_multipath_enabled: bool = True
     wall_multipath_gain: float = 1.0       # global scale on every ghost, on
                                            # top of each wall's own
                                            # reflectivity (1.0 = as modelled)
@@ -213,6 +287,34 @@ class SonarModelConfig:
                                            # sees it at -depression and only
                                            # the sidelobe floor passes
     surface_reflectivity: float = 0.9      # pressure-release interface
+    # Direct wall echo (closes the former assumption A9): a vertical quay
+    # face returns a bright coherent line at its own range and occludes the
+    # seabed behind it, as every real harbour log shows.
+    wall_echo_enabled: bool = True         # strict no-op in a wall-less world
+    wall_echo_strength: float = 30.0       # face-return amplitude at
+                                           # broadside, relative to Lambert
+                                           # (same order as specular_strength:
+                                           # a concrete quay reads at FBR
+                                           # level). Not corpus-determined:
+                                           # the corpus has quays but no
+                                           # geometry ground truth
+    wall_echo_obliquity_floor: float = 0.1 # residual return when the beam
+                                           # runs along the wall (cos^2 law
+                                           # above it)
+    wall_face_diffuse: float = 0.5         # Lambert weight of the wet face
+                                           # (rough concrete returns over its
+                                           # whole height, not only where the
+                                           # specular lobe points)
+    wall_pontoon_specular: float = 0.15    # specular-lobe fraction on a
+                                           # pontoon's rounded, fendered floats
+    wall_corner_gain: float = 1.0          # scale of the single-bounce band
+                                           # (seabed -> face -> transducer)
+                                           # that lands just beyond the face
+    wall_diffuse_fraction: float = 0.04    # share of the energy a rough face
+                                           # scatters incoherently that still
+                                           # reaches the mirror geometry (the
+                                           # coherent part follows the
+                                           # Rayleigh roughness law)
     ghost_beam_lines: int = 1              # azimuth lines per ghost render
                                            # (1 = infinitesimal beam). Ghosts
                                            # are dim and already blurred by
@@ -226,21 +328,44 @@ class SonarModelConfig:
     speckle_looks: int = 1                 # 1 = fully-developed Exp(1) speckle
                                            # (Rayleigh amplitude); >1 = smoother
                                            # multi-look Gamma(L, 1/L) speckle
-    noise_floor: float = 6.79e-07          # additive linear power, in the same
-                                           # units the renderer emits. Fitted
-                                           # WITH watercolumn_noise and the
-                                           # range law, to put the water column
-                                           # 26 dB below the bottom return as
-                                           # the corpus does.
+    coherent_scatterers: bool = True       # single-look speckle from a
+                                           # ground-fixed scatterer field
+                                           # (random phasor per ground cell,
+                                           # summed coherently per bin):
+                                           # Exp(1) contrast PLUS the
+                                           # along-track (footprint overlap)
+                                           # and range (pulse) correlation
+                                           # the corpus shows. False = the
+                                           # legacy per-bin Exp(1) draw
+    scatterer_cell_m: float = 0.01         # ground cell of the scatterer
+                                           # field; seed-class parameter
+                                           # (changing it changes every image)
+    scatterer_seed: int = 0                # extra salt on the field, on top
+                                           # of the world seed
+    noise_floor: float = 8.3e-11           # receiver floor, additive linear
+                                           # power. MEASURED separately (2026-
+                                           # 09-02): the far decile of the
+                                           # gain-4 pings of the 72-126 m
+                                           # recordings, where nothing but
+                                           # noise is left, reads -6.1 dB
+                                           # (mean of dB; -3.6 dB as a linear
+                                           # mean, which this is) -> 10**((
+                                           # -3.6 - 97.2)/10). The former
+                                           # 6.79e-7 (38.5 dB) was fitted on
+                                           # files that never reached the
+                                           # floor and hid the range law
+                                           # beyond ~20 m.
     gain_drift_amp: float = 0.0            # OFF: deferred to the downstream
     gain_drift_period_s: float = 45.0      # augmentation stage (set >0 to
     dropped_ping_prob: float = 0.0         # re-enable in the base model)
-    watercolumn_noise: float = 6.79e-07    # extra noise in r < altitude bins
-                                           # (must stay well below the first
-                                           # bottom return for FBR detection).
-                                           # Fitted as one number with
-                                           # noise_floor; the corpus constrains
-                                           # their sum, not each separately.
+    watercolumn_noise: float = 1.15e-07    # volume reverberation inside the
+                                           # water column (r < altitude).
+                                           # MEASURED: the 1-3 m band of the
+                                           # gain-4 corpus pings reads 25.3 dB
+                                           # (mean of dB; 27.8 dB linear mean)
+                                           # -> 10**((27.8 - 97.2)/10). Stays
+                                           # 40 dB under the FBR peak, so
+                                           # bottom tracking locks with margin.
 
     # Ground-line sampling: renderer step is min(sample_step_m, ~half the
     # slant bin) so every range bin receives samples at any num_results

@@ -1,78 +1,130 @@
 # Integration guide
 
-How to run `blueboat_sss_sim` alongside the existing BlueBoat simulator, and
-how sim ↔ real swapping works. Nothing in the existing packages is
+How to run `blueboat_sss_sim` alongside the existing BlueBoat stack, and
+how sim ↔ real swapping works. Nothing in the neighbour packages is
 modified.
 
 ## 1. Install
 
 ```bash
 cd ~/ros2_ws/src
-# (copy/clone blueboat_sss_sim here, next to blueboat_description etc.)
+# (clone next to blueboat_description etc.)
 cd ~/ros2_ws
 rosdep install --from-paths src -yi          # numpy/scipy/yaml/PIL/simple_launch
 colcon build --packages-select blueboat_sss_sim
 source install/setup.bash
+pip install 'PySide6>=6.5'                   # world_builder GUI only
 ```
 
 Requires the existing `blueboat_interfaces` package (for
-`OmniscanProfile` and `RequestPath`) — already in your workspace.
+`OmniscanProfile`) — already in your workspace. Everything except the GUI
+runs without PySide6.
 
-## 2. Quick start (three commands)
+## 2. Quick start
 
 ```bash
-# 1. Generate a self-contained mission bundle (world + trajectory + sonar cfg)
-ros2 run blueboat_sss_sim generate_mission \
-    --config $(ros2 pkg prefix blueboat_sss_sim)/share/blueboat_sss_sim/config/default_mission.yaml \
-    --out ~/runs/r1 --seed 7
+# 1. Build a world around an MCS GPS-anchored path (GUI wizard)
+ros2 run blueboat_sss_sim world_builder
+#    -> ~/worlds/<path_name>/<world_name>/
 
 # 2. Inspect the world (optional)
-ros2 launch blueboat_sss_sim sim_world_launch.py mission_dir:=$HOME/runs/r1
+ros2 launch blueboat_sss_sim sim_world_launch.py world_dir:=$HOME/worlds/<p>/<w>
 
-# 3. Full autonomous mission: Gazebo + robot + control stack + sonar + dataset
-ros2 launch blueboat_sss_sim full_mission_launch.py mission_dir:=$HOME/runs/r1
+# 3. Dev end-to-end: Gazebo + robot + sonar + MAVROS shim
+ros2 launch blueboat_sss_sim full_mission_launch.py world_dir:=$HOME/worlds/<p>/<w>
+#    add the control stack (dev convenience; operational missions are MCS's):
+#    with_control:=true trajectory_file:=$HOME/.config/blueboat_mcs/trajectories/.deployed/<p>.yaml
 ```
 
-The YOLO dataset accumulates in `~/runs/r1/dataset/` and is finalized
-(`dataset.yaml`) on shutdown (Ctrl-C).
+Headless alternative to the GUI: write a world YAML (see
+`configuration_guide.md`) and `ros2 run blueboat_sss_sim generate_world
+--config my_world.yaml --out ~/worlds/dev/w1`.
 
-## 3. Composition with the existing launch files
+## 3. The GPS contract (what other modules may rely on)
 
-`full_mission_launch.py` starts Gazebo on the **bundle's** `world.sdf`
-itself, because `blueboat_description/world_launch.py` hard-codes the
-stock world and declares no `world` argument. It reproduces that launch
-file's three responsibilities against the bundle:
+* World (0, 0) is the **spawn origin**: the source path's first waypoint
+  (or the drawn area's centre when the path start lies outside the
+  limits) — always inside the world, which is where the boat spawns
+  (`upload_rov_launch.py` / MCS `Sim_launch.py` hard-code (0, 0)). The
+  world's `geo_anchor` is that point's GPS; `metadata.yaml` records the
+  design offset (`world = design − design_offset`), and
+  `source_path_world.yaml` holds the path already re-expressed in world
+  coordinates (first waypoint at (0, 0)).
+* The conversion is the project-wide spherical-equirectangular pair
+  (R = 6378137, longitude scaled by cos(lat0)) — the same math as MCS
+  `mcs/core/geo.py` and the GCS's `mapping/geo.py`. In this package it
+  lives only in `blueboat_sss_sim/core/geo.py`. Because every cross-module
+  handoff goes through lat/lon, the frame re-basing is invisible to
+  MCS/GCS: GPS ground truth is globally identical whatever the local
+  frame.
+* Ground truth in GPS: `metadata.yaml` lists the anchor, the spawn, the
+  limit rectangle's four corners (SW/SE/NE/NW), every wall's endpoints and
+  every object's position as `lat`/`lon` alongside the local values.
+* `world.sdf` carries `<spherical_coordinates>` (EARTH_WGS84, ENU) at the
+  anchor.
+* `mavros_shim_node` publishes `/mavros/global_position/global`,
+  `compass_hdg`, `imu/data` and `local_position/pose` from
+  `/blueboat/odom`; `sss_sim_launch.py` sets its origin from the world's
+  anchor automatically (`sim_origin_lat/lon:=` overrides; an unanchored
+  world falls back to the legacy 43.6961/7.3080 with a warning). The GCS's
+  GPS-anchored map therefore anchors at the world's true location.
 
-* `sl.gz_launch(<bundle>/world.sdf, "-r")` — which also registers the
-  world name (`generated_ocean`) that the model bridges resolve against;
-* the `/clock` and `/ocean_current` bridges;
-* `blueboat_description/upload_rov_launch.py`, which spawns the robot and
-  bridges `/blueboat/odom`, `pose_gt`, `joint_states` and
-  `cmd_thruster{1,2}`.
+## 4. Composition with the existing launch files
 
-No file in `blueboat_description` is modified. Pass
-`use_stock_world:=true` to load the stock description world instead — the
-boat spawns and drives, but the seabed and objects the sonar renders
-against are not in the Gazebo scene.
+`full_mission_launch.py` starts Gazebo on the **world folder's**
+`world.sdf` itself, because `blueboat_description/world_launch.py`
+hard-codes the stock world and declares no `world` argument. It reproduces
+that launch file's responsibilities against the world: `sl.gz_launch`
+(which also registers the world name `generated_ocean` the model bridges
+resolve against), the `/clock` and `/ocean_current` bridges, and
+`blueboat_description/upload_rov_launch.py` for the robot spawn and its
+bridges. No file in `blueboat_description` is modified.
+`use_stock_world:=true` loads the stock description world instead — the
+boat drives, but the seabed and objects the sonar renders against are not
+in the Gazebo scene.
 
-The generated world uses `gz-sim-*` plugin names (Garden/Harmonic), which
-is the `gazebo_plugin_prefix: gz` default. Set `ignition` in the mission
-YAML for a Fortress machine.
+The generated world uses `gz-sim-*` plugin names (Garden/Harmonic) by
+default; `generate_world --plugin-prefix ignition` targets Fortress.
 
-## 4. Mission path service vs. the existing one
+### Sea state (current + waves)
 
-`sss_path_generation` serves the **same** `RequestPath` service on
-`/path_request` as the existing `path_generation.py` — the unmodified
-`master_control.py` / `path_publisher.py` track generated survey missions
-with zero changes. Start exactly one of the two:
+Both launch paths start `sea_state_node` (`launch/sea_state_launch.py`,
+included by `full_mission_launch.py`): `sea_current:=` / `sea_waves:=`
+presets with `sea_current_from_deg:=` / `sea_waves_from_deg:=` compass
+FROM bearings, or a `sea_schedule:=` timeline; the defaults
+(`none` / `calm`) are strict no-ops. The current rides the bridge both
+launch paths already had (ROS `/current` → gz `/ocean_current`, consumed
+by the boat's `Hydrodynamics` plugin); the waves are a one-shot wrench
+per physics step through gz-sim's `ApplyLinkWrench`, which the node
+injects into a running world when the world file lacks it — so it also
+runs **standalone next to BlueBoat-Control's stock `Sim_launch.py`**:
 
-* survey missions → `sss_path_generation`
-  (`trajectory_file:=<bundle>/trajectory.yaml`), as `full_mission_launch`
-  does;
-* the original analytic paths → the existing node, and skip
-  `with_mission_path`.
+```bash
+ros2 launch blueboat_sss_sim sea_state_launch.py world_name:=ocean \
+    sea_current:=strong sea_current_from_deg:=90 sea_waves:=slight sea_waves_from_deg:=45
+```
 
-## 5. Sim ↔ real swap
+That is exactly what the MCS spawns as a companion process for an
+empty-world simulation; in a personalized world it passes the same
+`sea_*` arguments to `full_mission_launch.py`. The situation is
+modifiable at run time on `/sim/sea_state/command` and readable on
+`/sim/sea_state` (`docs/topics.md`, `docs/sea_state_model.md` §8–9).
+
+## 5. Missions: this package no longer serves `/path_request`
+
+Missions belong to MCS/Control. `blueboat_control`'s own `path_generation`
+is the only `/path_request` server, and its `from_yaml` branch consumes an
+MCS deployed trajectory directly (`trajectory:=from_yaml:<abs path>`; the
+file is watched, so it may be deployed after launch — the boat holds
+station until it appears). `full_mission_launch.py with_control:=true
+trajectory_file:=<yaml>` wires exactly that, plus `path_publisher` with
+its `total_time` window sized from the trajectory (either schema:
+`points: [[t,x,y,yaw]]` or `waypoints` + `speed`). For a quick dev run
+without MCS, every world folder ships its own ready trajectory:
+`trajectory_file:=<world_dir>/source_path_world.yaml` (the source path in
+world coordinates, starting at the spawn).
+
+## 6. Sim ↔ real swap
 
 The sonar interface is identical, so the swap is one node choice:
 
@@ -87,69 +139,53 @@ reconstruction and any Cerulean tooling work on simulated data too. The
 only observable differences: the extra `~/ground_truth/contacts` topic
 (additive) and simulated `timestamp_ms` starting at first enable.
 
-## 6. Standalone sonar (no full stack)
+## 7. Standalone sonar (no full stack)
 
-Drive the boat any way you like (teleop, existing missions) and run just
-the sonar + recorder:
+Drive the boat any way you like and run just the sonar + shim:
 
 ```bash
-ros2 launch blueboat_sss_sim sss_sim_launch.py mission_dir:=$HOME/runs/r1
+ros2 launch blueboat_sss_sim sss_sim_launch.py world_dir:=$HOME/worlds/<p>/<w>
 ```
 
-`auto_ping:=false` if you want to enable pinging manually, exactly as an
-operator would on the real system.
+`auto_ping:=false` to enable pinging manually, exactly as an operator
+would. `sonar_config:=` names a different acquisition profile (default:
+the package `config/default_sonar.yaml`; a legacy bundle's frozen
+`sonar.yaml` wins when present); the six device parameters remain
+individually overridable (`range_length_mm:=30000 gain_index:=-1`).
 
-## 7. Batch dataset generation
+## 8. Measuring a run
 
-`randomize: true` in the mission YAML draws seed, litter density and
-pattern parameters per bundle:
-
-```bash
-for i in $(seq 1 20); do
-  ros2 run blueboat_sss_sim generate_mission --config my_mission.yaml \
-      --out ~/runs/batch/$i --seed $i
-done
-```
-
-Each bundle is fully reproducible from its seed; `mission_snapshot.yaml`
-records the resolved configuration. Point all recorders at one shared
-`dataset_dir` to accumulate a single training set (tile names are prefixed
-by `run_name`, so set it per run).
-
-## 8. Measuring a mission
-
-Detection metrics come out of the renderer's own ground truth, with no ROS
-and no field session:
+Detection metrics come out of the renderer's own ground truth, with no
+ROS and no field session:
 
 ```bash
-# The bundle's intended path -- reproducible from the seed alone
-ros2 run blueboat_sss_sim mission_metrics --bundle ~/runs/r3 --out ~/metrics/r3
+# Replay a trajectory over a world -- reproducible from the seed alone
+ros2 run blueboat_sss_sim mission_metrics --world ~/worlds/<p>/<w> \
+    --trajectory ~/.config/blueboat_mcs/trajectories/<p>.yaml --out ~/metrics/w
 
 # The path a real run actually tracked, from its recorded .svlog
-ros2 run blueboat_sss_sim mission_metrics --bundle ~/runs/r3 \
-    --source svlog --input ~/sessions/2026-08-30/run.svlog --out ~/metrics/r3_real
+ros2 run blueboat_sss_sim mission_metrics --world ~/worlds/<p>/<w> \
+    --source svlog --input run.svlog --out ~/metrics/w_real
 
-# What the node actually published (a dump of ground_truth/contacts;
-# that topic carries no pose, so aspect is reported as unavailable)
-ros2 run blueboat_sss_sim mission_metrics --bundle ~/runs/r3 \
-    --source jsonl --input contacts.jsonl --out ~/metrics/r3_pub
+# What the node actually published (no pose -> aspect unavailable)
+ros2 run blueboat_sss_sim mission_metrics --world ~/worlds/<p>/<w> \
+    --source jsonl --input contacts.jsonl --out ~/metrics/w_pub
 ```
 
-Writes `metrics.json` + `metrics.md` into `--out`; the bundle and the
+Writes `metrics.json` + `metrics.md` into `--out`; the world and the
 recording are only ever read. Every object in `scene_manifest.yaml` is
-accounted for as detected, ensonified-but-below-criterion, or never
-ensonified, and the criterion in force (`geometric` / `resolved` /
-`shadowed`) is named in both files. The `content_digest` covers everything
-except provenance, so the same bundle regenerated from its seed into a
-different directory compares equal.
+accounted for; the criterion in force (`geometric`/`resolved`/`shadowed`)
+is named in both files; `content_digest` excludes provenance so a world
+regenerated from its state compares equal. Legacy mission bundles work
+without `--trajectory`/`--sonar` (their frozen copies are the fallback).
 
-The `.svlog` path needs the position track the recording carries as mavlink
-`LOCAL_POSITION_NED` (id 150). In simulation that comes from
-`mavros_shim_node`, so launch with `with_mavros_shim:=true` if the run is
-going to be measured this way.
+The `.svlog` path needs the mavlink `LOCAL_POSITION_NED` (id 150) track;
+in simulation that comes from `mavros_shim_node` (on by default).
 
 ## 9. Verifying an install
 
 `python3 -m test.smoke_test` from the package source root runs the whole
-ROS-free pipeline (world → render → encode → decode → label → export) and
-writes a visual waterfall preview to `/tmp/blueboat_sss_smoke/`.
+ROS-free pipeline (~150 checks: geo → world folder → render → encode →
+decode → metrics → calibration) and writes artifacts to
+`/tmp/blueboat_sss_smoke/`. `QT_QPA_PLATFORM=offscreen python3 -m
+test.gui_smoke` exercises the GUI headless.

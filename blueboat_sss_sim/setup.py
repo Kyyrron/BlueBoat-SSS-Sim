@@ -27,15 +27,16 @@ setup(
         "console_scripts": [
             # ROS nodes
             "sss_sim_node = blueboat_sss_sim.ros.sss_sim_node:main",
-            "dataset_recorder_node = blueboat_sss_sim.ros.dataset_recorder_node:main",
-            "sss_path_generation = blueboat_sss_sim.ros.sss_path_generation:main",
             "mavros_shim_node = blueboat_sss_sim.ros.mavros_shim_node:main",
+            "sea_state_node = blueboat_sss_sim.ros.sea_state_node:main",
+            # World builder GUI (PySide6; import-guarded)
+            "world_builder = blueboat_sss_sim.builder.app:main",
             # Offline tools
             "generate_world = blueboat_sss_sim.worldgen.generate:main",
-            "generate_mission = blueboat_sss_sim.mission.generate:main",
             "export_scene_maps = blueboat_sss_sim.worldgen.export_maps:main",
             "mission_metrics = blueboat_sss_sim.analysis.cli:main",
             "sss_calibration_report = blueboat_sss_sim.analysis.calibration_cli:main",
+            "sss_svlog_compare = blueboat_sss_sim.analysis.svlog_compare:main",
         ],
     },
 )

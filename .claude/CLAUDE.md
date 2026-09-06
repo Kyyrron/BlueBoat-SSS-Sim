@@ -1,79 +1,137 @@
 # BlueBoat-SSS-Sim
 
-Synthetic Side Scan Sonar simulation platform for the BlueBoat USV. A ROS 2
-(ament_python) package that generates procedural shallow-water worlds and
-publishes a **drop-in replacement** for the real dual Cerulean Omniscan 450 SS
-interface, so the entire downstream stack runs unmodified against simulated data.
+Synthetic Side Scan Sonar platform for the BlueBoat USV. A ROS 2
+(ament_python) package with two deliverables, cleanly separated:
 
-This module is **purely additive** to the BlueBoat workspace. It does not modify
-the control stack, robot description, or interfaces packages.
+1. the **World Builder** — a PySide6 wizard producing **GPS-anchored Gazebo
+   worlds** around the MCS Pattern Designer's GPS-anchored survey paths
+   (limits + reflective walls drawn on a satellite map, authored bathymetry,
+   a 27-class litter catalog), saved as immutable folders under
+   `~/worlds/<path_name>/<world_name>/`;
+2. the **simulated sonar** — a **drop-in replacement** for the real dual
+   Cerulean Omniscan 450 SS interface, so the entire downstream stack runs
+   unmodified against simulated data.
 
-**Naming and layout.** The package is `blueboat_sss_sim` everywhere: `package.xml`
-`<name>`, `setup.py` `package_name`, the ament resource marker
-`resource/blueboat_sss_sim`, `setup.cfg`'s `script_dir`
-(`$base/lib/blueboat_sss_sim`), all nine `console_scripts` targets, the Python
-module directory, and the `sl.node(...)` / `sl.include(...)` arguments in all
-three launch files. The ROS package root is nested one level below the git root,
-at `BlueBoat-SSS-Sim/blueboat_sss_sim/` — that directory is what "the package
-source root" means throughout this document.
+This module is **purely additive** to the BlueBoat workspace. It does not
+modify the control stack, robot description, interfaces packages, MCS or
+GCS. Missions belong to MCS/Control: this package serves worlds and sonar
+data and **no longer serves `/path_request`** (Control's own
+`path_generation` is the only server; its `from_yaml` branch consumes MCS
+deployed trajectories directly).
+
+**Naming and layout.** The package is `blueboat_sss_sim` everywhere:
+`package.xml` `<name>`, `setup.py` `package_name`, the ament resource
+marker, `setup.cfg`'s `script_dir`, all eight `console_scripts` targets,
+the Python module directory, and the `sl.node(...)` / `sl.include(...)`
+arguments in all three launch files. The ROS package root is nested one
+level below the git root, at `BlueBoat-SSS-Sim/blueboat_sss_sim/` — that
+directory is what "the package source root" means throughout this document.
 
 ---
 
 ## 1. What this module is for
 
-The thesis it supports investigates *aspect-aware adaptive replanning* for SSS
-survey on a surface vehicle. This simulator is the environment in which the
-headline policy comparison runs, so its output must be defensible as evidence,
-not merely plausible-looking imagery.
+The thesis it supports investigates *aspect-aware adaptive replanning* for
+SSS survey on a surface vehicle. This simulator is the environment in which
+the headline policy comparison runs, so its output must be defensible as
+evidence, not merely plausible-looking imagery.
 
-Boundary of responsibility: **the simulator's output stops at SSS data**
-(profiles, raw frames, ground-truth contacts). Turning that into pictures is the
-visualization app's job; turning pictures into training data is the downstream AI
-stage's job.
+Boundary of responsibility: **worlds in, SSS data out.** The World Builder
+turns an MCS anchored path plus operator intent into a georeferenced Gazebo
+world with ground truth; the sonar node turns that world plus vehicle odom
+into profiles, raw frames and ground-truth contacts. Turning that into
+pictures is the visualization app's job; missions are MCS/Control's job;
+training data is the downstream AI stage's job (the in-package YOLO
+recorder was deleted with the 2026-09 rework).
 
 ---
 
 ## 2. Architecture in one page
 
-**The sonar is not a Gazebo plugin.** Gazebo owns hull dynamics and pose; a ROS 2
-Python node owns acoustics, rendering against the same procedurally generated
-scene. Consequence: the acoustic scene is static during a run (fine for seabed
-litter survey), and the renderer is swappable without touching Gazebo.
+**The sonar is not a Gazebo plugin.** Gazebo owns hull dynamics and pose; a
+ROS 2 Python node owns acoustics, rendering against the same generated
+scene. Consequence: the acoustic scene is static during a run (fine for
+seabed litter survey), and the renderer is swappable without touching
+Gazebo.
 
 ```
-mission YAML
-   │  generate_mission
+MCS anchored path (~/.config/blueboat_mcs/trajectories/<name>.yaml, geo_anchor)
+   │  world_builder GUI  (or generate_world on a world YAML, headless)
    ▼
-mission bundle ── world.sdf + seabed.stl ──► Gazebo ──► /blueboat/odom
-   (one dir,   ── scene.npz + manifest ──┐                    │
-    one seed)  ── trajectory.yaml ──┐    │                    ▼
-               ── sonar.yaml ──┐    │    └────────────► sss_sim_node
-                               │    │                         │
-                               │    ▼                         ├─► .../profile ─┐
-                               │  sss_path_generation         └─► .../raw ─────┤
-                               │  (/path_request)                              │
-                               └─► master_control / path_publisher   sss_processor_node
-                                   (blueboat_control, unmodified)    (adjacent package)
+world folder ~/worlds/<path>/<world>/          [immutable; _i-deduped]
+   ├─ world.sdf + seabed.stl ──► Gazebo (spherical_coordinates, wall
+   │                             collisions, invisible limit borders)
+   ├─ scene.npz + scene_manifest.yaml (geo block) ──► sss_sim_node ──► profiles/raw/contacts
+   ├─ depth.npz (terrain-only height)   ├─► mavros_shim_node ──► /mavros/* (GPS about the anchor)
+   ├─ preview_objects.png               ├─► sea_state_node ──► /current → gz /ocean_current, /world/<w>/wrench
+   ├─ metadata.yaml (GPS ground truth)  ▼                       → gz ApplyLinkWrench, /sim/sea_state (JSON) → MCS
+   └─ builder_state.yaml (Edit mode)   sss_processor_node (adjacent package, unmodified)
 ```
 
-**Single source of truth:** one `SceneModel` emits both `world.sdf` (Gazebo
-visuals/physics) and `scene.npz` (acoustic renderer + auto-labeler). They cannot
-diverge. Never generate one without the other.
+**Sea state (2026-09-03):** `sea/` (ROS-free — JONSWAP wave field with
+finite-depth dispersion, Fossen Gauss-Markov current, hydrostatic
+Froude-Krylov force on the BlueBoat catamaran hull minus Gazebo's own box
+term, presets + timelines) drives `ros/sea_state_node.py`, which
+publishes the water velocity the boat's `Hydrodynamics` plugin drags
+against and a one-shot wave wrench per physics step through gz-sim's
+`ApplyLinkWrench` (injected at run time when a world lacks it, so the
+stock `Sim_launch.py` world works too). The boat and the sonar are
+unchanged: roll/heave/yaw already coupled, pitch now does (`renderer.
+_ping_geometry`, `dz·tan(pitch)` along-track). **2026-09-05:** the
+node now *predicts* the 20 Hz odometry to the tick with its twist and
+adds hull damping (`sea/motion.py`) — the restoring spring evaluated on
+a 50 ms-stale pose rang the 0.6 s heave mode at 1.6 Hz ("too
+powerful, too regular, too frequent"); the field is short-crested
+(12 bearings, s 3, seeded random detune), the hull also pushes
+surge/sway/yaw (first-order horizontal Froude–Krylov), wake groups are
+half as frequent and spectrally broad, and `simulate_3dof` closes the
+loop offline as the gate (`docs/sea_state_model.md` §5.5–5.8, §9). Presets
+`config/sea_states.yaml`; physics and DOIs `docs/sea_state_model.md`;
+MCS chooses the situation after the world (its own code, CM-3).
 
-**Layering:** `core/`, `worldgen/`, `sonar/`, `dataset/`, `mission/`,
-`analysis/` import no ROS and are testable standalone. `ros/` is a thin
-shell. Keep it that way — the offline smoke test depends on it.
+**Single source of truth:** one `SceneModel` emits both `world.sdf` and
+`scene.npz`. They cannot diverge. Never generate one without the other.
 
-Key extension seam: `SonarRenderer` (ABC in `sonar/renderer.py`). Anything
-downstream of it — noise, encoding, topics, dataset — is renderer-agnostic.
+**GPS anchoring:** a world's local ENU frame is its source path's design
+frame **translated so that world (0, 0) is the spawn origin** — the
+path's first waypoint when it lies inside the drawn limits, else the
+rectangle centre (`BuilderState.spawn_origin`). The boat always spawns at
+world (0, 0) (`upload_rov_launch.py` / MCS `Sim_launch.py` hard-code it),
+so this re-basing guarantees it starts inside the area, at the survey
+start; the world's `geo_anchor` is that point's GPS (identical to the
+path's own anchor when the path starts at its design origin). A real MCS
+path whose waypoints sit far from its designer origin therefore still
+yields a world the boat spawns inside — the GPS layer absorbs the shift,
+since every conversion goes through lat/lon. `core/geo.py` carries the
+project-wide equirectangular pair (byte-for-byte the MCS/GCS convention);
+the manifest carries an additive `geo:` block, `world.sdf` a
+`<spherical_coordinates>` element, and `metadata.yaml` every
+object/wall/corner **and the spawn** in GPS (plus the design offset). The
+folder also stores `source_path_world.yaml` — the source path re-expressed
+in world coordinates, first waypoint at (0, 0), directly usable as the dev
+launch's `trajectory_file`. `sss_sim_launch.py` feeds the MAVROS shim from
+the world's anchor automatically.
+
+**Layering:** `core/`, `worldgen/`, `sonar/`, `analysis/` import no ROS and
+no Qt and are testable standalone. `ros/` is a thin ROS shell; `builder/`
+is the only Qt code (and imports no ROS; `builder/state.py` and
+`builder/paths.py` are Qt-free so the smoke test drives the whole build
+pipeline headless). Keep it that way — the offline smoke test depends on it.
+
+Key extension seams: `SonarRenderer` (ABC in `sonar/renderer.py`) — anything
+downstream of it is renderer-agnostic; `DEPTH_PRESETS`
+(`worldgen/depth/presets.py`) and `CATALOG` (`worldgen/objects.py`) — one
+registry entry adds a bathymetry pattern or an object class to the GUI with
+zero GUI edits.
 
 ---
 
 ## 3. Interface (the contract — this is where bugs come from)
 
-Node name `side_scan_sonar`, so private topics resolve under `/side_scan_sonar/`.
+Node name `side_scan_sonar`, so private topics resolve under
+`/side_scan_sonar/`.
 
-### 3.1 `sss_sim_node` — the drop-in sonar
+### 3.1 `sss_sim_node` — the drop-in sonar (unchanged by the rework)
 
 | Topic | Type | Dir | QoS | Other side |
 |---|---|---|---|---|
@@ -81,16 +139,16 @@ Node name `side_scan_sonar`, so private topics resolve under `/side_scan_sonar/`
 | `/side_scan_sonar/starboard/profile` | 〃 | pub | 〃 | 〃 |
 | `/side_scan_sonar/port/raw` | `std_msgs/UInt8MultiArray` | pub | 〃 | `sss_processor_node` (rebuilds `.svlog`) |
 | `/side_scan_sonar/starboard/raw` | 〃 | pub | 〃 | 〃 |
-| `/side_scan_sonar/ground_truth/contacts` | `std_msgs/String` (JSON) | pub | default 10 | `dataset_recorder_node`; **simulation-only, additive** |
+| `/side_scan_sonar/ground_truth/contacts` | `std_msgs/String` (JSON) | pub | default 10 | offline analysis; **simulation-only, additive** |
 | `/side_scan_sonar/ping/enable` | `std_msgs/Bool` | sub | default 10 | operator / launch one-shot |
 | `/blueboat/odom` | `nav_msgs/Odometry` | sub | default 10 | Gazebo bridge (param `odom_topic`) |
 
-Pinging is **off at startup**, exactly like hardware. Run-dependent parameters are
-re-read on every enable.
+Pinging is **off at startup**, exactly like hardware. Run-dependent
+parameters are re-read on every enable.
 
 Parameters — names and semantics identical to the real `sss_node.py`, **two
-defaults deliberately differ** because the simulator is tuned to the 15 m field
-capture used for calibration:
+defaults deliberately differ** because the simulator is tuned to the 15 m
+field capture used for calibration:
 
 | Parameter | Sim default | Real `sss_node.py` default |
 |---|---|---|
@@ -101,119 +159,158 @@ capture used for calibration:
 | `num_results` | 600 | 600 |
 | `pulse_len_percent` | 0.002 | 0.002 |
 
-The two differing defaults are **deliberate and settled**: the sim values are
-the power-calibration anchor (NC #6 — `calibration_db_offset` and the
-acoustic constants are fitted at this range and fixed gain), while the real node's defaults
-match neither survey setting the project uses (`project_synthesis.md` §8.5
-reserves 30 m coverage / 15 m revisit). Comparability is therefore carried by
-**explicitness, not by equal defaults**: the six acquisition parameters are
-passed to the node from the mission bundle's frozen `sonar.yaml` by
-`sss_sim_launch.py` (and forwarded by `full_mission_launch.py`), each
-overridable per run as a launch argument — an empty override means "use the
-bundle". The node warns at every ping enable when the acquisition in force
-differs from what the bundle records. `config/coverage_pass_sonar.yaml` is the
-30 m coverage-pass profile; `config/default_sonar.yaml` is the 15 m revisit
-profile and the calibration anchor.
+The two differing defaults are **deliberate and settled**: the sim values
+are the power-calibration anchor (NC #6). Comparability is carried by
+**explicitness, not by equal defaults**: `sss_sim_launch.py` passes all six
+acquisition parameters to the node from the resolved sonar profile
+(explicit `sonar_config:=` > a legacy bundle's frozen `sonar.yaml` >
+`config/default_sonar.yaml`), each overridable per run as a launch
+argument. `config/coverage_pass_sonar.yaml` is the 30 m coverage-pass
+profile; `config/default_sonar.yaml` is the 15 m revisit profile and the
+calibration anchor.
 
-`gain_index: -1` is accepted with the real device's meaning. It is a
-**command-only** sentinel — `OmniscanProfile.gain_index` is `uint16`, so the
-device resolves auto-gain internally and reports a concrete index. The
-simulator has no AGC and resolves `-1` to the calibrated index 4, reporting 4
-and `analog_gain` 74.55. The modelled ladder is 0–7, with 4–7 measured from
-the field corpus (74.55 / 142.8 / 242.025 / 464.625 — the device's own
-auto-gain uses all four); any other index raises
-when `AcquisitionParams` is constructed (at launch-argument resolution, not at
-the first ping) rather than silently falling back.
+`gain_index: -1` is accepted with the real device's meaning (command-only
+sentinel; the simulator resolves it to the calibrated index 4 and reports
+4). The modelled ladder is **0–7**, 4–7 measured from the corpus; any other
+index raises when `AcquisitionParams` is constructed.
 
-Simulation-only: `scene_dir` (**required**), `sonar_config`, `odom_topic`,
-`publish_ground_truth`, `seed`.
-
-Node name is `side_scan_sonar` in both the simulator and the real node, so the
-resolved topic namespace is identical.
+Simulation-only params: `scene_dir` (**required** — a world folder or
+legacy bundle), `sonar_config`, `odom_topic`, `publish_ground_truth`,
+`seed`.
 
 Ground-truth JSON payload per ping cycle:
 `{"t_sim": float, "contacts": [{"side","object_id","type","slant_range_m","extent_bins","shadow_bins","visible","ping_number","ghost","via"}]}`
+— `ghost`/`via` mark a multipath image (`via: "wall:<name>"` / `"surface"`,
+`""` direct); consumers aggregate on `(object_id, via)`; both keys default
+to direct, so pre-wall streams parse unchanged.
 
-`ghost`/`via` mark a multipath image: the same `object_id` down a folded
-path off the named reflector — `via: "wall:<name>"` for a wall image,
-`via: "surface"` for the `surface_mirror_enabled` image across z = 0, `""` on
-the direct return. Consumers aggregate on `(object_id, via)` — grouping on `object_id`
-alone merges an object with its own ghost. Both keys are additive and default
-to direct, so a stream from a bundle generated before wall multipath existed
-parses unchanged.
+### 3.2 `mavros_shim_node` — on by default in the launches
 
-### 3.2 `sss_path_generation` — mission trajectory service
+Subscribes `/blueboat/odom`; publishes
+`/mavros/global_position/compass_hdg` (`Float64`), `/mavros/imu/data`
+(`Imu`), `/mavros/local_position/pose` (`PoseStamped`), and
+`/mavros/global_position/global` (`NavSatFix`, BEST_EFFORT sensor-data QoS,
+~5 Hz) — synthesized from the ENU position about `sim_origin_lat` /
+`sim_origin_lon`. **`sss_sim_launch.py` fills those from the world's own
+geo anchor** when the args are left empty; the legacy 43.6961 / 7.3080
+default applies only to unanchored worlds, with a warning. This is what
+lets the BlueBoat GCS's GPS-anchored map anchor against the simulator at
+the world's true location. (History: commit f489a21 shipped this node
+without its odom subscription — four advertised topics, zero messages; the
+subscription is restored and is the node's entire drive train.)
 
-| Interface | Type | Dir | Other side |
-|---|---|---|---|
-| `/path_request` | `blueboat_interfaces/srv/RequestPath` | service server | `path_publisher.py` (`blueboat_control`) |
-| `/mission/full_path` | `nav_msgs/Path` | pub, **TRANSIENT_LOCAL latched**, published once at startup | RViz (set display Durability to Transient Local) |
+### 3.3 World Builder — `world_builder` (GUI, PySide6)
 
-Serves the *same* service name as `blueboat_control`'s `path_generation.py`, and
-registers under the *same node name*, `path_generation`. **Exactly one of the two
-may run.** Parameters: `trajectory_file` (required), `display_log`,
-`display_resolution_m` (0.5).
+Startup dialog: **Create Gazebo World** / **Edit World** (Edit lists
+`~/worlds/*/*/` and reloads a world's `builder_state.yaml`; Screen 1 is
+skipped and everything arrives pre-filled). Screens:
 
-`path_publisher` requests a time *window* `[0, total_time]` sampled at `dt`
-(its own defaults: `total_time` 1000.0, `dt` 0.1), so a mission longer than that
-is truncated in RViz and in whatever tracks it. `full_mission_launch` sets
-`total_time` from the bundle's stored `duration_s` rather than relying on that
-default.
+1. **GPS path** — the MCS launch dialog's list filtered to GPS-anchored
+   entries (`builder/paths.py`: glob `~/.config/blueboat_mcs/trajectories/
+   *.yaml` minus `*.meta.yaml`, keep `geo_anchor` present — the
+   `read_geo_anchor` predicate, reimplemented locally per CM-3).
+2. **World limits & walls** — satellite-tile map (Esri, the MCS/GCS
+   source, cached under `~/.cache/blueboat_sss_sim/tiles/`); drag one
+   axis-aligned rectangle = the limits (grid extent + four invisible
+   collision-only border boxes, **never acoustic**); click wall segments =
+   `Wall` entries with a **kind**: `quay` (face from the seabed, blocks
+   sonar and boat) or `pontoon` (floating, `draft_m`, the sonar looks
+   under it — the structure a boat can cross); each with reflectivity
+   (per bounce, 0.65 concrete), `roughness_m` (Rayleigh coherence at
+   450 kHz) and a Gazebo box **with collision** (`docs/sonar_model.md`
+   §11, re-anchored 2026-09-03 on the corpus quay: bright face, dark zone
+   behind, faint far ghosts). Every wall-dialog row carries hover help.
+   Endpoints within 0.75 m of another wall's end **snap** while drawing
+   or dragging and are **merged** at build time (union-find,
+   `core.geometry.merge_endpoints`); selecting a wall shows a hollow
+   midpoint handle — dragging it **bends** the wall (a quadratic Bézier
+   through that point, stored as `ctrl` in the builder state only, and
+   flattened into `<name>_s01…` chords for the engine by
+   `core.geometry.wall_segments`); "Straighten wall" removes the bend.
+3. **Depth & seabed** — three sources: a preset (`harbour_basin`,
+   `river_channel`, `beach_profile` (Dean x^(2/3), optional berm),
+   `canal`, `flat`, `sloped_plane`, `dredged_channel`, `marina`,
+   `rocky_outcrop`, `sandbar_ripples`; parameter forms generated from
+   `DEPTH_PRESETS`; **depth ≤ 0 is dry land** — the dry-margin presets
+   accept negative minima since 2026-09-05), a file (CSV lat,lon,depth;
+   geographic-CRS GeoTIFF via Pillow — projected CRS rejected with a
+   message; linear interpolation inside the data, nearest-value flood
+   fill outside that **never crosses a wall**), or a **sonar recording**
+   (`.svlog`, 2026-09-05: the recording's first-bottom-return soundings
+   at its GPS fixes — `analysis/bathymetry.py`, the processor's detector
+   re-expressed, both sides fused robustly, a frozen autopilot clock
+   paired by file order — fitted with a smoothing thin-plate spline,
+   the edge slope continued and damped beyond the track over
+   `trend_length_m`, a residual-scaled undulation between the lines;
+   `worldgen/depth/svlog.py` + `smooth.py`; the track and soundings are
+   drawn on the map, a quality line reports pings / bottom-return
+   fraction / altitude / cells / crossovers / clock regime **and
+   coverage** (2026-09-06: samples inside the limits, share of the world
+   within `trend_length_m` of a sounding, with a warning below 35 % —
+   `worldgen/depth/coverage.py`; a source that lands nowhere inside the
+   limits is refused with both places, the distance and the compass
+   point, and a near miss says to redraw the rectangle rather than to
+   change the file), and an
+   optional backscatter *hint* layer can seed material patches on
+   request — how to sail for it: `docs/svlog_depth_survey.md`); then
+   the full seabed texture schema (`TERRAIN_TEXTURE_SCHEMA`: dunes,
+   roughness, material layout uniform/patches/painted), **depth and
+   material brushes** on a map canvas (strokes stored in
+   `DepthState.paint` / `material_paint`; a depth stroke is exact inside
+   its radius and blends into the base over its own short **feather**
+   with a C1 distance-field smoothstep, strokes combined by the union
+   rule so overlaps leave no ridge — 2026-09-05, was a linear
+   triangulation to two radii; reproduced headlessly from `depth.paint`
+   / `terrain.materials.paint`), and **live previews** (height and
+   reflectivity, 300 ms debounce, `DepthPreviewWorker`; the former
+   "sonar pass" strip was removed on 2026-09-03 — it showed texture
+   contrast on one arbitrary line and misled as a survey preview). Every
+   form row — texture, depth presets, walls, objects — carries a
+   one-sentence hover help, the schema tuple's 7th element.
+4. **Objects** — one row per `CATALOG` class: count or per-hectare
+   density, optional Gaussian clustering, size/burial distributions
+   (uniform or gauss), yaw orientation, a **Resting pose** line ("let
+   them fall / roll (3-D)" + randomness: `orientation.rest`, 2026-09-03 —
+   each object takes a physically stable pose of its primitive and
+   settles on the seabed slope, `worldgen/solids.py`), per-class
+   `params_schema` extras; a global seed. Each row carries an **Info…**
+   button (regular size, typical shape, rest poses with their odds, and
+   a top-down footprint preview of the typical instance —
+   `worldgen/objects.py`: `typical_instance`, `shape_description`,
+   `rest_poses_text`, `footprint_profile`). (`objects.explicit` —
+   verbatim matched-pair/cluster instances — is an engine capability
+   reachable from YAML/state, not yet surfaced in the GUI.)
+5. **Preview & save** — objects map + depth map (rendered by the same PIL
+   code the folder stores), then name → generate. Name collisions get a
+   silent `_1`, `_2`… suffix, **always** — Edit-mode re-saves included.
+   Worlds are immutable.
 
-### 3.3 `dataset_recorder_node` — downstream tool, not part of the sim
-
-Subscribes both `.../profile` topics plus `/side_scan_sonar/ground_truth/contacts`;
-writes an Ultralytics-layout YOLO dataset. **Not started by any launch file by
-default** (`with_recorder:=true` to opt in). It lives here for convenience; the
-simulator's deliverable is SSS data.
-
-Parameters: `output_dir` (required), `tile_pings` (512), `overlap_pings` (64),
-`box_mode` (`highlight_shadow`), `val_fraction` (0.15), `autosave_period_s` (5),
-`run_name`.
-
-### 3.4 `mavros_shim_node` — on by default in the launches
-
-Subscribes `/blueboat/odom`; publishes `/mavros/global_position/compass_hdg`
-(`Float64`), `/mavros/imu/data` (`Imu`), `/mavros/local_position/pose`
-(`PoseStamped`), and `/mavros/global_position/global` (`NavSatFix`,
-BEST_EFFORT sensor-data QoS, throttled to ~5 Hz) — synthesized from the ENU
-position about the node parameters `sim_origin_lat` / `sim_origin_lon`
-(equirectangular inverse; defaults 43.6961 / 7.3080, matching the GCS `--sim`
-origin). The NavSatFix + compass pair is what lets the BlueBoat GCS's
-GPS-anchored map anchor against the simulator exactly as against the real
-boat, which is why `sss_sim_launch.py` now defaults `with_mavros_shim` to
-**true** (pass `with_mavros_shim:=false` to drop the MAVROS names). The sonar
-interface itself still does not need it (vehicle heading is inside every
-`OmniscanProfile`).
-
-### 3.5 CLI entry points
+### 3.4 CLI entry points
 
 | Command | Produces |
 |---|---|
-| `generate_world` | `world.sdf`, `seabed.stl`, `scene.npz`, `scene_manifest.yaml` |
-| `generate_mission` | a complete run bundle (see §5) |
+| `world_builder` | the GUI above |
+| `generate_world` | `world.sdf`, `seabed.stl`, `scene.npz`, `scene_manifest.yaml` from a world YAML (headless; supports `geo:`, `depth:`, `limits_collision`, `objects.classes/explicit`) |
 | `export_scene_maps` | `gt_reflectivity.png`, `gt_depth.png`, `gt_objects.png`, `gt_extent.yaml` |
-| `mission_metrics` | `metrics.json`, `metrics.md` — detection metrics from ground truth |
-| `sss_calibration_report` | `calibration.json`, `calibration.md` — a recording and a bundle reduced to the same per-range dB statistic, with the residual against the reduction and site floors |
+| `mission_metrics` | `metrics.json`, `metrics.md` — detection metrics from ground truth; `--world <dir> --trajectory <yaml>` (either trajectory schema; legacy bundles fall back to their frozen copies) |
+| `sss_calibration_report` | `calibration.json`, `calibration.md` — a recording and a world reduced to the same per-range dB statistic (`--trajectory`/`--sonar` as above) |
+| `sss_svlog_compare` | `compare.json`, `compare.md` — any number of `.svlog` files (sim or real) reduced to the same timing-law, level and texture statistics (ping period vs `max(50 ms, 2R/c + 3 ms)`, dB vs slant range, floor, span, lag-1/3/10 correlations, high-pass speckle std, counter resets). The instrument the 2026-09-02 fidelity work was judged with; run it on every model change |
+| `python3 -m blueboat_sss_sim.analysis.wall_contrast <svlog…>` | quay contrast of a recording (face − before, 1.5–4 m beyond − before, 6–12 m beyond − before, band width): the numbers the wall model is anchored to (`docs/sonar_model.md` §11). Not a console script; module-run |
+| `sea_state_node` (`ros/`) | not a CLI: the sea-state node the launches start (`sea_state_launch.py`) |
 
-### 3.6 Launch files
+### 3.5 Launch files
 
 | File | Starts |
 |---|---|
-| `full_mission_launch.py` | Gazebo on the **bundle's** `world.sdf` + `/clock` and `/ocean_current` bridges + robot spawn + control stack + mission path service + sonar |
-| `sss_sim_launch.py` | sonar (+ optional recorder / shim / path service), with the bundle's frozen acquisition passed explicitly |
-| `sim_world_launch.py` | Gazebo alone on a generated world |
+| `full_mission_launch.py` | Gazebo on the **world folder's** `world.sdf` + `/clock` and `/ocean_current` bridges + robot spawn + sonar/shim; `with_control:=true trajectory_file:=<yaml>` adds the unmodified control stack with **`blueboat_control`'s own `path_generation`** on `trajectory:=from_yaml:<file>` (an MCS `.deployed/<name>.yaml` works as-is; the file is watched). Dev convenience — operational missions are MCS's. |
+| `sss_sim_launch.py` | sonar + shim over a world folder, acquisition passed explicitly from the resolved profile, shim origin from the world's anchor |
+| `sim_world_launch.py` | Gazebo alone on a world folder |
+| `sea_state_launch.py` | `sea_state_node` + the two `/world/<w>/wrench*` bridges; included by `full_mission_launch.py` (`sea_current`, `sea_current_from_deg`, `sea_waves`, `sea_waves_from_deg`, `sea_schedule`, `sea_seed`), and **standalone next to BlueBoat-Control's `Sim_launch.py`** (`world_name:=ocean`) — what the MCS spawns as a companion for an empty-world simulation |
 
-`blueboat_description`'s `world_launch.py` hard-codes the stock world and
-declares no `world` argument, so `full_mission_launch.py` does the Gazebo
-bring-up itself: `sl.gz_launch` on the bundle's `world.sdf` (which also
-registers the world name `generated_ocean` that the model bridges resolve
-against), the `/clock` and `/ocean_current` bridges, and
-`blueboat_description`'s `upload_rov_launch.py` for the robot spawn and the
-`/blueboat/odom`, `pose_gt`, `joint_states`, `cmd_thruster{1,2}` bridges. No
-neighbour file is modified. `use_stock_world:=true` loads the stock description
-world instead — the boat drives, but the seabed and objects the sonar renders
-against are absent from the Gazebo scene.
+Module-scope, launch-free resolvers the smoke test exercises directly:
+`resolve_acquisition`, `resolve_sonar_config`, `resolve_world_anchor`
+(`sss_sim_launch.py`) and `trajectory_total_time`
+(`full_mission_launch.py`).
 
 ---
 
@@ -223,304 +320,261 @@ Violating any of these breaks another module, the hardware swap, or the
 scientific argument.
 
 1. **Interface fidelity is absolute.** Same topic names, message types, QoS
-   (BEST_EFFORT/KEEP_LAST/10), parameter names, and ping-enable semantics as the
-   real `sss_node.py`. **Never define a new message type** — reuse
+   (BEST_EFFORT/KEEP_LAST/10), parameter names, and ping-enable semantics as
+   the real `sss_node.py`. **Never define a new message type** — reuse
    `blueboat_interfaces`. Additional simulation data goes on new, additive
    topics as JSON (as `ground_truth/contacts` does).
 
 2. **`raw` frames must be byte-valid Ping Protocol, checksum included.**
    Downstream reconstructs `.svlog` files from them for SonarView. Layout:
-   `'B''R' | u16 payload_len | u16 msg_id=2198 | u8 src | u8 dst | 52-byte fixed
-   payload | u16[num_results] | u16 checksum(sum of all prior bytes)`. Frame
-   length = `8 + 52 + 2·num_results + 2` (1262 B at 600 bins). `parse_frame()`
-   is the round-trip oracle; keep it working.
+   `'B''R' | u16 payload_len | u16 msg_id=2198 | u8 src | u8 dst | 52-byte
+   fixed payload | u16[num_results] | u16 checksum(sum of all prior bytes)`.
+   Frame length = `8 + 52 + 2·num_results + 2` (1262 B at 600 bins).
+   `parse_frame()` is the round-trip oracle; keep it working.
 
-3. **Both sides must be published from the same timer tick.** This is now the
-   simulator's own rule, not a requirement the downstream processor imposes:
-   `sss_processor_node.py` keys rows on `ping_number` (normalised across the
-   two device counters), emits one-sided rows rather than dropping them, and
-   applies no arrival-time pairing tolerance, so it no longer starves on
-   desynchronised sides. Keeping the two sides on one tick is what makes a
-   simulated run's rows two-sided by construction and keeps the ping counters
-   of the two channels in lockstep; relaxing it is this module's call
-   (root `CLAUDE.md` CM-3), and nothing downstream forces it either way.
+3. **Both sides must be published from the same timer tick.** The
+   simulator's own rule (downstream no longer forces it): one tick keeps
+   the two channels' ping counters in lockstep and every simulated row
+   two-sided by construction.
 
-4. **The first bottom return must survive every change to the acoustic model.**
-   Four coupled pieces make downstream bottom tracking lock, and the tracker
-   fails silently if any is removed: the beam-pattern sidelobe floor
-   (`beam_sidelobe_floor`), the specular near-nadir lobe strong enough to clear a
-   +8 dB threshold over dark bottoms (`specular_strength`), the specular
-   component rendered and speckled **separately** from the diffuse field with low
-   CV (`specular_looks`), and pulse-length range smearing (`pulse_smearing`).
-   Rule exists because a fully-speckled, unsmeared, weak nadir return made the
-   processor drop 100% of pings until the boat stopped moving. Confirmed in a
-   live graph against the real `sss_processor_node` (not the offline emulation):
-   it bootstraps within ~10 ping pairs of ping enable and publishes continuously
-   for a whole lawnmower pattern.
+4. **The first bottom return must survive every change to the acoustic
+   model.** Four coupled pieces make downstream bottom tracking lock, and
+   the tracker fails silently if any is removed: the beam-pattern sidelobe
+   floor (`beam_sidelobe_floor`), the specular near-nadir lobe
+   (`specular_strength`), the specular component rendered and speckled
+   **separately** from the diffuse field with low CV (`specular_looks`),
+   and pulse-length range smearing (`pulse_smearing`). The smoke test
+   re-verifies FBR lock with every object family — including the
+   open-frame lattice classes — in the scene.
 
 5. **Speckle statistics are load-bearing, not decoration.** Diffuse field:
-   multiplicative `Exp(1)` (fully developed, Rayleigh amplitude) — never emit the
-   clean per-bin mean. Coherent specular: `Gamma(L, 1/L)`, low CV. These are what
-   make synthetic imagery statistically usable for detector training.
+   multiplicative `Exp(1)`; coherent specular: `Gamma(L, 1/L)`, low CV.
+   Since 2026-09-02 the `Exp(1)` texture comes from the renderer's coherent
+   ground-scatterer field (`Ping.texture`, `coherent_scatterers: true`) so
+   it is also *correlated* along range (pulse) and along track (footprint
+   overlap) as the corpus measures — `Ping.power` stays the noiseless mean
+   and `speckle: false` is untouched. Smoke `[2g]` gates mean, CV and both
+   lag-1 correlations.
 
 6. **Power calibration is anchored to the field corpus, and moves once.**
-   `calibration_db_offset` (97.2 dB) is the **only** level constant: the device
-   normalises `pwr_results` per ping, so the counts carry no level and the raw
-   count span carries no information about it — fit against the reported
-   `max_pwr_db`, never against a count histogram (`[2e]`). Changing it, or the
-   fitted range law and noise floor, silently invalidates any comparison against
-   real data. `docs/sonar_model.md` §6 records which constants are measured,
-   which are jointly determined, and which the corpus leaves undetermined; keep
-   it current whenever one moves.
+   `calibration_db_offset` (97.2 dB) is the **only** level constant — fit
+   against the reported `max_pwr_db`, never against a count histogram, and
+   **only at matched altitude**: the corpus flies at 6–9 m (FBR-derived),
+   the smoke fixtures at ~3.5 m, and at matched altitude 97.2 reproduces
+   the gain-4 profiles within ~1 dB (re-verified 2026-09-02, when an
+   unmatched comparison had suggested a 12 dB shift). The noise floor
+   (8.3e-11) and water column (1.15e-7) are now **measured separately**
+   (far decile of the ≥72 m files; 1–3 m band) and the gain ladder step is
+   `20·log10`; those three moved on 2026-09-02 and are not to be re-fitted
+   jointly again. Changing any of them silently invalidates any comparison
+   against real data. `docs/sonar_model.md` §6 records which constants are
+   measured, which jointly determined, which undetermined; keep it current
+   whenever one moves.
 
-7. **Never raise launch's global log level to suppress noise.** It routes all
-   child process output through its own INFO loggers, so it silences every node
-   including first-party ones. Filter by message content on the screen handler
-   instead.
+7. **Never raise launch's global log level to suppress noise.** Filter by
+   message content on the screen handler instead.
 
-8. **Never modify the control stack or other packages.** Integration happens by
-   serving identical interfaces, not by patching neighbours.
+8. **Never modify the control stack or other packages.** Integration
+   happens by serving identical interfaces, not by patching neighbours.
+   (This includes the MCS trajectory discovery: `builder/paths.py`
+   reimplements the predicate rather than importing `mcs.*`.)
 
-9. **The renderer's ground-sample step must stay coupled to the slant-bin size.**
-   A fixed step leaves range bins unpopulated (masked by noise, fatal at 1200
-   bins).
+9. **The renderer's ground-sample step must stay coupled to the slant-bin
+   size.** A fixed step leaves range bins unpopulated.
 
-10. **Mission bundles are immutable snapshots.** Each carries its own frozen
-    `sonar.yaml` and `trajectory.yaml`; editing package config does nothing to an
-    existing bundle. Regenerate after any config change.
+10. **World folders are immutable snapshots.** A saved world is never
+    overwritten — not by Create (name dedupe), not by Edit (re-saves take a
+    new `_i` folder), not by tooling (`mission_metrics` etc. write only
+    into `--out`). Regenerate rather than edit; `builder_state.yaml` exists
+    precisely so regeneration is a load-away. Legacy mission bundles on
+    disk keep loading (their frozen `sonar.yaml`/`trajectory.yaml` are the
+    resolver fallbacks) and stay equally write-once.
 
-11. **Project-level:** the thesis's headline detector trains on *real* imagery
-    only. Synthetic data from this module is for the policy comparison, the
-    sim-to-real transfer-gap experiment, and development — never for the headline
-    detection claim.
+11. **Project-level:** the thesis's headline detector trains on *real*
+    imagery only. Synthetic data from this module is for the policy
+    comparison, the sim-to-real transfer-gap experiment, and development.
+
+12. **Limits never reflect.** The world-limit borders are Gazebo
+    collision-only geometry; they enter neither `scene.walls`, nor the
+    rasters, nor the manifest. Only authored walls are acoustic.
+
+13. **No return from land, and no objects on it.** A cell whose terrain
+    sits at or above the transducer (a dry beach, an awash bank) scatters
+    nothing back into the water (`renderer._ping_geometry`, `dz > 0`
+    mask; the horizon cull hides what lies beyond the waterline), and
+    random placement never lands on a cell above `DRY_HEIGHT_M`
+    (−0.05 m). A fully wet world is bit-identical either way.
+
+14. **Nothing ticked means nothing placed.** `objects.classes: {}` (the
+    builder with no class enabled) yields zero objects; only a config
+    *without* the key falls to the legacy random composition
+    (2026-09-05 fix — an empty selection used to scatter 29 objects).
 
 ---
 
-## 5. Data: bundles, formats, what not to overwrite
+## 5. Data: world folders, formats, what not to overwrite
 
-`generate_mission` produces one self-contained, seed-reproducible **run bundle**:
+`~/worlds/<path_name>/<world_name>/` (built by
+`worldgen/world_folder.build_world_folder`; resolution 0.10 m,
+auto-coarsened in 0.05 m steps so no raster axis exceeds 1500 cells):
 
 | File | Kind | Consumer |
 |---|---|---|
-| `world.sdf`, `seabed.stl` | generated | Gazebo (visuals/physics) |
-| `scene.npz`, `scene_manifest.yaml` | generated, **ground truth** | renderer, labeler, `export_scene_maps` |
-| `trajectory.yaml` | generated | `sss_path_generation`, `full_mission_launch` |
-| `sonar.yaml` | copied snapshot | `sss_sim_node` |
-| `mission_snapshot.yaml` | resolved input config | provenance |
-| `_world_config.yaml` | intermediate written by `generate_mission` and not removed | none |
+| `world.sdf`, `seabed.stl` | generated | Gazebo (spherical coords, wall collisions, invisible `limit_*` borders) |
+| `scene.npz`, `scene_manifest.yaml` | generated, **ground truth** | renderer, `export_scene_maps`, metrics |
+| `depth.npz` | generated | the **terrain-only** height raster (pre-object-stamp — the Screen-3 design surface) + `origin_x/y`, `resolution` |
+| `preview_objects.png` | generated | the Screen-5 objects map (objects circled + walls + limits + GPS path) |
+| `depth_source.csv` / `.tif` / `.svlog` | copied | Edit mode (self-contained even if the original file is gone; a recording can be tens of MB) |
+| `depth_samples.npz` | generated (`svlog` mode) | the soundings (`east, north, depth, t_ms, quality, lat, lon`) and the fitted cells (`cell_*`) |
+| `reflectivity_hint.npz` | generated (`svlog` + `backscatter_layer`) | the 0–1 mid-swath backscatter hint, uncalibrated |
+| `source_path_world.yaml` | generated | the source path in **world** coordinates (`blueboat_trajectory/1` points, first waypoint = (0, 0) = the spawn, no geo_anchor) — drop-in `trajectory_file` for the dev launch |
+| `metadata.yaml` | generated | **the cross-module contract**: `format: blueboat_world_meta/1`, source path (+ `design_offset` — world = design − offset), `geo_anchor`, `spawn` (world (0, 0) with its GPS), limits (local + 4 GPS corners SW/SE/NE/NW), walls (local + GPS + properties), every object (local + GPS + class + sizes + burial + fill), depth summary (recording worlds: `depth.svlog_quality`, incl. a `coverage` block — how much of the world was measured rather than extrapolated), seed |
+| `builder_state.yaml` | generated | **Edit mode**: `format: blueboat_world_builder_state/1`, the full wizard state incl. cached path points. GUI-internal; may churn — downstream reads `metadata.yaml`, never this |
 
-`trajectory.yaml` stores `name`, `speed`, `length_m`, `duration_s`, `waypoints`.
-`duration_s` is what sizes `path_publisher`'s window — if it is missing (older
-bundle), the launch recomputes it from waypoints and speed.
+`scene_manifest.yaml` stays **version 1**: the `geo:` block
+(`{anchor: {lat0, lon0, theta_deg}, convention:
+equirectangular_wgs84_r6378137}`) is additive exactly like `walls:` before
+it, and `PlacedObject`'s new `fill_fraction`/`params` fields load with
+defaults from old manifests. `SceneModel.load` rejects any other version
+outright.
 
-`scene.npz` holds the `height`, `reflectivity` and `material_id` rasters; the
-manifest holds `version`, `seed`, `grid`, `material_names`, the resolved world
-`config`, the full `objects` list (id, type, pose, size, burial, reflectivity,
-material) and the `walls` list. `walls` is additive: it does **not** move the
-manifest version, and a bundle generated before walls existed loads as open
-water; `SceneModel.load` rejects any other version outright. This is the ground truth for every metric the thesis reports —
-treat a bundle as write-once. To change something, generate a new bundle.
+RNG determinism: a world config **with** a `depth:` section splits the
+seed into two streams (`[seed, 0]` terrain, `[seed, 1]` objects), so
+editing the bathymetry never moves the objects — two worlds differing only
+in depth pair object-by-object. A legacy config without `depth:` keeps the
+single historical stream, bit-identical to every existing bundle.
 
-Dataset output (only when the recorder is explicitly enabled): Ultralytics layout
-`images/{train,val}`, `labels/{train,val}`, `dataset.yaml`, with a deterministic
-hash-based split, finalized on shutdown.
-
-Tile pixels: rows are converted to **absolute dB** with the profile's own
-`min_pwr_db` / `max_pwr_db` before stacking (the device normalises per ping, so
-raw arrays from different pings are not commensurable), the smooth
-`log10(range)` trend is removed as a viewer's TVG does, then a per-tile
-percentile stretch (1.0 / 99.5) maps to uint8. No log is applied on top — the
-samples are already on a dB axis. `dataset.yaml` states this as
-`intensity_mapping: db` plus a `meta:` block, at both the positions the
-augmentation stage reads, so a consumer never has to guess.
-
-Rasters are stored `(ny, nx)` with origin at the min corner; `export_scene_maps`
-flips vertically for north-up images and writes `gt_extent.yaml` for
-georeferencing against mosaics.
+Rasters are stored `(ny, nx)` with origin at the min corner;
+`export_scene_maps` flips vertically for north-up images and writes
+`gt_extent.yaml` for georeferencing.
 
 ---
 
 ## 6. Configuration
 
-Three layers, all with working defaults: `config/default_world.yaml`,
-`config/default_sonar.yaml`, `config/default_mission.yaml` (+ optional
-`config/materials.yaml`). Unknown keys raise immediately in **both** sonar
-sections — `acquisition:` and `model:` are each validated against their
-dataclass fields in `sonar/config.py` — and in the world config's `walls:`
-entries, which also reject a duplicate wall name. Every other world/mission
-key is read by name and unknown ones are ignored. A model key that was
-retired when the encoder moved to the device's per-ping normalisation
-(`base_scale`, `gain_index_step_db`) raises by name saying so, so a bundle
-frozen under the old encoding fails with an actionable message rather than a
-bare "unknown key".
+World YAML (consumed by `generate_world` and produced internally by the
+builder via `world_folder.state_to_world_config`):
 
-`config/coverage_pass_sonar.yaml` is `default_sonar.yaml` with
-`range_length_mm: 30000` and nothing else changed — the coverage-pass setting
-`project_synthesis.md` §8.5 reserves, against the default profile's 15 m
-revisit setting. Bind it from a mission's `sonar_profile:`. It predates the
-wall-multipath knobs and does not spell them out; they resolve to their
-dataclass defaults, so the *resolved* `SonarConfig` differs from the default
-profile's in `range_length_mm` alone.
+- `world:` — `seed`, `size`, `origin`, `resolution`, and
+  `limits_collision` (default false; the builder always sets true).
+- `geo:` — `{lat0, lon0[, theta_deg]}`, the GPS of world (0, 0).
+  `theta_deg != 0` is rejected (the world frame is the anchor's ENU frame
+  by definition).
+- `depth:` — optional authored bathymetry: `mode: preset|file|svlog`,
+  `preset` + `params` (validated against the preset's schema, unknown
+  keys raise by name), or `file` + `file_kind` (csv|geotiff, from the
+  suffix when empty) + `file_values` (auto|depth|elevation; auto decides
+  from the sign of the median — GEBCO-style elevations negate), or
+  `file` = a `.svlog` + `svlog: {datum_offset_m, trend_length_m,
+  texture_gain, smoothing, cell_m, backscatter_layer}` (unknown keys
+  raise by name; `docs/configuration_guide.md` "Recording mode"). Depth
+  strokes carry an optional `feather_m` (default half the radius).
+  When present, `terrain:` contributes only texture
+  (dunes/roughness/materials); when absent, legacy behaviour is
+  bit-identical.
+- `terrain:` — as before (`base_depth`/`slope` are ignored under a
+  `depth:` section).
+- `objects:` — legacy `density_per_hectare`/`composition` **or** the
+  builder's `classes: {<type>: {enabled, amount{kind: count|density,
+  value}, clusters{n, sigma_m}, size{kind: uniform|gauss, ...},
+  burial{...}, material, params}}` plus `explicit: [{type, x, y, yaw,
+  length, ...}]` (verbatim matched pairs / RTK clusters). Classes are
+  placed in sorted name order — deterministic per seed.
+- `walls:` — `name,x0,y0,x1,y1,top_z,reflectivity,thickness` plus, since
+  2026-09-03, `kind` (`quay` | `pontoon`), `draft_m` (pontoon), `roughness_m`
+  (unknown keys raise; names unique; old manifests load with the quay
+  defaults). Walls carry a Gazebo `<collision>`; a pontoon's box floats.
+- `objects.classes.<type>.orientation.rest` — `{enabled, randomness}`, the
+  3-D resting pose (`docs/configuration_guide.md` "3-D resting pose");
+  explicit instances take `roll_deg` / `pitch_deg`.
 
-A third config set ships for the enclosed-basin regime:
-`config/enclosed_basin_world.yaml` is `default_world.yaml` plus three walls,
-`config/enclosed_basin_sonar.yaml` is `default_sonar.yaml` with
-`wall_multipath_enabled: true`, and `config/enclosed_basin_mission.yaml` binds
-the pair with the default's seed, pattern and density. `walls` consumes no RNG
-draws, so the same seed places the same objects at the same poses as the
-default bundle and the two differ only by the boundary and its ghosts; a full
-survey of it yields ~200 ghost observations off the three walls.
+Sonar config splits into `acquisition:` and `model:` exactly as before;
+every knob description lives in `docs/sonar_model.md` (`max_ping_rate_hz`,
+`alongtrack_beam_lines`, `tvg_compensation`/`spreading_exponent`,
+`max_span_db`, `multipath_*`, `wall_multipath_*`, `gain_drift_amp`,
+`dropped_ping_prob`, `sample_step_m`, …). Two changes on 2026-09-01:
+**transmit ringing** (`ringing_level_db: 55`, `ringing_decay_db_per_m: 22`
+— the corpus-measured decaying core under the transducer, on the coherent
+channel, inside the water column; 0 disables) and
+**`wall_multipath_enabled: true` by default** (a strict no-op without
+walls — a wall-less scene renders bit-identically). On 2026-09-03 the
+wall model was re-anchored on the corpus quay (`wall_face_diffuse`,
+`wall_pontoon_specular`, `wall_corner_gain`, `wall_diffuse_fraction`;
+ghosts carry `reflectivity²` × the Rayleigh roughness law —
+`docs/sonar_model.md` §11). Unknown keys raise in both sections; the two
+retired encoder keys raise by name.
 
-A second world/mission pair ships alongside the defaults:
-`config/shallow_water_world.yaml` is `default_world.yaml` with
-`base_depth: 2.5` and nothing else changed (generated depth 1.7–3.4 m against
-the default's 3.2–4.9 m), and `config/shallow_water_mission.yaml` binds it with
-the default's seed, pattern, sonar profile and object density. It is the config
-for detection work: shadow length goes as `h_obj · R / altitude`, and across 47
-paired (object, side) observations of a full survey every shadow is longer at
-2.5 m, median ×1.50. Because `base_depth` consumes no RNG draws, the same seed
-places the *same* objects at the *same* poses in both, so bundles from the two
-differ only in altitude and pair object-by-object.
+Sea state: `config/sea_states.yaml` (presets, hulls) and
+`config/sea_schedule_example.yaml` (a timeline) — `docs/sea_state_model.md`.
+Since 2026-09-03 the wave presets are broad (γ 1.5), longer (Tp 2–4.5 s)
+and carry random **wake / swell groups** (`events:` block, `sea/events.py`,
+Poisson arrivals); explicit wave fields in a keyframe or command make a
+custom state (the MCS "Custom" entry). Since 2026-09-05 they are
+short-crested (`spread_s` 3), the groups are half as frequent, and the
+`hull:` block carries `damping: {heave_ns_per_m, roll_nms_per_rad,
+pitch_nms_per_rad}` (ζ ≈ 0.4 on the catamaran, judgement values) and
+`wave_force_clip: {knee_g, width_g}` (a soft clip of the excess
+buoyancy above 2.5 weights). Preset Hs/Tp are unchanged.
 
-A mission's `world_config:` / `sonar_profile:` resolves absolute, then relative
-to the working directory, then relative to the mission YAML's own directory.
-The last is what makes `ros2 run … generate_mission` work against a config in
-the installed share directory, where the cwd is not the package source root.
+Materials: the five seabed materials plus object materials now including
+`glass`, `wood`, `eps` (air-backed foam — deliberately strong, ~0.8) and
+`tinplate` (`worldgen/materials.py`).
 
-Sonar config splits into `acquisition:` (the six real device parameters) and
-`model:` (simulation-only physics). Knobs whose meaning is not obvious from the
-name:
-
-- `max_ping_rate_hz` (20) — spec-sheet cap; **0 disables it**, reproducing the
-  22 ms free-run per channel decoded from the field capture. The two sources
-  genuinely disagree; the knob exists so either can be reproduced.
-- `num_results` (600) — **1200 is verified live**, not just offline: against the
-  real `sss_processor_node` on Jazzy, 1200-bin frames are 2462 B, carry
-  `channel_number` 0/1 at byte 34, run at the same ~18–20 Hz per channel as 600
-  bins with zero `ping_number` gaps, and the processor locks bottom within 0.4 s
-  and publishes continuously (max stall 58 ms). The one measurable cost is row
-  pairing: **98.7% of processed rows are two-sided at 1200 bins against 100% at
-  600**, the remainder being CM-6's emit-a-one-sided-row-rather-than-drop path
-  firing at the doubled payload.
-- `alongtrack_beam_lines` (5) — parallel ground lines integrated across the 0.5°
-  azimuth footprint, Gaussian-weighted with σ(R)=R·θ/2.355. `1` = legacy
-  infinitesimal beam.
-- `tvg_compensation` (0.0) / `spreading_exponent` (4.0) — the range law,
-  fitted. **Measured 0**: the profile stream the device reports is pre-TVG, so
-  the full two-way loss is in the data — ~40 dB per decade of slant range,
-  ~24 dB across the swath at 15 m and 4 m altitude. Only the product
-  `spreading_exponent · (1 - tvg_compensation)` is determined; the split is
-  fixed by taking spreading at its physical two-way-intensity value. Set
-  `tvg_compensation: 1.0` for a flat image. Across-track range, not material,
-  sets large-scale brightness by a wide margin.
-- `max_span_db` (90.0) — the device's clamp on `max_pwr_db - min_pwr_db`,
-  measured (hit exactly on 8.39% of field pings, never exceeded).
-- `multipath_enabled` (false) / `multipath_gain` — second-bottom-echo ghost
-  displaced +altitude in slant range.
-- `wall_multipath_enabled` (false) / `wall_multipath_gain` /
-  `surface_mirror_enabled` (false) / `surface_reflectivity` /
-  `ghost_beam_lines` (1) — mirror-source ghosts off the reflecting boundaries
-  the **world** config declares under `walls:` (the world says which walls
-  exist and how reflective each is; these say whether the path is modelled).
-  Each wall is a finite vertical segment from the seabed to `top_z`; a ghost
-  renders through the same passes as the direct path and lands at its folded
-  path length, carrying its own ground-truth contact. Ghost energy joins the
-  **diffuse** channel only, so the coherent FBR channel is untouched by
-  construction (NC #4) and ghosts carry `Exp(1)` speckle. Sources are culled
-  when the wall is beyond the receive window or the fan points away from it.
-  Walls are *not* in the height raster, so they cast no direct echo or shadow
-  of their own (`docs/sonar_model.md` A9). Cost per ping-side, averaged over
-  both sides: x1.00 all culled, x1.25 one wall in range, x1.50 three — all
-  three reproduce offline within measurement noise. The multiplier tracks how
-  many mirror sources survive the two culls, not how many walls the world
-  declares: on a wall-parallel leg the outboard side's sources are all culled,
-  and in the shipped basin the fan cull leaves two sources per side even with
-  all three wall planes in range. `ghost_beam_lines: 5` buys nothing a bounce
-  has not already smeared, and it is the cost lever — but its recorded x2.17
-  does **not** reproduce (an offline re-measure gives ~x1.6 at one wall and
-  ~x3.4 at three) and the wall count it was taken at is not recorded, so the
-  multiplier itself is UNCERTAIN. Details: `sonar/multipath.py`,
-  `docs/sonar_model.md` §10.
-- `gain_drift_amp`, `dropped_ping_prob` — **0 by default**; radiometric/link
-  degradations belong to the downstream augmentation stage.
-- `sample_step_m` — a coarse upper bound only; the renderer refines it.
-
-Mission config: `start` (default `[0,0]`, prepended as a transit waypoint from
-the spawn), `start_heading_deg` (the lawnmower entry corner is chosen in front of
-it), `pattern` (`lawnmower|spiral|random|waypoints`), `gazebo_plugin_prefix`
-(`gz` emits Garden/Harmonic `gz-sim-*-system` plugin names, `ignition` emits
-Fortress `ignition-gazebo-*-system`). **`gz` throughout**: the shipped
-`config/default_mission.yaml` and the code-level fallbacks in
-`mission/generate.py`, `worldgen/generate.py` and `worldgen/sdf_writer.py`.
-The development machine is ROS 2 Jazzy + Gazebo Harmonic (`gz sim` 8.11.0), so a
-generated world loads its six world plugins natively with no deprecation
-warnings; `BlueBoat-Control`'s Fortress-named model plugins load on the same
-machine only through Harmonic's deprecated-name shim.
+Object catalog: 27 classes — the original 13 plus the
+target-families additions (`target_families_and_surrogates.md`): F1
+upright boxes (`crate_plastic`, `tin_18l`, `polytank`), F2 upright
+cylinders (`drum_200l`, `pail_20l`), `fire_extinguisher`, F5
+`pallet_wood`, F6 `traffic_cone` (no broadside by construction), F8
+`rope_coil`/`net_ball`, F9 `bottle_glass`, and the F4 open-frame family
+(`bicycle`, `mesh_crate`, `shopping_trolley`) with a **fill-fraction
+lattice**: a thin solid rim plus interior cells kept with probability
+`fill_fraction` (deterministic per object id), so the diluted highlight
+and broken shadow *emerge* from the ordinary raster path with zero
+renderer change. `DEFAULT_COMPOSITION` is deliberately unchanged — new
+classes enter via `objects.classes`, never by reshuffling legacy seeds.
 
 ---
 
 ## 7. Commands
 
-All package-relative commands below run from the package source root,
+All package-relative commands run from the package source root,
 `BlueBoat-SSS-Sim/blueboat_sss_sim/`.
 
 ### Offline tools (no ROS required)
 
 ```bash
-python3 -m blueboat_sss_sim.mission.generate \
-    --config config/default_mission.yaml --out ~/runs/r3 --seed 7 --speed 1.0
-python3 -m blueboat_sss_sim.worldgen.export_maps --bundle ~/runs/r3
-python3 -m blueboat_sss_sim.worldgen.generate --config config/default_world.yaml --out ~/runs/w1
-python3 -m blueboat_sss_sim.analysis.cli --bundle ~/runs/r3 --out ~/metrics/r3
+python3 -m blueboat_sss_sim.builder.app                 # the GUI (PySide6)
+python3 -m blueboat_sss_sim.worldgen.generate \
+    --config config/default_world.yaml --out ~/worlds/dev/w1 --seed 7
+python3 -m blueboat_sss_sim.worldgen.export_maps --bundle ~/worlds/dev/w1
+python3 -m blueboat_sss_sim.analysis.cli --world ~/worlds/dev/w1 \
+    --trajectory ~/.config/blueboat_mcs/trajectories/beach.yaml --out ~/metrics/w1
 python3 -m blueboat_sss_sim.analysis.calibration_cli \
     --svlog ~/ros2_ws/data/SSS_data/diffDepthCompensation.svlog \
-    --bundle ~/runs/r3 --out ~/calib/r3
+    --world ~/worlds/dev/w1 --trajectory <yaml> --out ~/calib/w1
 ```
-
-`mission_metrics` reads a bundle and writes `metrics.json` + `metrics.md`
-into `--out`; the bundle and any recording it reads are never written to
-(NC #10). Its default `--source replay` walks the bundle's own
-`trajectory.yaml`, so its numbers are reproducible from the seed:
-`content_digest` covers everything but provenance and does not move when
-the bundle is regenerated. `--source svlog` measures the path a run
-actually tracked (the recording must carry the mavlink `LOCAL_POSITION_NED`
-track — `with_mavros_shim:=true` in simulation), and `--source jsonl` reads
-a dump of the published `ground_truth/contacts` stream, which carries no
-pose and so reports aspect as unavailable. Detection is a named criterion
-(`geometric` / `resolved` / `shadowed`), stated in both output files.
 
 ### Build, run and launch
 
 ```bash
 colcon build --packages-select blueboat_sss_sim && source install/setup.bash
 
-ros2 run blueboat_sss_sim generate_mission \
-    --config $(ros2 pkg prefix blueboat_sss_sim)/share/blueboat_sss_sim/config/default_mission.yaml \
-    --out ~/runs/r3 --seed 7 --speed 1.0
-ros2 run blueboat_sss_sim export_scene_maps --bundle ~/runs/r3
+ros2 run blueboat_sss_sim world_builder
 
-# Full mission (control stack + sonar); PID is the working controller.
-# Run from the workspace root with `source env.sh` (venv + workspace).
-# The venv is not optional here: blueboat_control's master_control.py imports
-# ur_mpc -> acados_template + casadi, and simulation_interface.py imports the
-# blueboat_control package whose __init__ imports casadi and urdf_parser_py --
-# all at module scope regardless of controller_type, so without it those two
-# nodes die at import and the boat never moves while the sonar still pings.
-ros2 launch blueboat_sss_sim full_mission_launch.py mission_dir:=$HOME/runs/r3
-ros2 launch blueboat_sss_sim full_mission_launch.py mission_dir:=$HOME/runs/r3 quiet:=false
-ros2 launch blueboat_sss_sim sss_sim_launch.py mission_dir:=$HOME/runs/r3
-# Per-run acquisition override (empty = the bundle's frozen value)
-ros2 launch blueboat_sss_sim sss_sim_launch.py mission_dir:=$HOME/runs/r3 \
+ros2 launch blueboat_sss_sim sim_world_launch.py world_dir:=$HOME/worlds/<p>/<w>
+ros2 launch blueboat_sss_sim sss_sim_launch.py world_dir:=$HOME/worlds/<p>/<w>
+# Per-run acquisition override (empty = the resolved profile's value)
+ros2 launch blueboat_sss_sim sss_sim_launch.py world_dir:=$HOME/worlds/<p>/<w> \
     range_length_mm:=30000 gain_index:=-1
-ros2 launch blueboat_sss_sim sim_world_launch.py mission_dir:=$HOME/runs/r3
+# Dev end-to-end; PID is the working controller. Run from the workspace
+# root with `source env.sh` (venv + workspace) — blueboat_control's nodes
+# import casadi/acados at module scope regardless of controller_type.
+ros2 launch blueboat_sss_sim full_mission_launch.py \
+    world_dir:=$HOME/worlds/<p>/<w> with_control:=true \
+    trajectory_file:=$HOME/.config/blueboat_mcs/trajectories/.deployed/<p>.yaml
 
-# Manual ping enable (same command as on the real system)
 ros2 topic pub --once /side_scan_sonar/ping/enable std_msgs/msg/Bool 'data: true'
 ```
-
-`full_mission_launch.py` includes `sss_sim_launch.py`, so the two are exercised
-together. Everything in this block needs Linux + ROS 2 and has not been run on
-the Windows checkout.
 
 ### Offline smoke test
 
@@ -528,121 +582,144 @@ the Windows checkout.
 python3 -m test.smoke_test        # from the package source root
 ```
 
-84 checks over world generation → render → noise → encode → decode → tile →
-label → export, asserting raw-frame byte parity, checksum corruption detection,
-per-side `channel_number` at byte 34, FBR contrast, naive and
-downstream-emulated tracker lock while moving, `max_pwr_db` against the real
-corpus (`max_pwr_db` 67.85 ± 0.5 dB at the default profile — the quantity's
-own spread across speckle seeds is 0.064 dB sd, so a wider band could not catch
-a moved anchor), the device's per-ping normalisation invariants, speckle CV, azimuth
-widening, absence of empty far-range bins, and 1200-bin operation. Section
-`[2e]` covers calibration identifiability — which constants a capture can
-determine and from which statistic: the level riding in `max_pwr_db` and never
-in the counts, `tvg_compensation` and
-`lambert_exponent` as interchangeable at one altitude, and the per-range
-reduction's repeatability floor. These are properties of the parameterisation,
-so they hold independent of the tuning. Section `[2f]` runs the same checks
-against the **real corpus**: the device's normalisation invariants on field
-pings, `ANALOG_GAIN_TABLE` against the `analog_gain` the device reports, the
-water-column-to-bottom-return gap the noise floor was fitted to, and the
-range law's fall against the corpus's 40–52 dB/decade. It is gated on
-`$BLUEBOAT_SSS_CORPUS` (default `~/ros2_ws/data/SSS_data`) and **skips when
-the recordings are absent**, so a fresh clone still reaches
-`ALL CHECKS PASSED`. Section `[4]` covers the shallow-regime config: depth band,
-per-ping FBR lock at ~2.2 m altitude via the same downstream detector
-emulation, and paired shadow extents against the 4 m bundle. Section `[4b]`
-covers the device-facing acquisition constants: `gain_index: -1` resolving and
-framing byte-identically to the calibrated gain, the 0–7 ladder against the
-measured `analog_gain` values, a gain step moving the reported dB and not the
-counts, rejection of
-out-of-ladder indices, `sss_sim_launch.py`'s own acquisition resolver binding
-the bundle (and applying per-run overrides), and the coverage-pass profile
-differing from the default in range alone while still locking FBR at 30 m.
-Section `[4c]` covers the ground-truth metrics: the manifest partition
-(every placed object is detected, ensonified-below-criterion or never
-ensonified, and the three sum to the manifest), empty bins reading as
-unmeasured rather than as zero, the criterion ladder nesting, the content
-digest holding across a bundle regenerated from its seed, and the `.svlog`
-path — clock-skew recovery, pose-track fidelity, and one corrupted packet
-costing one packet.
-Section `[4d]` covers wall multipath: mirror sources and the surface image
-against a hand-computed reflection, the range cull and the finite-wall
-crossing test, a ghost arriving at its hand-computed slant range, the feature
-disabled rendering bit-identically to a wall-free world, the specular channel
-never receiving ghost energy, FBR lock and speckle/bin-filling with ghosts in
-the image, the shipped basin bundle's walls reaching `world.sdf`, a wall-free
-manifest still loading at the same version, per-ghost ground truth, the
-additive JSON schema, ghost boxes not merging with their object, and the
-metrics partition holding with ghosts excluded from every rate. It writes a visual
-waterfall preview to `/tmp/blueboat_sss_smoke/`. A full run takes ~36 s and ends
-with `ALL CHECKS PASSED`. `test/` carries an `__init__.py` so the local package wins
-over the stdlib `test` module — without it the command above resolves to the
-wrong `test` and fails with `No module named test.smoke_test`.
+~210 checks over geo → world folder → render → noise → encode → decode →
+metrics → calibration, in sections: [1] legacy-recipe world generation
+(bit-identical to the retired default mission bundle; the survey lawnmower
+is frozen in `test/fixtures/survey_lawnmower.yaml` so the calibrated
+anchors keep their measured context), [2]/[2b] rendering + FBR structure,
+[2c] device fidelity (the 67.85 ± 0.5 dB level anchor, the corpus ping
+period and pulse laws, the persistent ping counter), [2g] speckle texture
+(unit mean, CV 1, lag-1 range/track correlation, seed determinism), [2d]
+beam/1200-bin, [2e] calibration identifiability, [2f] the real corpus
+(gated on `$BLUEBOAT_SSS_CORPUS`, default `~/ros2_ws/data/SSS_data`, skips
+when absent), [4] shallow regime, [4b] acquisition constants + the
+launch's own resolvers, [4c] detector metrics + `.svlog`/jsonl sources,
+[4e] the `sss_svlog_compare` reductions on the in-test log, [4d] wall
+multipath + the direct wall echo/occlusion (bright line at the face range,
+dark behind, cos² obliquity, wall contact, FBR lock with a quay in view,
+**the shipped combination** — face +19 dB, beyond −17 dB, far −32 dB
+against the wall-free seabed at equal slant —, `reflectivity²` × roughness
+ghost law, pontoon: no shadow, faint edge, dark water column when
+crossed),
+[6] GPS anchoring (equirect inverse ≡ the shim formula, manifest
+geo block, `<spherical_coordinates>`), [7] authored bathymetry (CSV plane,
+in-test GeoTIFF round-trip, wall-aware fill, per-preset shapes incl.
+depth ≤ 0, the limit boxes over land, the smoothing spline on the plane,
+the damped trend saturating at L·slope, residual-scaled texture absent
+at the soundings, the svlog config guard, the brush's C1 feather /
+per-stroke `feather_m` / no ridge between overlapping strokes on a
+0.1 m grid, the coverage report: full cover warns not, a world far
+larger than the survey warns, a 500 m miss is refused naming distance
+and compass point, a near miss says redraw, a depth file gets the same
+message), [4c] also the svlog GPS + attitude envelopes on a live
+clock, the frozen-clock file-order pairing, `recording_extent` and
+`range_bearing`, and FBR soundings matching
+the scene depth under the boat (median 3 cm) on both clock regimes, [8]
+objects v2 (determinism, clustering, fill-fraction dilution raster- and
+render-level, FBR lock with every new family, limits invisible +
+non-acoustic, `classes: {}` places nothing while a legacy config still
+does, random objects stay off dry cells, no return from a dry ridge)
++ objects v3 (a standing drum through the solid path equals
+the flat disc, a lying drum is diameter-high, every stable pose of six
+primitives settles with its lowest point on the slope plane, per-object
+determinism, enabling rest for one class moves no other object), [9]
+world folders (build, `_i` immutability, Edit round-trip, metadata GPS ↔
+scene positions, launch resolvers, a recording world: source copy,
+`depth_samples.npz`, survey quality and coverage in the metadata,
+bit-identical rebuild, cells following the recorded seabed), [10] sea state (JONSWAP
+m0 ≡ Hs²/16, PM at γ = 1, dispersion limits, wave field σ and exact
+zeros, hull swap static-force-free at trim, natural periods, contouring
+hull carries its weight, the horizontal slope force and its zero-slope
+no-op, the excess-buoyancy clip, pose prediction and damping signs, the
+**closed loop under a 20 Hz pose hold** (heave in the wave band, no
+0.6 s ringing, roll/pitch in the corpus band, surge and yaw driven),
+Gauss-Markov current, presets/schedules/commands, wave-group process
+(rate, zeros between groups, envelope, determinism, readback), launch
+resolvers, marker strings, renderer pitch shift), [9] also covers
+endpoint merging (idempotent, collapsed walls dropped), curve flattening
+(chained chords within 0.1 m sagitta, straight walls 1:1), a curved world
+building byte-identically twice, [4d] the finite-segment mirror cull,
+[11] builder schema
+help (every texture / depth-preset row has a one-sentence help); the
+corpus section [2f] also reduces the anchor quay with `wall_contrast`.
+Artifacts in `/tmp/blueboat_sss_smoke/`. ~100 s (the Stop hook allows 180 s); runs serialize on `/tmp/blueboat_sss_smoke.lock`, so a manual run and the hook's never race in the shared artefact directory. `test/` carries an `__init__.py` so the
+local package wins over the stdlib `test` module.
 
-There is no lint or type-check command configured in this package, so the smoke
-test is the only automated gate. `.claude/settings.json` wires it as one.
+GUI checks (needs PySide6, not part of the gate):
+
+```bash
+QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke
+```
+
+There is no lint or type-check configured; the smoke test is the only
+automated gate. `.claude/settings.json` wires it as one.
 
 ### Session hooks
 
 `.claude/settings.json` holds exactly two hooks, both implemented in
-`.claude/tools/smoke_gate.py` (stdlib only, no ROS, no third-party imports):
+`.claude/tools/smoke_gate.py` (stdlib only):
 
 | Hook | Fires on | Effect |
 |---|---|---|
-| `PostToolUse`, matcher `Edit\|Write\|MultiEdit` | an edit under `config/`, `sonar/` or `mission/` | Surfaces a "regenerate the bundle" reminder — bundles freeze their own copies (NC #10). A reminder, never a block. |
-| `Stop` | end of a turn that changed a file the suite can observe | Runs the smoke test from the package source root. **Exit 2 blocks the stop** until it passes. |
+| `PostToolUse`, matcher `Edit\|Write\|MultiEdit` | an edit under `config/`, `sonar/` or the old `mission/` paths | a "regenerate the world" reminder — folders freeze their own copies (NC #10). A reminder, never a block. |
+| `Stop` | end of a turn that changed a file the suite can observe | runs the smoke test from the package source root. **Exit 2 blocks the stop** until it passes. |
 
 Smoke-test scope is `*.py` under `blueboat_sss_sim/` or `test/`, plus
-`*.yaml` under `config/` (the suite calls `generate_mission` against
-`config/default_mission.yaml`). `docs/`, any `*.md`, `launch/`,
-`msg_reference/`, `resource/`, `package.xml` and `setup.*` are out of scope —
-the offline suite cannot observe them, and a gate that fires on documentation
-edits gets disabled.
-
-The Stop hook triggers on a per-session flag set by the PostToolUse hook **and**
-on in-scope file mtimes, so a change made by a shell command rather than an edit
-tool is still gated. It skips when `stop_hook_active` is set, so a blocked stop
-cannot loop. No hook runs ROS, `colcon` or Gazebo: the gate is offline by
-construction (§2 layering), which is what keeps it cheap enough to run every
-turn.
-
-Deliberately not automated: a release/packaging subagent (packaging only
-modified files was a chat-delivery constraint, not a repo workflow), and a
-docs-sync agent (doc updates have so far been small and colocated with the code
-change).
+`*.yaml` under `config/`. `docs/`, `*.md`, `launch/` (edits — the suite
+still imports the launch resolvers), `msg_reference/`, `resource/`,
+`package.xml` and `setup.*` are out of scope. The gate is offline by
+construction; no hook runs ROS, `colcon`, Gazebo or Qt.
 
 ---
 
 ## 8. Working on this module
 
-- **Read `docs/` first** — `architecture.md`, `sonar_model.md` (physics and the
-  explicit assumption list A1–A10, given in the order A1–A8, A10, A9),
-  `topics.md` (raw-frame byte map), `integration_guide.md`,
-  `configuration_guide.md`, `developer_guide.md`, `roadmap.md`,
-  `REALISM_UPDATE_NOTES.md`.
-- Frames: world is ENU, z=0 at the surface, depths negative. Internal math uses
-  ENU yaw; anything hardware- or user-facing uses compass degrees. Conversions
-  live only in `core/geometry.py`.
-- Sides: `Side.PORT.sign = +1` (+y body), `STARBOARD = -1`; transducer heading =
-  vehicle heading ∓ 90°. `Side.channel` is the device channel number — 0 port,
-  1 starboard — which `PingEncoder` derives from the side and writes to byte 34
-  of the raw frame and to `OmniscanProfile.channel_number`. It is the
-  authoritative side identity downstream: `sss_processor_node` derives the
-  `.svlog` `src_device_id` from it and the GCS reader groups port/starboard on
-  it, neither trusting the topic nor the `src` tag.
+- **Read `docs/` first** — `architecture.md`, `sonar_model.md` (physics and
+  assumptions A1–A10), `topics.md` (raw-frame byte map),
+  `integration_guide.md`, `configuration_guide.md`, `developer_guide.md`,
+  `roadmap.md`.
+- Frames: world is ENU, z = 0 at the surface, depths negative; world (0, 0)
+  is the GPS anchor. Internal math uses ENU yaw; anything hardware- or
+  user-facing uses compass degrees. Angle conversions live in
+  `core/geometry.py`; **geodesy lives only in `core/geo.py`** (the
+  project-wide equirectangular convention — never introduce a second
+  formula, and never import a neighbour's copy).
+- Sides: `Side.PORT.sign = +1` (+y body), `STARBOARD = -1`; transducer
+  heading = vehicle heading ∓ 90°. `Side.channel` (0 port, 1 starboard) is
+  written to byte 34 of the raw frame and is the authoritative side
+  identity downstream.
 - Randomness: every stochastic component takes a `numpy.random.Generator`;
-  nothing touches the global RNG. World content derives entirely from
-  `world.seed`.
-- Adding a litter class: one `CATALOG` entry in `worldgen/objects.py` (the
-  labeler discovers classes automatically). Adding a survey pattern: implement it
-  in `mission/patterns.py` and register it in `build_pattern`.
-- Cost budget, measured live on the Jazzy machine at the 20 Hz cap: the renderer
-  alone is **2.04 ms per ping-side** at 600 bins and **2.38 ms at 1200** (5 azimuth
-  lines); the whole `sss_sim_node` process, which also encodes, frames, publishes
-  and emits ground truth, sits at **32% of one core** — 32.0% at 600 bins, 32.5% at
-  1200. Doubling the bin count is nearly free: the node is dominated by fixed
-  per-ping overhead, not by bin count. Wall multipath multiplies the renderer
-  figure by **1.00** when every wall is culled, **1.25** with one wall in range
-  and **1.50** with three (`ghost_beam_lines: 1`); at the process level it
-  disappears into that same per-ping overhead — the node's CPU share is
-  unchanged within measurement noise by enabling it.
+  nothing touches the global RNG. World content derives entirely from the
+  seed (split streams under `depth:` — see §5).
+- Adding a litter class: one `CATALOG` entry in `worldgen/objects.py`
+  (`label` for the GUI, `params_schema` for class knobs,
+  `fill_fraction_range` for open-frame classes) — the objects page, the
+  placement engine and the metadata pick it up automatically. Adding a
+  depth pattern: one `DEPTH_PRESETS` entry in `worldgen/depth/presets.py`
+  (fn + label + schema rows) — the depth page renders its form
+  automatically.
+- Cost budget, measured on the Jazzy machine at the 20 Hz cap: renderer
+  ~3.4–4.0 ms per ping-side (600–1200 bins, coherent texture on — it was
+  2.0–2.4 with the per-bin draw), i.e. ~15 % of one core for both sides at
+  20 Hz; wall multipath ×1.0–1.5 on the renderer only (and only when the
+  world has walls); the direct wall echo and the single-bounce band are
+  negligible. `sea_state_node`: the hull integration is ~1 ms per tick at
+  100 Hz (`cells_per_m: 40`); the wave field rebuild on a ramp ~100 µs.
+- Walls a boat can cross are **pontoons**; a quay under the hull is a
+  modelling error, not a renderer bug (2026-09-03 review). Objects that
+  should lie, lean or stand at random get `orientation.rest`; the
+  legacy flat stamp stays the default so no existing world moves.
+- The corpus carries **GPS and attitude** in every file (id-150
+  `GLOBAL_POSITION_INT` / `ATTITUDE`, 25 Hz); three processor-written
+  files freeze `time_boot_ms` (`read_svlog` → `clock_frozen`, file-order
+  pairing). The real boat measures roll std 0.9–1.3°, pitch 0.8–1.5°,
+  ~1 s — the sea-state pass band. `worldgen.depth` must not import
+  `analysis` at module level (`analysis/__init__` reaches
+  `worldgen.scene`): `depth/svlog.py` imports `analysis.bathymetry`
+  inside the function.
+- A "X looks wrong" report on the sea state is reproduced offline first
+  with `sea.simulate_3dof` (the 20 Hz pose hold is the knob that
+  reproduced the 2026-09-05 ringing); a depth report with
+  `python3 -m blueboat_sss_sim.analysis.bathymetry <svlog> --lat0 --lon0`.
+- The superproject's session rule holds here: **never `git commit` or
+  `git push`** — the user stages and commits.

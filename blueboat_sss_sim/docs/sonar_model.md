@@ -56,23 +56,47 @@ Samples are accumulated into the `num_results` slant-range bins with
 `np.bincount` and normalized by per-bin hit counts, i.e. an unbiased mean
 per bin — the discrete analogue of the intra-bin ensonified average.
 
+**Transmit ringing.** Every real ping additionally carries the decaying
+transmit-pulse core right under the transducer — measured on
+`diffDepthCompensation.svlog` at ~55 dB at the transducer, through 43 dB at
+0.27 m, to ~33 dB by 1 m, brighter than any seabed return in the file (this
+artefact is what the GCS's 0.75 m nadir blank and the processor's
+ringing-settle logic exist for). Modelled as an exponential decay specified
+in the reported-dB domain at the calibration gain (`ringing_level_db`,
+`ringing_decay_db_per_m`; level 0 disables) and added to the **coherent**
+channel before noise, so it fluctuates with the low-CV `specular_looks`
+statistic like the real ringing. It lives inside the water column at survey
+altitudes: the FBR, the level anchor (§6) and NC #4 are untouched — smoke
+`[2b]` asserts the level, the settle distance, and that the
+processor-style bootstrap still locks at the altitude.
+
 `tvg_compensation = 1.0` reproduces a perfectly flattened image. The
 default is **0.0**: the profile stream the device reports is measurably
 pre-TVG (§6), so the full two-way range loss is present in the data, and at
 `spreading_exponent: 4.0` that is ~40 dB per decade of slant range —
 about 24 dB across the swath at the 15 m / 4 m-altitude default. That
-gradient is the device's, not a defect. Waterfall tiles remove its smooth
-`log10(range)` part for display before they are stretched
-(`dataset/waterfall.py`), which is what a viewer's TVG does; the wire
-stream is left exactly as the device would have sent it.
+gradient is the device's, not a defect. Downstream viewers remove its
+smooth `log10(range)` part for display before stretching, which is what a
+viewer's TVG does; the wire stream is left exactly as the device would
+have sent it.
 
 ## 4. Surface-vehicle attitude coupling
 
 Roll rotates the vertical beam pattern; a rolling USV therefore brightens
 one side and dims the other ping-by-ping, producing the along-track
 banding characteristic of surface platforms (a core concern of the thesis
-regime). Pitch and heave enter through the odometry pose. There is no
-intra-ping motion (§7, A5).
+regime). Heave enters through the transducer height (altitude, slant
+ranges, water column). **Pitch** (since 2026-09-03, with the sea-state
+model that finally makes the hull pitch) rotates the fan plane about the
+body y axis: a ground sample `dz` below the transducer is imaged
+`dz·tan(pitch)` along-track from where a level fan would put it — the
+symmetric port/starboard along-track distortion of a pitching platform
+(Cobra, Oppenheim & Jaffe 1992), implemented as one refinement pass of the
+ground line in `_ping_geometry`; zero pitch is bit-identical. The mount
+lever arm is rotated by yaw only: at ±0.20 m athwartship a 10° roll moves
+the transducer 3 mm, below the ground-sample step. There is no intra-ping
+motion (§7, A5). The attitude itself comes from `/blueboat/odom`, i.e.
+from Gazebo under the wave wrench (`docs/sea_state_model.md`).
 
 ## 5. Noise model (`sonar/noise.py`)
 
@@ -80,8 +104,24 @@ Applied in order, all configurable:
 
 1. **Speckle, per component** — the diffuse field gets multiplicative
    `Exp(1)` intensity speckle: fully developed (Rayleigh amplitude), the
-   textbook single-look statistic; `speckle_looks: L > 1` gives multi-look
-   `Gamma(L, 1/L)`. The **coherent specular** component gets
+   textbook single-look statistic. Since 2026-09-02 that statistic comes
+   from a **coherent ground-scatterer field** (`coherent_scatterers: true`,
+   `renderer._texture`): every ground cell (`scatterer_cell_m`, 1 cm) carries
+   a random phase fixed by a hash of its cell index and the world seed, the
+   diffuse contributions of one bin are summed as phasors, the pulse /
+   receive envelope is convolved on the *complex* field, and the unit-mean
+   ratio of `|field|²` to its exact expectation is the multiplicative texture
+   the noise stage applies (`Ping.texture`). The per-bin statistic is
+   unchanged — CV 1, 5.6 dB high-pass std — but the texture is now
+   **correlated**: along range by the kernel (lag-1 ≈ 0.35 for the 3-bin
+   floor) and along track because consecutive pings re-illuminate the same
+   cells with different footprint weights (the azimuth lines are snapped to
+   a ground lattice along the heading for exactly that), which is what the
+   corpus measures (lag-1 0.30–0.68 along range, 0.36–0.66 along track,
+   `sss_svlog_compare`). `Ping.power` is still the noiseless mean, so every
+   mean-based statistic and `speckle: false` are untouched.
+   `speckle_looks: L > 1` gives multi-look `Gamma(L, 1/L)` on the legacy
+   per-bin path. The **coherent specular** component gets
    `Gamma(specular_looks, 1/looks)` (CV ≈ 0.2 at the default 25): the real
    near-nadir echo is Rician with a high K-factor and fluctuates far less
    than diffuse speckle — this is what makes the first bottom return a
@@ -90,24 +130,31 @@ Applied in order, all configurable:
    on consecutive moving pings finds 100% of 10-ping windows within a
    0.30 m band.
 1b. **Pulse smearing** — each ping is convolved with the transmit-pulse
-   range envelope (width `c·τ/2`, ~3 bins at the 20 Hz default): every
-   scatterer is a multi-bin feature and neighbouring bins are correlated,
-   as at the real matched-filter output (`pulse_smearing: true`).
-2. **Water-column noise** — small additive floor inside the nadir gap
-   (`watercolumn_noise`). Must stay well below the first-bottom-return
-   peak or downstream bottom tracking cannot lock.
-3. **Receiver noise floor** — additive everywhere (`noise_floor`).
+   range envelope (width `c·τ/2`, where τ follows the device law: 1.2
+   sample periods at 600 bins, 1.5 at 1200, 44.3 µs floor — measured on
+   every `pulse_duration_sec` in the corpus), floored at
+   `range_filter_bins` (3) for the receive chain: every scatterer is a
+   multi-bin feature and neighbouring bins are correlated, as at the real
+   matched-filter output (`pulse_smearing: true`).
+2. **Water-column noise** — volume reverberation inside the nadir gap
+   (`watercolumn_noise`, **1.15 × 10⁻⁷**). **Measured** (2026-09-02): the
+   1–3 m band of the gain-4 corpus pings reads 25.3 dB reported (mean of
+   dB; 27.8 dB as a linear mean, which the constant is), 40 dB under the
+   FBR peak, so downstream bottom tracking locks with margin.
+3. **Receiver noise floor** — additive everywhere (`noise_floor`,
+   **8.3 × 10⁻¹¹**). **Measured** separately: the far decile of the gain-4
+   pings of the 72–126 m recordings, where nothing but noise is left, reads
+   −6.1 dB reported (−3.6 dB linear mean).
 
-   Both are **6.79 × 10⁻⁷**, fitted as a single number against the field
-   corpus, which puts the water column **22–31 dB** below the bottom return
-   across three range settings and 14 altitude bands. At the 15 m
-   calibration profile that value lands the simulated water column at
-   −26.0 dB and holds at −26.6 dB at the 30 m coverage profile. They are
-   *absolute* linear powers while the return scales with the range law, so
-   the contrast drifts outside the shipped profiles — at 40 m range and 9 m
-   altitude the same value gives −14.6 dB. The corpus constrains their
-   **sum**, not each separately, and they were fitted **jointly with the
-   range law** (§6).
+   Both were previously one jointly fitted number (6.79 × 10⁻⁷, i.e.
+   38.5 dB reported) chosen to put the water column 26 dB below the bottom
+   return on files that never reached the receiver floor. That value hid
+   the range law beyond ~20 m: the simulated far range sat flat on a floor
+   ~40 dB above the device's, the per-ping span was 32 dB against the
+   corpus's 63–69 dB, and a 30 m coverage-pass image looked nothing like a
+   field one. With the measured constants the simulated gain-4 profile at
+   **matched altitude** (the corpus flies at 6–9 m) follows the real one
+   within ~1 dB from 10 to 35 m on the 40 m and 72 m recordings.
 4. **Gain drift** — slow multiplicative sinusoid + random walk
    (`gain_drift_amp`, `gain_drift_period_s`). **Default 0**: radiometric
    drift/banding is deferred to the downstream augmentation stage; set
@@ -138,11 +185,15 @@ wire under a dB label, and every consumer mis-inverts it.
 The reported level is
 
 ```
-db = 10·log10(power) + calibration_db_offset + 10·log10(analog_gain / analog_gain[4])
+db = 10·log10(power) + calibration_db_offset + 20·log10(analog_gain / analog_gain[4])
 ```
 
 so **receive gain moves the reported dB and leaves the counts alone**, as on
-the device. `ANALOG_GAIN_TABLE` carries the ladder: indices **4–7 are
+the device. The ladder is an *amplitude* gain, hence `20·log10`: the
+receiver floor in the corpus steps +5.6 / +4.6 / +5.7 dB across indices
+4→5→6→7, exactly 20·log10 of the table ratios (a 10·log10 step, the earlier
+assumption, gives +2.8 and does not reproduce the shift). `ANALOG_GAIN_TABLE`
+carries the ladder: indices **4–7 are
 measured** (74.55 / 142.8 / 242.025 / 464.625 — the only values the corpus
 ever reports, and its auto-gain walks all four inside every recording);
 0–3 are unmeasured estimates. Indices outside 0–7 are rejected when the
@@ -173,6 +224,8 @@ sampled**. `~/ros2_ws/data/SSS_data`, read-only (CM-7).
 | `noise_floor`, `watercolumn_noise` | 6.79 × 10⁻⁷ | **Jointly determined**, as one number, with each other and with the range law (§5). |
 | `calibration_db_offset` | 97.2 | **Measured up to the device's auto-gain regulation.** Ping-weighted over 14 (range, altitude) cells at gain index 4; the cell spread is **11.9 dB**, because the AGC holds the real level roughly constant while the model's follows `r⁻⁴`. Treat as ±6 dB. |
 | `lambert_exponent` | 1.0 | **Not determined.** The pooled residual is flat from 0.0 to 1.0, and the per-altitude preference reverses with altitude. Held at Lambert's law proper; confounded with the unsampled bottom type. |
+| `ringing_level_db`, `ringing_decay_db_per_m` | 55.0, 22.0 | **Measured** on `diffDepthCompensation.svlog`: ~55 dB at the transducer decaying to ~33 dB by 1 m (22 dB over the first metre). Cross-checked by `sss_calibration_report`'s nadir-profile section (real 54.4 dB at bin 0 vs simulated 51.8; the 1 m point is floor-limited on the sim side because `noise_floor` is fitted to the Shiraishi corpus, whose water column is louder than this log's). |
+| `beam_tilt_deg` | 20.0 | **Corpus-constrained** (the BlueBoat bracket tilt is unpublished): `sss_calibration_report --fit-tilt` scans 5–40° against `diffDepthCompensation.svlog` and the residual minimum lands on 20.0° (5.88 dB RMS best of 11 scored tilts, 2026-09-01). |
 | `absorption_db_per_m` | 0.10 | **Not separated** from the spreading term. Held at the physical 450 kHz seawater value. |
 | `specular_strength`, `specular_width_deg`, `specular_looks` | 30.0 / 8.0 / 25 | **Not determined.** The near-nadir return in a harbour is set by whatever is under the boat: the real −6 dB width varies 7× across altitude bands of one recording. Held at the values NC #4 gates. |
 | `beam_tilt_deg`, `vertical_aperture_deg` | 20.0 / 50.0 | Spec sheet; widening them did not improve the fit. |
@@ -214,21 +267,29 @@ overlap, because that residual would measure the geometry gap.
 fit followed, kept as the record — its Step 2 count-span plan is superseded
 by the first bullet above.
 
-**Timing.** Free-run period = two-way travel + 2 ms device processing;
-`msec_per_ping > 0` clamps to the commanded period like the hardware.
-`model.max_ping_rate_hz` (default 20, the Omniscan 450 spec-sheet cap)
-additionally floors the period at 1/rate → 50 ms at 15 m. **Documented
-tension:** the team's own field capture shows 22 ms (45 Hz) free-run per
-channel at 15 m via the device `timestamp_ms` deltas; set
-`max_ping_rate_hz: 0` to disable the cap and reproduce the captured
-behaviour. Along-track pixel spacing = v/PRF either way.
+**Timing.** Ping period = `max(msec_per_ping, 2R/c + 3 ms,
+1/max_ping_rate_hz)` — the device law, **measured on all seven corpus
+recordings** (2026-09-02): 50 ms at 18.4 m and 20 m, 54 ms at 38 m, 56 at
+40, 73 at 52, 99 at 72, 110 at 80, 131 at 95.6, 170 at 125.6 m, i.e. the
+spec sheet's "20 pings/s up to 30 m, thereafter limited by range and speed
+of sound" with ~3 ms of processing. (An earlier comment claimed a 22 ms /
+45 Hz free-run at 15 m; the corpus contradicts it and it is gone.) A 30 m
+coverage pass therefore pings at 20 Hz and a 95.6 m survey at 7.6 Hz —
+4000 pings in 3½ min against 2800 in 6½ min is the range setting, not a
+fault. Two simulator tells remain by design: port and starboard share one
+tick (NC #3) and there is no jitter. The ping counter is per side and
+counts from node start, as the device counts from power-up; a ping-enable
+cycle reconfigures the encoder and never restarts it. Along-track pixel
+spacing = v/PRF.
 
 ## 7. Assumptions (explicit)
 
 * **A1 — straight rays.** No refraction; sound speed constant
   (`sos_dmps` 1500 m/s). Reasonable over ≤ 30 m in shallow well-mixed water.
-* **A2 — first-order reflections only.** Two optional multipath models,
-  both off by default, and no path beyond them: no second bounce, no
+* **A2 — first-order reflections only.** Two multipath models
+  (`wall_multipath_enabled` on by default — a strict no-op without walls;
+  the second-bottom-echo `multipath_enabled` off by default), and no path
+  beyond them: no second bounce, no
   composed wall-then-surface image, no reverberant tail.
   `multipath_enabled` re-images the direct response displaced +altitude in
   slant range and scaled by `multipath_gain` — the dim ghost-seabed line of
@@ -241,9 +302,18 @@ behaviour. Along-track pixel spacing = v/PRF either way.
   motion (attitude, advance) is fully modeled. The finite 0.5° azimuth
   beam **is** modeled (multi-line integration, §1).
 * **A6 — 2.5-D scene.** Heightfield world: no overhangs, objects
-  represented as height + reflectivity stamps. Adequate for litter-scale
-  targets; wrecks with cavities would need the mesh path (roadmap §3).
-* **A7 — uncorrelated speckle.** No inter-ping speckle correlation.
+  represented as height + reflectivity stamps. Since 2026-09-03 the stamp
+  of a *rested* object is the z-buffer of a rotated 3-D primitive settled
+  on the local seabed plane (`worldgen/solids.py`: a drum lying on its
+  side, a crate on any face, a cone on its flank), so the top surface is
+  true 3-D geometry; what the raster still cannot carry is the underside
+  of an overhang. Adequate for litter-scale targets; wrecks with cavities
+  would need the mesh path (roadmap §3).
+* **A7 — speckle correlation is geometric only.** Inter-ping and
+  inter-bin speckle correlation comes from footprint overlap and the pulse
+  (§5); there is no seabed micro-structure beyond the raster texture, so
+  the long correlation tail the corpus shows at lag 10 on the 40 m files
+  (0.2–0.5, likely real bedforms) is not reproduced.
 * **A8 — no automatic gain control.** Gain is whatever `gain_index`
   selects, held fixed for the run. The real device's auto-gain
   (`gain_index: -1`) is accepted and resolves to the calibrated index 4,
@@ -262,13 +332,18 @@ behaviour. Along-track pixel spacing = v/PRF either way.
   about the seabed — is confounded with it and is held at Lambert's law
   proper rather than fitted. A capture over a known bottom would separate
   them; nothing in this corpus can.
-* **A9 — walls reflect but do not echo.** A wall declared in the world
-  config produces multipath ghosts and a Gazebo visual, but no direct return
-  of its own and no shadow behind it: it is not stamped into the height
-  raster, because a 2.5-D heightfield carries no vertical face (A6). A real
-  quay does return a bright line at its own range. Modelling that needs the
-  mesh path (roadmap §3), and until then a basin image shows the ghosts a
-  wall causes without showing the wall.
+* **A9 — closed (2026-09-02, re-anchored 2026-09-03).** Walls reflect,
+  echo *and* occlude, quays and pontoons differently: §11. What remains
+  assumed is the face model itself — a uniform vertical plane with one
+  reflectivity and one rms roughness, no rubble slope at the foot, no
+  diffraction over the top, and a lumped `wall_diffuse_fraction` for the
+  incoherently scattered energy. The world-builder's *limit* borders are
+  still not walls at all: collision-only, invisible, never acoustic.
+* **A11 — near range is the ringing regime.** No wall face returns from
+  nearer than the seabed under the boat: the range law of a face sample is
+  floored at the altitude. A quay 0.3 m off the hull would otherwise blow
+  up as `1/R⁴`; in the real device that region is the transmit ringing
+  (§3), which the model already carries.
 
 ## 8. Fidelity positioning
 
@@ -294,9 +369,23 @@ locks on the exact FBR bin. If an FBR bootstrap tuned for deeper AUV
 altitudes still fails to lock, tune its minimum-altitude window and ramp
 length to this bin range rather than the renderer.
 
+**Passing over a proud object.** `altitude` is read from the
+object-inclusive raster, so over a drum the nadir gap collapses to the
+drum top, the flat top images as a coherent slab at the gap edge, and the
+horizon test seeded from the plateau edge shadows the seabed out to
+`L ≈ h·R/alt` — geometrically right, and large only when the object is
+large relative to the altitude (a 1.3 m-wide, 1.8 m-tall drum at size
+scale 2 under a 4 m altitude). Structures a boat actually drives over are
+pontoons, which §11 now models as floating; a real 0.9 m drum passed at
+4 m altitude shortens the gap by 0.9 m and casts a few-bin shadow.
+
 ## 10. Wall / surface multipath (`sonar/multipath.py`)
 
-Off by default (`model.wall_multipath_enabled`). The world config declares
+On by default since 2026-09-01 (`model.wall_multipath_enabled: true`; the
+surface mirror stays off). Enabling it is a strict no-op in any world
+without walls — a scene with no reflectors renders bit-identically — so no
+open-water result moves, and a walled world gets its physical reflections
+without a special profile. The world config declares
 the reflectors under `walls:` — finite vertical segments from the seabed to
 `top_z`, each with its own `reflectivity` — and they travel in
 `scene_manifest.yaml`, so the renderer, the labeler and the Gazebo world all
@@ -339,3 +428,80 @@ count separately instead of crediting to the object.
 one wall in range, ×1.50 with three. `ghost_beam_lines: 5` costs ×2.17 and
 buys nothing a bounce has not already smeared — it is the lever if a basin
 ever needs it.
+
+## 11. Walls: face echo, occlusion, ghosts — quays and pontoons
+
+Every real harbour mosaic shows the quay as a **bright band with a dark
+zone behind it**, faint mirrored texture further out. Measured on the
+anchor recording `fullHarbourCleanExample.svlog` with
+`analysis/wall_contrast.py` (a persistent late peak over ≥ 10 pings, on
+the device's own reported dB): face **+22.8 / +18.9 dB** over the seabed
+1.5–4 m in front of it (port / starboard), the strip 1.5–4 m beyond
+**−5.6 / −17.4 dB**, 6–12 m beyond **−20.8 / −24.8 dB**, bright band
+0.7–0.9 m wide, faces at 30–35 m. Until 2026-09-03 the simulator's wall
+*occluded* correctly but its own mirror ghost, at gain `0.65` on power,
+repainted the occluded band with a −1.9 dB copy of the seabed — "walls do
+not block" — and the face was a thin line dimmer than the seabed. The
+model now has five parts, all on `core.types.Wall` segments, none in the
+raster:
+
+* **Kinds.** `kind: quay` — a face from the **seabed** to `top_z` (a
+  `top_z` below the waterline is a submerged sill, looked over by rays
+  above it); `kind: pontoon` — a **floating** face spanning only
+  `[-draft_m, 0]`: sound passes underneath, so it occludes nothing below
+  its draft, casts no quay-like shadow and reflects only rays meeting its
+  band. A wall line the boat drives over is a pontoon, never a quay: the
+  former rendered a crossed pontoon as a quay under the hull — a
+  `1/R⁴`-boosted face slab in the water column plus a full shadow, the
+  artefact reported on 2026-09-03. Every test below uses the face band
+  `[z_bottom, z_top]` (`Wall.z_bottom`).
+* **Hit and occlusion.** The horizontal ground ray of every azimuth line
+  is intersected with every wall (`_wall_hits`); the nearest wet face is
+  the one this line sees. A ground sample beyond it is culled when the
+  ray's height at the crossing lies **inside the face band** — a quay
+  stops everything, a pontoon only the shallow rays.
+* **Face return** (`_face_echo_into`, coherent channel, own per-bin mean).
+  The wet face is sampled from `z_bottom` to `z_top`; each point returns
+  `reflectivity · wall_echo_strength · beam(δ) · range_law(max(R, altitude))
+  · (spec · max(cos²ψ, floor) · exp(−δ²/2σ²) + wall_face_diffuse ·
+  cos(θ_face)^lambert)` with `δ` the depression, `ψ` the azimuth
+  obliquity and `θ_face` the angle from the face normal
+  (`cos θ_face = cos δ · |cos ψ|`): a rough concrete face returns diffusely
+  over its whole height on top of the specular lobe near the transducer's
+  own depth; a pontoon's rounded fendered floats keep only
+  `wall_pontoon_specular` (0.15) of the lobe. The range law is floored at
+  the altitude (A11). The face therefore spans slant `d … √(d² + H²)` —
+  0.8 m at the corpus geometry, matching the measured band.
+* **Ghost energy** (`multipath.mirror_sources`, `bounce_weight`). The
+  image-source path meets the face **twice** (out and back), so a ghost
+  carries `reflectivity²`; on top, each bounce keeps only the coherent
+  fraction `exp(−Γ²)` of the Rayleigh roughness law, `Γ = 2 k σ_h cos θ_face`
+  (Eckart 1953, Urick 1983 ch. 5; `k ≈ 1900 rad/m` at 450 kHz, per-wall
+  `roughness_m`, 3 mm concrete), plus the lumped share
+  `wall_diffuse_fraction` (0.04) of the incoherently scattered energy that
+  still reaches the mirror geometry. Near grazing (the mirrored near-wall
+  seabed, just beyond the face) the mirror survives; the far mirror fades.
+* **Single-bounce band.** The transducer insonifies a ground point in
+  front of the wall directly and the echo returns off the face (or the
+  reverse), arriving at the **mean** of the direct and folded path lengths:
+  for every point in front of a quay that mean lies just beyond the foot's
+  range, so the whole strip folds into the band right behind the face —
+  the bright-then-dark structure of the field mosaic. Accumulated per
+  mirror source as a sum of scatterers (`_Acc.num_b`, gain `reflectivity ·
+  wall_corner_gain`), pulse-smeared, on the diffuse channel.
+* **Ground truth** unchanged: one `object_type: "wall"` contact per
+  ping-side (`wall:<name>`, face distance, face span, occluded remainder).
+
+**Anchoring.** `wall_echo_strength` 30, `wall_corner_gain` 1.0 and
+`wall_diffuse_fraction` 0.04 were set on a flat 7.2 m basin with the quay
+at 30 m and 95.6 m range (the anchor file's geometry): the model reads
+face **+21.8 dB**, beyond **−15.5 dB**, far **−19 dB** (TVG-flattened,
+against the seabed at equal slant), within ~4 dB of both corpus sides;
+`wall_face_diffuse` 0.5 and `wall_pontoon_specular` 0.15 are judgement
+values (no pontoon geometry ground truth exists in the corpus). Smoke
+`[4d]` renders the **shipped combination** (echo + occlusion + ghosts
+together — the case the old suite never rendered), a pontoon (seabed
+beyond unchanged, faint edge only, no slab when crossed), the `R²` law and
+the corpus reduction (`[2f]`, gated on the corpus). Run
+`python3 -m blueboat_sss_sim.analysis.wall_contrast <svlog>` on any
+recording, simulated or real, to reduce it to the same three numbers.

@@ -180,7 +180,14 @@ class SideScanSonarSimNode(Node):
         self._warn_if_acquisition_diverges(acq)
         self._renderer = GeometricRenderer(self._scene, acq, self._model_cfg)
         for ch in self._channels.values():
-            ch.encoder = PingEncoder(ch.side, acq, self._model_cfg)
+            # One encoder per side for the node's whole life: the real
+            # device numbers pings from power-up and a re-enable never
+            # restarts its counter (a restarted counter puts duplicate ping
+            # numbers into one .svlog, which the GCS keys rows on).
+            if ch.encoder is None:
+                ch.encoder = PingEncoder(ch.side, acq, self._model_cfg)
+            else:
+                ch.encoder.reconfigure(acq, self._model_cfg)
             ch.drift = GainDrift(self._model_cfg, self._rng)
         if self._t0 is None:
             self._t0 = self._now()
@@ -243,13 +250,18 @@ class SideScanSonarSimNode(Node):
                 rendered.ping.power, wc,
                 ch.drift.value(t_sim) if ch.drift else 1.0,
                 self._model_cfg, ch.rng,
-                specular=rendered.ping.specular)
+                specular=rendered.ping.specular,
+                texture=rendered.ping.texture)
             rendered.ping.power = noisy
             enc = ch.encoder.encode(rendered.ping)  # type: ignore[union-attr]
             self._publish(ch, enc)
             if self._gt_pub is not None and rendered.contacts:
                 gt_payload += [{
-                    "side": c.side.value, "object_id": c.object_id,
+                    "side": c.side.value,
+                    # A wall face's own echo is labelled by the wall's name;
+                    # scene objects keep their integer id.
+                    "object_id": (f"wall:{c.wall_name}"
+                                  if c.object_type == "wall" else c.object_id),
                     "type": c.object_type,
                     "slant_range_m": round(c.slant_range_m, 3),
                     "extent_bins": round(c.extent_bins, 1),

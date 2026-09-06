@@ -53,6 +53,13 @@ _OBJECT_DEFAULTS: dict[str, Material] = {
     "brickclay":Material("brickclay",0.75, 0.10, 0, 0.0, 2.0, (0.65, 0.30, 0.22)),
     "rope":     Material("rope",     0.35, 0.10, 0, 0.0, 1.3, (0.80, 0.75, 0.55)),
     "generic":  Material("generic",  0.60, 0.10, 0, 0.0, 1.8, (0.50, 0.50, 0.50)),
+    # Target-family additions (target_families_and_surrogates.md):
+    "glass":    Material("glass",    0.65, 0.05, 0, 0.0, 2.2, (0.55, 0.70, 0.60)),
+    "wood":     Material("wood",     0.35, 0.10, 0, 0.0, 1.4, (0.55, 0.40, 0.25)),
+    # Air-backed closed-cell foam is a *strong* reflector despite being
+    # soft: the water/air impedance step is near-total.
+    "eps":      Material("eps",      0.80, 0.05, 0, 0.0, 1.5, (0.92, 0.92, 0.90)),
+    "tinplate": Material("tinplate", 0.90, 0.05, 0, 0.0, 2.4, (0.72, 0.72, 0.70)),
 }
 
 

@@ -42,16 +42,22 @@ class GainDrift:
 def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
                      gain: float, cfg: SonarModelConfig,
                      rng: np.random.Generator,
-                     specular: np.ndarray | None = None) -> np.ndarray:
+                     specular: np.ndarray | None = None,
+                     texture: np.ndarray | None = None) -> np.ndarray:
     """Return the noisy linear power vector (does not modify inputs).
 
     Speckle statistics, per component:
 
     * **Diffuse** (``power``): ``speckle_looks == 1`` gives fully-developed
       speckle -- intensity multiplicatively Exp(1)-distributed, i.e.
-      Rayleigh amplitude, the textbook single-look SSS model.
+      Rayleigh amplitude, the textbook single-look SSS model. When the
+      renderer supplies ``texture`` (its coherent ground-scatterer field,
+      unit mean, Exp(1)-distributed per bin but *correlated* along range and
+      along track like the real device's), that texture is used instead of
+      an independent draw; the statistic per bin is the same, the
+      neighbourhood structure is what changes.
       ``speckle_looks = L > 1`` gives multi-look Gamma(L, 1/L) speckle
-      (mean 1, CV 1/sqrt(L)).
+      (mean 1, CV 1/sqrt(L)); the texture is not used in that mode.
     * **Coherent specular** (``specular``, near-nadir first-return lobe):
       the coherent echo does not fully decorrelate, so it fluctuates far
       less than the diffuse field (Rician with high K-factor). Modelled as
@@ -63,7 +69,10 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
     if cfg.speckle:
         looks = max(int(cfg.speckle_looks), 1)
         if looks == 1:
-            out *= rng.exponential(1.0, size=out.shape)
+            if texture is not None and cfg.coherent_scatterers:
+                out *= texture
+            else:
+                out *= rng.exponential(1.0, size=out.shape)
         else:
             out *= rng.gamma(looks, 1.0 / looks, size=out.shape)
     if specular is not None:

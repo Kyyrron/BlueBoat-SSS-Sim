@@ -1,41 +1,61 @@
-"""End-to-end simulated mission.
+"""Dev end-to-end simulation on a world folder.
 
 Starts, in one command:
-  1. Gazebo on the mission bundle's generated ``world.sdf``, with the
-     ``/clock`` and ``/ocean_current`` bridges and the robot spawn
+  1. Gazebo on the world folder's ``world.sdf``, with the ``/clock`` and
+     ``/ocean_current`` bridges and the robot spawn
      (``blueboat_description``'s ``upload_rov_launch.py``);
-  2. the existing control stack (``simulation_interface``,
-     ``master_control``, ``path_publisher``) unchanged -- with
-     ``path_publisher``'s ``total_time`` sized automatically from the
-     mission bundle's trajectory metadata, so RViz shows (and any
-     consumer tracks) the *whole* mission, not the first 120 s;
-  3. this package's mission path service (replacing ``path_generation.py``);
-  4. the simulated SSS (``sss_sim_launch.py``).
+  2. the simulated SSS + MAVROS shim (``sss_sim_launch.py``), the shim
+     anchored at the world's own GPS anchor;
+  3. optionally (``with_control:=true``) the existing control stack
+     unchanged -- ``simulation_interface``, ``master_control``,
+     ``path_publisher`` and **``blueboat_control``'s own
+     ``path_generation``** driven by ``trajectory:=from_yaml:<file>``.
+     This package no longer serves ``/path_request``: missions belong to
+     MCS/Control, and the deployed-trajectory interface is exactly the
+     real boat's.
 
-The simulator's output stops at SSS data; the dataset recorder is a
-downstream tool and is not started here.
+This launch is a development convenience for exercising a world
+end-to-end without the Mission Control Station; operational missions are
+launched by MCS.
 
 Arguments
 ---------
-mission_dir       mission bundle directory (required)
+world_dir         world folder (required)
+with_control      also start the control stack          (default false)
+trajectory_file   local-frame trajectory YAML for path_generation's
+                  from_yaml branch (required with with_control; an MCS
+                  ``.deployed/<name>.yaml`` works as-is). The file is
+                  watched: it may appear after launch.
 controller_type   controller for master_control        (default 'PID')
 use_stock_world   load blueboat_description's stock world.sdf via its
-                  world_launch.py instead of the bundle's  (default false)
+                  world_launch.py instead of the world's  (default false)
 quiet             filter known-noisy startup lines      (default true)
+sim_origin_lat / sim_origin_lon
+                  MAVROS-shim origin override; empty = the world's anchor
+with_mavros_shim  forwarded to sss_sim_launch.py        (default true)
+
+sea_current / sea_current_from_deg / sea_waves / sea_waves_from_deg /
+sea_schedule / sea_seed
+                  the sea state (``sea_state_launch.py``): current and
+                  wave presets from ``config/sea_states.yaml`` with their
+                  compass FROM directions, or a timeline YAML. Defaults
+                  ``none`` / ``calm`` -- a strict no-op (zero water
+                  velocity, no wrench), so an unchanged command line runs
+                  exactly as before. The node is always started, so the
+                  situation can be modified live from MCS.
 
 range_start_mm / range_length_mm / msec_per_ping / gain_index /
 num_results / pulse_len_percent
                   per-run acquisition overrides, forwarded to
-                  ``sss_sim_launch.py``. Empty (the default) means "use the
-                  mission bundle's frozen ``sonar.yaml`` value" -- the bundle
-                  is the authority for what a run acquired at (NC #10).
+                  ``sss_sim_launch.py``. Empty (the default) means "use
+                  the resolved sonar profile's value".
 
 World loading
 -------------
 ``blueboat_description``'s ``world_launch.py`` hard-codes the stock
 ``world.sdf`` and declares no ``world`` argument, so it cannot load a
-bundle world. This launch file therefore does that bring-up itself:
-``sl.gz_launch`` on the bundle's ``world.sdf`` -- which also registers the
+generated world. This launch file therefore does that bring-up itself:
+``sl.gz_launch`` on the world's ``world.sdf`` -- which also registers the
 world name (``generated_ocean``) that the model bridges resolve against --
 then the same ``/clock`` and ``/ocean_current`` bridges and the same
 ``upload_rov_launch.py`` include that the stock path provides.
@@ -105,63 +125,95 @@ def _install_quiet_filter() -> None:
 
 sl = SimpleLauncher(use_sim_time=True)
 
-sl.declare_arg("mission_dir", default_value="")
+sl.declare_arg("world_dir", default_value="")
+sl.declare_arg("with_control", default_value=False)
+sl.declare_arg("trajectory_file", default_value="")
 sl.declare_arg("controller_type", default_value="PID")
 sl.declare_arg("use_stock_world", default_value=False)
 sl.declare_arg("quiet", default_value=True)
+sl.declare_arg("with_mavros_shim", default_value=True)
+sl.declare_arg("sim_origin_lat", default_value="")
+sl.declare_arg("sim_origin_lon", default_value="")
 
 # The six run-dependent acquisition parameters, forwarded to sss_sim_launch.
-# Empty = use the mission bundle's frozen sonar.yaml value (NC #10).
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
                     "gain_index", "num_results", "pulse_len_percent")
 for _a in ACQUISITION_ARGS:
     sl.declare_arg(_a, default_value="",
-                   description=f"{_a} override; empty = use the mission "
-                               "bundle's frozen sonar.yaml value")
+                   description=f"{_a} override; empty = use the resolved "
+                               "sonar profile's value")
+
+# The sea state, forwarded to sea_state_launch.py (same names).
+SEA_ARGS = {"sea_current": "none", "sea_current_from_deg": 0.0,
+            "sea_waves": "calm", "sea_waves_from_deg": 0.0,
+            "sea_schedule": "", "sea_seed": 0}
+for _a, _d in SEA_ARGS.items():
+    sl.declare_arg(_a, default_value=_d)
+
+#: The stock world of blueboat_description (use_stock_world).
+STOCK_WORLD_NAME = "ocean"
 
 
-def _mission_total_time(mission_dir: str) -> float:
-    """Whole-mission time window for path_publisher: stored duration
-    (written by generate_mission) x 10% controller margin + 30 s."""
+def world_name_from_sdf(world_file: str, default: str = STOCK_WORLD_NAME) -> str:
+    """The ``<world name="...">`` of an SDF file -- the name gz-sim
+    registers its ``/world/<name>/...`` topics and services under, which
+    the sea-state wrench bridges are created for. Module scope and
+    launch-free so the smoke test can exercise it."""
+    import re
+    try:
+        with open(world_file, "r", encoding="utf-8") as f:
+            m = re.search(r'<world\s+name\s*=\s*"([^"]+)"', f.read())
+        return m.group(1) if m else default
+    except OSError:
+        return default
+
+
+def trajectory_total_time(trajectory_file: str) -> float:
+    """Whole-mission time window for path_publisher, from either schema:
+    ``points: [[t, x, y, yaw], ...]`` (MCS) or ``waypoints`` + ``speed``
+    (legacy), x 10% controller margin + 30 s. Module scope and launch-free
+    so the smoke test can exercise it."""
     import yaml
     try:
-        with open(f"{mission_dir}/trajectory.yaml", "r", encoding="utf-8") as f:
+        with open(trajectory_file, "r", encoding="utf-8") as f:
             doc = yaml.safe_load(f) or {}
         duration = float(doc.get("duration_s", 0.0))
-        if duration <= 0.0:  # older bundle without metadata: recompute
+        if duration <= 0.0 and "points" in doc:
+            pts = doc["points"]
+            duration = float(pts[-1][0]) - float(pts[0][0])
+        if duration <= 0.0 and "waypoints" in doc:
             import numpy as np
             wps = np.asarray(doc["waypoints"], dtype=float)
             seg = np.diff(wps, axis=0)
             duration = float(np.hypot(seg[:, 0], seg[:, 1]).sum()
                              / max(float(doc.get("speed", 1.0)), 1e-6))
-        return duration * 1.1 + 30.0
+        if duration > 0.0:
+            return duration * 1.1 + 30.0
     except Exception:
-        return 600.0  # safe fallback
+        pass
+    return 600.0  # safe fallback (file not written yet: it is watched)
 
 
 def launch_setup():
-    mission_dir = sl.arg("mission_dir")
-    if not mission_dir:
-        raise RuntimeError("launch argument 'mission_dir' is required")
-    world_file = f"{mission_dir}/world.sdf"
+    world_dir = sl.arg("world_dir")
+    if not world_dir:
+        raise RuntimeError("launch argument 'world_dir' is required")
+    world_file = f"{world_dir}/world.sdf"
     quiet = bool(sl.arg("quiet"))
     if quiet:
         _install_quiet_filter()
-
-    total_time = _mission_total_time(mission_dir)
 
     # 1. Gazebo + robot.
     if sl.arg("use_stock_world"):
         sl.include("blueboat_description", "world_launch.py",
                    launch_arguments={"sliders": False})
     else:
-        # The bundle's world.sdf references seabed.stl relatively; put the
-        # bundle on the resource path so the mesh resolves wherever Gazebo
-        # is started from.
+        # The world.sdf references seabed.stl relatively; put the folder on
+        # the resource path so the mesh resolves wherever Gazebo starts.
         sl.add_action(SetEnvironmentVariable(
             "GZ_SIM_RESOURCE_PATH",
             os.pathsep.join(filter(None, [
-                mission_dir, os.environ.get("GZ_SIM_RESOURCE_PATH", "")]))))
+                world_dir, os.environ.get("GZ_SIM_RESOURCE_PATH", "")]))))
         # gz_launch reads <world name> out of the SDF and registers it, which
         # is what makes GazeboBridge.model_prefix() resolve; a bare Gazebo
         # process would leave the bridges without a world name.
@@ -173,27 +225,46 @@ def launch_setup():
         sl.include("blueboat_description", "upload_rov_launch.py",
                    launch_arguments={"sliders": False, "thr": "thrusters_ur"})
 
-    # 2. Existing control stack, untouched (first-party: stays on screen).
-    #    path_publisher's window now covers the whole mission.
-    sl.node("blueboat_control", "simulation_interface.py")
-    sl.node("blueboat_control", "path_publisher.py", output="screen",
-            parameters={"total_time": total_time})
-    sl.node("blueboat_control", "master_control.py", output="screen",
-            parameters={"controller_type": sl.arg("controller_type"),
-                        "simulation": True})
+    # 2. Optional control stack, untouched -- including blueboat_control's
+    #    OWN path_generation on its from_yaml branch (the real-boat
+    #    deployed-trajectory interface; the file is watched, so it may be
+    #    deployed after launch).
+    if sl.arg("with_control"):
+        trajectory_file = sl.arg("trajectory_file")
+        if not trajectory_file:
+            raise RuntimeError(
+                "with_control:=true needs trajectory_file:=<local-frame "
+                "trajectory YAML> (an MCS .deployed/<name>.yaml works as-is)")
+        sl.node("blueboat_control", "simulation_interface.py")
+        sl.node("blueboat_control", "path_generation.py", output="screen",
+                parameters={"trajectory": f"from_yaml:{trajectory_file}"})
+        sl.node("blueboat_control", "path_publisher.py", output="screen",
+                parameters={"total_time":
+                            trajectory_total_time(trajectory_file)})
+        sl.node("blueboat_control", "master_control.py", output="screen",
+                parameters={"controller_type": sl.arg("controller_type"),
+                            "simulation": True})
 
-    # 3. Mission trajectory served on the same RequestPath interface.
-    #    Also latches the complete path on /mission/full_path for RViz.
-    sl.node("blueboat_sss_sim", "sss_path_generation", output="screen",
-            parameters={"trajectory_file": f"{mission_dir}/trajectory.yaml"})
-
-    # 4. Simulated SSS (no dataset recorder -- downstream stage).
+    # 3. Simulated SSS + MAVROS shim, anchored at the world's GPS anchor.
     sl.include("blueboat_sss_sim", "sss_sim_launch.py",
-               launch_arguments={"mission_dir": mission_dir,
-                                 "with_recorder": False,
-                                 "with_mission_path": False,
+               launch_arguments={"world_dir": world_dir,
                                  "quiet": quiet,
+                                 "with_mavros_shim": sl.arg("with_mavros_shim"),
+                                 "sim_origin_lat": sl.arg("sim_origin_lat"),
+                                 "sim_origin_lon": sl.arg("sim_origin_lon"),
                                  **{a: sl.arg(a) for a in ACQUISITION_ARGS}})
+
+    # 4. Sea state: current + waves on the hull (docs/sea_state_model.md).
+    #    The wrench bridges are created for the world's own name; the
+    #    node injects ApplyLinkWrench into the running world if the SDF
+    #    predates it (worlds built before 2026-09, the stock world).
+    world_name = (STOCK_WORLD_NAME if sl.arg("use_stock_world")
+                  else world_name_from_sdf(world_file))
+    sl.include("blueboat_sss_sim", "sea_state_launch.py",
+               launch_arguments={"world_name": world_name,
+                                 "world_dir": world_dir,
+                                 "quiet": quiet,
+                                 **{a: sl.arg(a) for a in SEA_ARGS}})
 
     return sl.launch_description()
 

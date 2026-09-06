@@ -28,7 +28,8 @@ def generate_world(config_path: str | Path, out_dir: str | Path,
     scene = generate_scene(cfg, raw_config=raw)
     scene.save(out_dir)
     write_world_sdf(scene, out_dir, plugin_prefix=plugin_prefix,
-                    material_overrides=cfg.material_overrides or None)
+                    material_overrides=cfg.material_overrides or None,
+                    limits_collision=cfg.limits_collision)
     return scene
 
 

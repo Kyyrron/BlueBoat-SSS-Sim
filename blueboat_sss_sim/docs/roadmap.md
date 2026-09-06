@@ -1,20 +1,31 @@
 # Realism roadmap
 
 Ordered by (thesis value ÷ effort). Each item plugs into an existing seam
-— none requires touching the ROS interface or the dataset pipeline.
+— none requires touching the ROS interface. (The 2026-09 world-builder
+rework is done and tracked in `.claude/TODO.md`, not here.)
 
 ## 1. Sound-speed profile & ray bending (low effort)
 Replace straight-ray `slant = hypot(y, dz)` with a two-layer SVP ray step
 in `GeometricRenderer._ping_geometry`. Mostly relevant beyond ~30 m range
 or strong thermoclines; low priority for the 15 m shallow regime.
 
-## 2. Wall / surface multipath — **shipped**
-Implemented in `sonar/multipath.py`, off by default
-(`model.wall_multipath_enabled`); world config carries `walls:`. See
-`sonar_model.md` §10 and A9. What remains out of scope, and why it is here
-rather than done: the wall's **own** direct echo and shadow, which the 2.5-D
-heightfield cannot represent and which needs the mesh path below; and
-composed bounces beyond the first-order mirror set.
+## 2. Wall / surface multipath — **shipped**, re-anchored 2026-09-03
+Implemented in `sonar/multipath.py` and `renderer._face_echo_into`, on by
+default; world config carries `walls:` with `kind: quay | pontoon`,
+`draft_m`, `roughness_m`. See `sonar_model.md` §10–11 and A9/A11. Still
+out of scope: composed bounces beyond the first-order mirror set, a rubble
+slope at a quay's foot, diffraction over the top, and a corpus-measured
+pontoon (no pontoon geometry ground truth exists in the field logs).
+
+## 2b. Sea state — **shipped 2026-09-03**, open items
+`sea/` + `sea_state_node` (`docs/sea_state_model.md`). Next, in value
+order: wind load on the hull and superstructure (the current model has
+no wind at all); spatially varying current (a basin mouth jet, eddies);
+wave diffraction/reflection off the quays (the wave field is open-water
+JONSWAP even inside a basin); a hydrodynamic identification of the
+BlueBoat itself (the damping coefficients Gazebo applies are BlueROV2's,
+named as such in `hydrodynamics.xacro` — a BlueBoat-Control item); and
+the live Gazebo acceptance pass listed in `.claude/TODO.md`.
 
 ## 3. Mesh-accurate targets (medium)
 For cavity-bearing targets (wrecks, pipes on trestles) the 2.5-D stamp is
@@ -40,8 +51,8 @@ addresses A4 partially without giving up the static-scene architecture.
 ## 7. GPU / Gazebo-sensor backend (only if needed)
 If world sizes or ping rates ever outgrow the CPU renderer, reimplement
 `SonarRenderer` on a GPU ray caster (or a Gazebo sensor plugin feeding
-ranges + material IDs) behind the same ABC. The interface, noise stack,
-encoder and dataset layers are already backend-agnostic.
+ranges + material IDs) behind the same ABC. The interface, noise stack
+and encoder layers are already backend-agnostic.
 
 ## 8. Sim-to-real calibration over a known bottom
 The first pass is done: the encoder now carries the device's per-ping

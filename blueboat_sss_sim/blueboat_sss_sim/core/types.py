@@ -85,6 +85,12 @@ class Ping:
     # kept separate from `power` because its fluctuation statistics differ:
     # the coherent echo is low-CV (Rician, high K-factor) while the diffuse
     # field is fully-developed speckle. The noise stage combines them.
+    texture: np.ndarray | None = None
+    # Unit-mean multiplicative speckle texture of the diffuse field, from the
+    # renderer's coherent ground-scatterer sum (correlated along range by the
+    # pulse and along track by footprint overlap). `power` stays the noiseless
+    # mean; the noise stage multiplies by this instead of drawing Exp(1) per
+    # bin. None -> the noise stage draws its own (legacy, uncorrelated).
 
 
 @dataclass
@@ -104,6 +110,9 @@ class GroundTruthContact:
     via: str = ""                 # reflector that produced it ("" = direct
                                   # path; else the mirror-source name, e.g.
                                   # "wall:quay_north" or "surface")
+    wall_name: str = ""           # set (with object_type "wall" and a
+                                  # negative object_id) when the contact is
+                                  # a wall face's own direct echo
 
     @property
     def group_key(self) -> tuple[int, str]:
@@ -154,14 +163,31 @@ class GridSpec:
 class Wall:
     """One vertical reflecting boundary of an enclosed basin (quay, pontoon).
 
-    A finite segment in plan view, extending from the seabed up to ``top_z``.
-    Walls are *acoustic* scene furniture: they are not stamped into the height
-    raster (a 2.5-D heightfield cannot carry a vertical face), so they produce
-    multipath ghosts but no direct echo of their own -- see docs/sonar_model.md
-    assumption A9.
+    A finite segment in plan view. Its vertical extent depends on ``kind``:
 
-    ``reflectivity`` is the fraction of incident energy the face returns, per
-    bounce; a concrete quay is high (~0.6), a fendered pontoon much lower.
+    * ``quay`` -- a face from the **seabed** up to ``top_z`` (a ``top_z``
+      below the waterline is a submerged sill, looked over by rays above
+      it);
+    * ``pontoon`` -- a **floating** structure: the wet face spans only
+      ``[-draft_m, 0]``; sound passes underneath, so a pontoon occludes
+      nothing below its draft, casts no quay-like shadow and reflects only
+      the rays that meet its shallow band. A wall line the boat can drive
+      over is a pontoon, never a quay.
+
+    Walls are *acoustic* scene furniture: they are not stamped into the height
+    raster (a 2.5-D heightfield cannot carry a vertical face). The renderer
+    handles them analytically instead: a wall is a mirror source for
+    multipath ghosts, its wet face returns a bright line at its own slant
+    range, the seabed in front of it folds a single-bounce band just beyond
+    the face, and a quay occludes every seabed sample behind it -- see
+    docs/sonar_model.md section 11.
+
+    ``reflectivity`` is the fraction of incident energy the face returns
+    **per bounce** (a mirror ghost bounces twice and carries its square); a
+    concrete quay is high (~0.65), a fendered pontoon much lower.
+    ``roughness_m`` is the rms height roughness of the face, which at
+    450 kHz (3.3 mm wavelength) decides how much of a bounce stays coherent
+    (Rayleigh parameter, docs/sonar_model.md section 11).
     """
 
     name: str
@@ -172,6 +198,16 @@ class Wall:
     top_z: float = 0.0            # world z of the wall top (0 = waterline)
     reflectivity: float = 0.5     # 0..1 energy fraction returned per bounce
     thickness: float = 0.30       # visual thickness in Gazebo [m]
+    kind: str = "quay"            # quay | pontoon
+    draft_m: float = 0.4          # pontoon only: wet depth of the floating face
+    roughness_m: float = 0.003    # rms face roughness [m] (concrete ~3 mm)
+
+    @property
+    def z_bottom(self) -> float:
+        """World z where the reflecting face ends: the seabed (``-inf`` --
+        the renderer clamps to the local seabed) for a quay, the draft
+        for a pontoon."""
+        return -float(self.draft_m) if self.kind == "pontoon" else -np.inf
 
     @property
     def length(self) -> float:
@@ -206,10 +242,33 @@ class PlacedObject:
     burial: float                 # 0 = proud, 1 = fully buried
     reflectivity: float           # 0..1 acoustic reflectivity
     material: str = "generic"
+    # Open-frame (skeletal) objects: fraction of the footprint filled by
+    # actual structure -- 1.0 for a solid object, ~0.15 for a bicycle. The
+    # lattice masks read it; solid masks ignore it. Additive with a default
+    # so pre-existing manifests load unchanged.
+    fill_fraction: float = 1.0
+    # Class-specific extras (future per-class knobs); additive likewise.
+    params: dict = field(default_factory=dict)
+    # 3-D resting orientation (objects v3, 2026-09-03): roll/pitch of the
+    # canonical class frame [rad] and the rest-pose name (``canonical``
+    # = the legacy 2.5-D mask, bit-identical to every existing world;
+    # anything else = a rotated solid settled on the local seabed plane,
+    # ``worldgen/solids.py``). ``rest_z`` is the world z of the solid's
+    # bounding-box centre above the pre-stamp terrain at (x, y), for the
+    # Gazebo pose. Additive defaults: old manifests load unchanged.
+    roll: float = 0.0
+    pitch: float = 0.0
+    rest: str = "canonical"
+    rest_z: float = 0.0
 
     @property
     def effective_height(self) -> float:
         return max(0.0, self.proud_height * (1.0 - self.burial))
+
+    @property
+    def rested(self) -> bool:
+        """True when the solid path (not the legacy mask) stamps it."""
+        return self.rest != "canonical" or self.roll != 0.0 or self.pitch != 0.0
 
     @property
     def footprint_radius(self) -> float:
