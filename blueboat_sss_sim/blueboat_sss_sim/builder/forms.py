@@ -53,6 +53,9 @@ class SchemaForm(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        # A narrow property column wraps a long row (label above field)
+        # instead of forcing the column -- and the window -- wider.
+        layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self._getters: dict[str, callable] = {}
         self._setters: dict[str, callable] = {}
         values = values or {}

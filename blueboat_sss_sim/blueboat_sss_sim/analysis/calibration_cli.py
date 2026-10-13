@@ -173,7 +173,8 @@ def _simulate_with(bundle: Path, cfg: SonarConfig, n_pings: int, seed: int,
             ping.power = apply_ping_noise(ping.power, bin_r < ping.altitude_m,
                                           1.0, model, rng,
                                           specular=ping.specular,
-                                          texture=ping.texture)
+                                          texture=ping.texture,
+                                          unoccluded=ping.unoccluded)
             e = enc.encode(ping)
             out.append(ProfileRecord(
                 side=side, ping_number=e.ping_number,

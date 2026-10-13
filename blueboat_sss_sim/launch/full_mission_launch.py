@@ -11,8 +11,8 @@ Starts, in one command:
      ``path_publisher`` and **``blueboat_control``'s own
      ``path_generation``** driven by ``trajectory:=from_yaml:<file>``.
      This package no longer serves ``/path_request``: missions belong to
-     MCS/Control, and the deployed-trajectory interface is exactly the
-     real boat's.
+     MCS/Control, and the deployed-trajectory interface is exactly a
+     real-robot run's.
 
 This launch is a development convenience for exercising a world
 end-to-end without the Mission Control Station; operational missions are
@@ -27,21 +27,33 @@ trajectory_file   local-frame trajectory YAML for path_generation's
                   ``.deployed/<name>.yaml`` works as-is). The file is
                   watched: it may appear after launch.
 controller_type   controller for master_control        (default 'PID')
+note              free-text tag put into the run's position-log file name,
+                  ``{date}-{note}-poslog.csv`` -- exactly the argument
+                  ``Sim_launch.py`` and the real-robot
+                  ``BlueBoat_launch.py`` carry, forwarded to
+                  ``simulation_interface``        (default 'sim')
+data_dir          root for that CSV and the controller .npy; empty resolves
+                  to $BLUEBOAT_DATA_DIR, else the sourced workspace
+                                                  (default '')
 use_stock_world   load blueboat_description's stock world.sdf via its
                   world_launch.py instead of the world's  (default false)
 quiet             filter known-noisy startup lines      (default true)
 sim_origin_lat / sim_origin_lon
                   MAVROS-shim origin override; empty = the world's anchor
 with_mavros_shim  forwarded to sss_sim_launch.py        (default true)
+headless          run the Gazebo server only (``gz sim -s``), no GUI --
+                  scripted runs such as ``test/gazebo_sea_test.py``
+                                                  (default false)
 
 sea_current / sea_current_from_deg / sea_waves / sea_waves_from_deg /
 sea_schedule / sea_seed
                   the sea state (``sea_state_launch.py``): current and
                   wave presets from ``config/sea_states.yaml`` with their
                   compass FROM directions, or a timeline YAML. Defaults
-                  ``none`` / ``calm`` -- a strict no-op (zero water
-                  velocity, no wrench), so an unchanged command line runs
-                  exactly as before. The node is always started, so the
+                  ``none`` / ``calm`` -- zero water velocity and no wave
+                  forcing; since 2026-10-09 the hull wrench still carries
+                  the catamaran hydrostatics (~0 at rest at the trim; one
+                  hull in every run). The node is always started, so the
                   situation can be modified live from MCS.
 
 range_start_mm / range_length_mm / msec_per_ping / gain_index /
@@ -82,8 +94,19 @@ line from robot_state_publisher, which is on the list by name.
 import logging
 import os
 
-from launch.actions import SetEnvironmentVariable
-from simple_launch import GazeboBridge, SimpleLauncher
+# ROS is needed to *launch*, not to read the resolvers below. Importing
+# `simple_launch` pulls in `launch` -> `lark`, which the workspace venv does
+# not carry, so a plain `python3 -m test.smoke_test` used to die here before
+# reporting a single check (2026-09-18). The import is therefore optional:
+# under ROS every line behaves exactly as before, and without it the module
+# still yields its constants and its pure resolvers -- which is what
+# `CLAUDE.md` means by "module-scope, launch-free resolvers the smoke test
+# exercises directly".
+try:
+    from launch.actions import SetEnvironmentVariable
+    from simple_launch import GazeboBridge, SimpleLauncher
+except ImportError:                       # no ROS on this interpreter
+    SetEnvironmentVariable = GazeboBridge = SimpleLauncher = None
 
 # ---------------------------------------------------------------------------
 # Targeted screen-noise filter (see module docstring).
@@ -123,35 +146,54 @@ def _install_quiet_filter() -> None:
         pass  # cosmetic only -- never break the launch over it
 
 
-sl = SimpleLauncher(use_sim_time=True)
+sl = SimpleLauncher(use_sim_time=True) if SimpleLauncher is not None else None
 
-sl.declare_arg("world_dir", default_value="")
-sl.declare_arg("with_control", default_value=False)
-sl.declare_arg("trajectory_file", default_value="")
-sl.declare_arg("controller_type", default_value="PID")
-sl.declare_arg("use_stock_world", default_value=False)
-sl.declare_arg("quiet", default_value=True)
-sl.declare_arg("with_mavros_shim", default_value=True)
-sl.declare_arg("sim_origin_lat", default_value="")
-sl.declare_arg("sim_origin_lon", default_value="")
+
+def _declare(name, **kw) -> None:
+    """Declare a launch argument under ROS; a no-op without it, so the
+    constants and the pure helpers below stay importable either way."""
+    if sl is not None:
+        sl.declare_arg(name, **kw)
+
+
+_declare("world_dir", default_value="")
+_declare("with_control", default_value=False)
+_declare("trajectory_file", default_value="")
+_declare("controller_type", default_value="PID")
+# Run-log identity, same names and meaning as Sim_launch.py / BlueBoat_launch.py
+# (simulation_interface names {date}-{note}-poslog.csv from 'note').
+_declare("note", default_value="sim")
+_declare("data_dir", default_value="")
+_declare("use_stock_world", default_value=False)
+_declare("quiet", default_value=True)
+_declare("with_mavros_shim", default_value=True)
+_declare("sim_origin_lat", default_value="")
+_declare("sim_origin_lon", default_value="")
+_declare("headless", default_value=False)
 
 # The six run-dependent acquisition parameters, forwarded to sss_sim_launch.
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
                     "gain_index", "num_results", "pulse_len_percent")
 for _a in ACQUISITION_ARGS:
-    sl.declare_arg(_a, default_value="",
-                   description=f"{_a} override; empty = use the resolved "
-                               "sonar profile's value")
+    _declare(_a, default_value="",
+             description=f"{_a} override; empty = use the resolved "
+                         "sonar profile's value")
 
 # The sea state, forwarded to sea_state_launch.py (same names).
 SEA_ARGS = {"sea_current": "none", "sea_current_from_deg": 0.0,
             "sea_waves": "calm", "sea_waves_from_deg": 0.0,
             "sea_schedule": "", "sea_seed": 0}
 for _a, _d in SEA_ARGS.items():
-    sl.declare_arg(_a, default_value=_d)
+    _declare(_a, default_value=_d)
 
 #: The stock world of blueboat_description (use_stock_world).
 STOCK_WORLD_NAME = "ocean"
+
+
+def gz_args_for(headless) -> str:
+    """Gazebo command-line flags: run immediately; server only when
+    ``headless`` (launch-free, exercised by the smoke test)."""
+    return "-r -s" if str(headless).strip().lower() in ("1", "true", "yes") else "-r"
 
 
 def world_name_from_sdf(world_file: str, default: str = STOCK_WORLD_NAME) -> str:
@@ -168,11 +210,10 @@ def world_name_from_sdf(world_file: str, default: str = STOCK_WORLD_NAME) -> str
         return default
 
 
-def trajectory_total_time(trajectory_file: str) -> float:
-    """Whole-mission time window for path_publisher, from either schema:
+def _trajectory_duration(trajectory_file: str) -> float:
+    """Duration of one trajectory file, from either schema:
     ``points: [[t, x, y, yaw], ...]`` (MCS) or ``waypoints`` + ``speed``
-    (legacy), x 10% controller margin + 30 s. Module scope and launch-free
-    so the smoke test can exercise it."""
+    (legacy); 0.0 when the file is missing or says nothing."""
     import yaml
     try:
         with open(trajectory_file, "r", encoding="utf-8") as f:
@@ -187,10 +228,36 @@ def trajectory_total_time(trajectory_file: str) -> float:
             seg = np.diff(wps, axis=0)
             duration = float(np.hypot(seg[:, 0], seg[:, 1]).sum()
                              / max(float(doc.get("speed", 1.0)), 1e-6))
+        return max(duration, 0.0)
+    except Exception:
+        return 0.0
+
+
+def trajectory_total_time(trajectory_file: str) -> float:
+    """Whole-mission time window for path_publisher, x 10% controller
+    margin + 30 s. Module scope and launch-free so the smoke test can
+    exercise it.
+
+    path_publisher builds its request window ONCE, at startup, so the
+    duration has to be right at launch time -- and an MCS deployed file
+    is not there then: MCS starts this launch, *then* deletes
+    ``.deployed/<name>.yaml`` and rewrites it only after its GPS fit
+    converges. Read at launch, the window fell back to 600 s and RViz drew
+    the first 600 s of the 1317 s ``plage_bathymetry2`` loop (2026-09-28).
+    A file under ``.deployed/`` therefore takes its duration from the
+    designer file it is deployed from, ``<trajectories>/<name>.yaml``
+    (MCS's ``deployed_path(src.parent, src.stem)``), which always exists
+    and whose sample times ``deploy_mission`` copies unchanged; then from
+    the file itself; then the 600 s fallback."""
+    from pathlib import Path
+    f = Path(trajectory_file)
+    candidates = [f]
+    if f.parent.name == ".deployed":
+        candidates.insert(0, f.parent.parent / f.name)
+    for cand in candidates:
+        duration = _trajectory_duration(str(cand))
         if duration > 0.0:
             return duration * 1.1 + 30.0
-    except Exception:
-        pass
     return 600.0  # safe fallback (file not written yet: it is watched)
 
 
@@ -217,7 +284,7 @@ def launch_setup():
         # gz_launch reads <world name> out of the SDF and registers it, which
         # is what makes GazeboBridge.model_prefix() resolve; a bare Gazebo
         # process would leave the bridges without a world name.
-        sl.gz_launch(world_file, "-r")
+        sl.gz_launch(world_file, gz_args_for(sl.arg("headless")))
         sl.create_gz_bridge([
             GazeboBridge.clock(),
             GazeboBridge("/ocean_current", "/current",
@@ -235,7 +302,10 @@ def launch_setup():
             raise RuntimeError(
                 "with_control:=true needs trajectory_file:=<local-frame "
                 "trajectory YAML> (an MCS .deployed/<name>.yaml works as-is)")
-        sl.node("blueboat_control", "simulation_interface.py")
+        sl.node("blueboat_control", "simulation_interface.py",
+                parameters={"controller_type": sl.arg("controller_type"),
+                            "note": sl.arg("note"),
+                            "data_dir": sl.arg("data_dir")})
         sl.node("blueboat_control", "path_generation.py", output="screen",
                 parameters={"trajectory": f"from_yaml:{trajectory_file}"})
         sl.node("blueboat_control", "path_publisher.py", output="screen",
@@ -243,7 +313,8 @@ def launch_setup():
                             trajectory_total_time(trajectory_file)})
         sl.node("blueboat_control", "master_control.py", output="screen",
                 parameters={"controller_type": sl.arg("controller_type"),
-                            "simulation": True})
+                            "simulation": True,
+                            "data_dir": sl.arg("data_dir")})
 
     # 3. Simulated SSS + MAVROS shim, anchored at the world's GPS anchor.
     sl.include("blueboat_sss_sim", "sss_sim_launch.py",
@@ -269,4 +340,6 @@ def launch_setup():
     return sl.launch_description()
 
 
-generate_launch_description = sl.launch_description(opaque_function=launch_setup)
+generate_launch_description = (
+    sl.launch_description(opaque_function=launch_setup)
+    if sl is not None else None)

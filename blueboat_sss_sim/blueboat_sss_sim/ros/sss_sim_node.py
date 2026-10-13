@@ -12,6 +12,9 @@ Pub  ~/port/raw             std_msgs/UInt8MultiArray   (byte-valid Ping Protocol
 Pub  ~/starboard/profile    blueboat_interfaces/OmniscanProfile
 Pub  ~/starboard/raw        std_msgs/UInt8MultiArray
 Pub  ~/ground_truth/contacts  std_msgs/String (JSON)   [simulation extra]
+Pub  ~/ground_truth/sensor    std_msgs/String (JSON)   [simulation extra]:
+                            per ping cycle, the vehicle pose and both
+                            transducer poses the ping was rendered from
 Sub  ~/ping/enable          std_msgs/Bool   true=start, false=stop
 Sub  <odom_topic>           nav_msgs/Odometry (default /blueboat/odom)
 
@@ -21,13 +24,12 @@ range_start_mm, range_length_mm, msec_per_ping, gain_index, num_results,
 pulse_len_percent -- re-read each time pinging is enabled.
 
 These ROS parameters are the node's acquisition interface, exactly as on the
-real node. The declared defaults are the simulator's calibration point (15 m,
-gain 4 -- the range and gain the power model is anchored to, NC #6) and differ
-from the real ``sss_node.py`` defaults (20 m, ``gain_index: -1`` = device
-auto), so anything that must be comparable between sim and hardware sets them
-explicitly. ``sss_sim_launch.py`` does exactly that, from the mission bundle's
-frozen ``sonar.yaml``; a bundle whose ``acquisition:`` block disagrees with the
-parameters actually in force is reported as a warning at every ping enable.
+real node -- names, semantics and (since 2026-09-28) defaults: 20 m, device
+auto-gain, 1200 bins, pulse 0.00125, the device's best range resolution.
+``sss_sim_launch.py`` still passes all six from the resolved sonar profile, so
+a run's acquisition is traceable to a named file; a profile whose
+``acquisition:`` block disagrees with the parameters actually in force is
+reported as a warning at every ping enable.
 
 ``gain_index: -1`` is accepted with the real device's meaning (auto-gain) and
 resolves to the calibrated index 4, which is what the profile then reports --
@@ -37,10 +39,21 @@ since the ``gain_index`` field is ``uint16`` and cannot carry ``-1``.
 Simulation-only parameters
 --------------------------
 scene_dir (required), sonar_config (YAML with the ``model:`` section),
-odom_topic, publish_ground_truth, seed.
+odom_topic, publish_ground_truth, seed, predict_pose, pose_topic.
 
-The extra ``~/ground_truth/contacts`` topic is additive: downstream
-consumers of the real interface never see it unless they subscribe.
+Platform motion (2026-10-08; 100 Hz pose 2026-10-09). Each ping is
+rendered at the vehicle pose *at the ping time*: Gazebo's per-step model
+pose (``pose_topic``, default ``/sim/sea_state/boat_pose``, bridged by
+``sea_state_launch.py``; at most a physics step old), else the 20 Hz
+odometry, propagated by its own body-frame rates with
+``sea.motion.predict_pose`` -- the function the sea-state node uses for
+the hull wrench -- so a rolling or pitching boat is not imaged with an
+attitude up to 50 ms old (``predict_pose:=false`` restores the newest
+sample as-is). The renderer then places each transducer by the full
+attitude (``GeometricRenderer._sensor_pose``).
+
+The extra ``~/ground_truth/*`` topics are additive: downstream consumers
+of the real interface never see them unless they subscribe.
 """
 
 from __future__ import annotations
@@ -51,7 +64,9 @@ from typing import Optional
 
 import numpy as np
 import rclpy
+from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String, UInt8MultiArray
@@ -59,6 +74,7 @@ from std_msgs.msg import Bool, String, UInt8MultiArray
 from blueboat_interfaces.msg import OmniscanProfile
 
 from ..core.geometry import quat_to_rpy
+from ..sea.motion import HighRatePose, predict_pose
 from ..core.types import Pose3D, Side
 from ..sonar.config import (AUTO_GAIN_INDEX, AcquisitionParams, SonarConfig,
                             SonarModelConfig)
@@ -89,13 +105,14 @@ class SideScanSonarSimNode(Node):
     def __init__(self) -> None:
         super().__init__("side_scan_sonar")
 
-        # ---- Run-dependent parameters (identical to the real node) --------
+        # ---- Run-dependent parameters (identical to the real node, names
+        # and defaults; the launches pass the resolved profile's values) ----
         self.declare_parameter("range_start_mm", 0)
-        self.declare_parameter("range_length_mm", 15000)
+        self.declare_parameter("range_length_mm", 20000)
         self.declare_parameter("msec_per_ping", 0)
-        self.declare_parameter("gain_index", 4)
-        self.declare_parameter("num_results", 600)
-        self.declare_parameter("pulse_len_percent", 0.002)
+        self.declare_parameter("gain_index", -1)
+        self.declare_parameter("num_results", 1200)
+        self.declare_parameter("pulse_len_percent", 0.00125)
 
         # ---- Simulation-only parameters ------------------------------------
         self.declare_parameter("scene_dir", "")
@@ -103,6 +120,8 @@ class SideScanSonarSimNode(Node):
         self.declare_parameter("odom_topic", "/blueboat/odom")
         self.declare_parameter("publish_ground_truth", True)
         self.declare_parameter("seed", 0)
+        self.declare_parameter("predict_pose", True)
+        self.declare_parameter("pose_topic", "/sim/sea_state/boat_pose")
 
         scene_dir = self.get_parameter("scene_dir").value
         if not scene_dir:
@@ -112,6 +131,16 @@ class SideScanSonarSimNode(Node):
         self.get_logger().info(
             f"scene loaded: {self._scene.grid.nx}x{self._scene.grid.ny} @ "
             f"{self._scene.grid.resolution} m, {len(self._scene.objects)} objects")
+        stale = self._scene.stale_rasters()
+        if stale:
+            # SceneModel.load says the same through Python logging, which
+            # the ROS console does not show: repeat it where the operator
+            # looks.
+            self.get_logger().warning(
+                f"world {scene_dir} predates the current object model (no "
+                f"{', '.join(stale)} raster): its objects render as they did "
+                "when it was built. Rebuild it (World Builder -> Edit World "
+                "-> save) for the current model.")
 
         sonar_cfg_path = self.get_parameter("sonar_config").value
         self._sonar_cfg_path: str = sonar_cfg_path or ""
@@ -133,11 +162,23 @@ class SideScanSonarSimNode(Node):
             Side.PORT: _SideChannel(self, Side.PORT, qos, self._rng),
             Side.STARBOARD: _SideChannel(self, Side.STARBOARD, qos, self._rng),
         }
+        gt_on = bool(self.get_parameter("publish_ground_truth").value)
         self._gt_pub = (self.create_publisher(String, "~/ground_truth/contacts", 10)
-                        if self.get_parameter("publish_ground_truth").value else None)
+                        if gt_on else None)
+        self._sensor_pub = (self.create_publisher(String, "~/ground_truth/sensor", 10)
+                            if gt_on else None)
 
         # ---- Inputs ----------------------------------------------------------
         self._pose: Optional[Pose3D] = None
+        self._pose_t = 0.0                         # odometry stamp, sim time
+        self._twist_body = (np.zeros(3), np.zeros(3))
+        self._predict = bool(self.get_parameter("predict_pose").value)
+        self._hr = HighRatePose()
+        self._pose_source = "odom"
+        if str(self.get_parameter("pose_topic").value):
+            self.create_subscription(TransformStamped,
+                                     str(self.get_parameter("pose_topic").value),
+                                     self._on_boat_pose, 50)
         self.create_subscription(
             Odometry, self.get_parameter("odom_topic").value,
             self._on_odom, 10)
@@ -159,6 +200,13 @@ class SideScanSonarSimNode(Node):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
         roll, pitch, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)
         self._pose = Pose3D(p.x, p.y, p.z, roll, pitch, yaw)
+        lin, ang = msg.twist.twist.linear, msg.twist.twist.angular
+        # Gazebo's OdometryPublisher reports the twist in the child (body)
+        # frame -- the convention predict_pose expects.
+        self._twist_body = (np.array([lin.x, lin.y, lin.z]),
+                            np.array([ang.x, ang.y, ang.z]))
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._pose_t = stamp if stamp > 0.0 else self._now()
 
     def _on_ping_enable(self, msg: Bool) -> None:
         if msg.data:
@@ -233,17 +281,56 @@ class SideScanSonarSimNode(Node):
         self.get_logger().info("pinging stopped")
 
     # ------------------------------------------------------------------ tick
+    def _on_boat_pose(self, msg: TransformStamped) -> None:
+        child = msg.child_frame_id.split("/")[-1]
+        if child and child != "blueboat":
+            return
+        tr, q = msg.transform.translation, msg.transform.rotation
+        roll, pitch, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)
+        st = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._hr.update(st if st > 0.0 else self._now(),
+                        Pose3D(tr.x, tr.y, tr.z, roll, pitch, yaw))
+
+    def _ping_pose(self, t_now: float) -> tuple[Pose3D, float]:
+        """The vehicle pose at the ping time and the source's age [s]:
+        the 100 Hz model pose when it is fresh, else the odometry."""
+        hr = self._hr.state()
+        if hr is not None and t_now - hr[3] < 0.1:
+            pose, v_body, w_body, t_hr = hr
+            age = t_now - t_hr
+            self._pose_source = "pose_100hz"
+            if not self._predict:
+                return pose, age
+            return predict_pose(pose, v_body, w_body, age), age
+        self._pose_source = "odom"
+        assert self._pose is not None
+        age = t_now - self._pose_t
+        if not self._predict:
+            return self._pose, age
+        v_body, w_body = self._twist_body
+        return predict_pose(self._pose, v_body, w_body, age), age
+
     def _tick(self) -> None:
         if self._pose is None or self._renderer is None or self._acq is None:
             return
-        t_sim = self._now() - (self._t0 or 0.0)
+        t_now = self._now()
+        t_sim = t_now - (self._t0 or 0.0)
+        pose, age = self._ping_pose(t_now)
         gt_payload = []
+        sensors: dict = {}
         for ch in self._channels.values():
-            rendered = self._renderer.render(ch.side, self._pose, t_sim)
+            rendered = self._renderer.render(ch.side, pose, t_sim)
+            sp = rendered.ping.pose
+            sensors[ch.side.value] = {
+                "pose": [round(float(v), 5) for v in
+                         (sp.x, sp.y, sp.z, sp.roll, sp.pitch, sp.yaw)],
+                "altitude_m": round(float(rendered.ping.altitude_m), 4),
+                "ping_number": None, "dropped": False}
             if ping_dropped(self._model_cfg, ch.rng):
                 # Device counter still advances on the real hardware.
                 if ch.encoder is not None:
                     ch.encoder._ping_number += 1  # noqa: SLF001 deliberate
+                sensors[ch.side.value]["dropped"] = True
                 continue
             wc = self._watercolumn_mask(rendered.ping.altitude_m)
             noisy = apply_ping_noise(
@@ -251,10 +338,13 @@ class SideScanSonarSimNode(Node):
                 ch.drift.value(t_sim) if ch.drift else 1.0,
                 self._model_cfg, ch.rng,
                 specular=rendered.ping.specular,
-                texture=rendered.ping.texture)
+                texture=rendered.ping.texture,
+                unoccluded=rendered.ping.unoccluded,
+                ambient=rendered.ping.ambient)
             rendered.ping.power = noisy
             enc = ch.encoder.encode(rendered.ping)  # type: ignore[union-attr]
             self._publish(ch, enc)
+            sensors[ch.side.value]["ping_number"] = int(enc.ping_number)
             if self._gt_pub is not None and rendered.contacts:
                 gt_payload += [{
                     "side": c.side.value,
@@ -280,6 +370,20 @@ class SideScanSonarSimNode(Node):
             m.data = json.dumps({"t_sim": round(t_sim, 3),
                                  "contacts": gt_payload})
             self._gt_pub.publish(m)
+        if self._sensor_pub is not None:
+            # Every cycle, contacts or not: what the validation tooling
+            # (analysis/sea_validation.py) reads to know exactly where each
+            # ping was taken from. Pose = [x, y, z, roll, pitch, yaw], world
+            # ENU, metres / radians.
+            m = String()
+            m.data = json.dumps({
+                "t_sim": round(t_sim, 4), "stamp": round(t_now, 4),
+                "pose_age_ms": round(1000.0 * age, 1), "predicted": self._predict,
+                "pose_source": self._pose_source,
+                "boat": [round(float(v), 5) for v in
+                         (pose.x, pose.y, pose.z, pose.roll, pose.pitch, pose.yaw)],
+                "sensors": sensors})
+            self._sensor_pub.publish(m)
 
     def _publish(self, ch: _SideChannel, enc) -> None:
         msg = OmniscanProfile()
@@ -327,8 +431,8 @@ def main(args=None) -> None:
     node = SideScanSonarSimNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass   # Ctrl-C, or a launch teardown (rclpy's own SIGINT handler)
     finally:
         node.destroy_node()
         if rclpy.ok():

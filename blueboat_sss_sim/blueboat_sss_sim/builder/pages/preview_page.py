@@ -10,10 +10,10 @@ next ``_i`` suffix (worlds are immutable, Edit re-saves included).
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QHBoxLayout, QInputDialog, QLabel, QMessageBox,
                                QPushButton, QVBoxLayout)
 
+from ..layout import ScaledImage
 from ..state import BuilderState
 from ..worker import GenerateWorker, PreviewWorker
 from . import WizardPage
@@ -29,13 +29,10 @@ class PreviewPage(WizardPage):
         super().__init__(parent)
         self._on_saved = on_saved
         maps = QHBoxLayout()
-        self._img_obj = QLabel("(rendering…)")
-        self._img_dep = QLabel("")
+        self._img_obj = ScaledImage("(rendering…)", min_w=200, min_h=150)
+        self._img_dep = ScaledImage("", min_w=200, min_h=150)
         for img, cap in ((self._img_obj, "objects"), (self._img_dep, "depth")):
             colw = QVBoxLayout()
-            img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            img.setMinimumSize(300, 240)
-            img.setScaledContents(False)
             colw.addWidget(img, 1)
             lbl = QLabel(cap)
             lbl.setObjectName("hint")
@@ -59,8 +56,8 @@ class PreviewPage(WizardPage):
         self._state = state
         self._confirm.setEnabled(False)
         self._summary.setText("rendering preview…")
-        self._img_obj.setText("(rendering…)")
-        self._img_dep.setText("")
+        self._img_obj.clear_image("(rendering…)")
+        self._img_dep.clear_image("")
         self._worker = PreviewWorker(state)
         self._worker.ready.connect(self._show)
         self._worker.failed.connect(self._fail)
@@ -68,10 +65,7 @@ class PreviewPage(WizardPage):
 
     def _show(self, obj_png: str, dep_png: str, summary: str) -> None:
         for lbl, path in ((self._img_obj, obj_png), (self._img_dep, dep_png)):
-            pm = QPixmap(path)
-            lbl.setPixmap(pm.scaled(lbl.size(),
-                                    Qt.AspectRatioMode.KeepAspectRatio,
-                                    Qt.TransformationMode.SmoothTransformation))
+            lbl.set_image(path)
         self._summary.setText(summary)
         self._confirm.setEnabled(True)
 

@@ -32,7 +32,13 @@ def main() -> None:
     start = StartDialog()
     if not start.exec():
         return
-    if start.choice == StartDialog.EDIT:
+    if start.choice == StartDialog.RESUME and start._resume is not None:
+        # The wizard autosaves on every page change; a session killed
+        # before it saved (OOM, 2026-09-18) comes back here. Edit mode is
+        # off: resuming a Create session must still create a new world,
+        # and a resumed Edit session saves under a fresh _i name anyway.
+        win = WorldBuilderWindow(state=start._resume, edit_mode=False)
+    elif start.choice == StartDialog.EDIT:
         lib = WorldLibraryDialog()
         if not lib.exec() or lib.selected_dir is None:
             return

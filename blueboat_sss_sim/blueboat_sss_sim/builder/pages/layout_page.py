@@ -9,10 +9,10 @@ double-click one to edit its name / top height / reflectivity (default
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QMessageBox, QPushButton,
-                               QWidget)
+from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton
 
 from ..forms import SchemaDialog
+from ..layout import ToolBar
 from ..map.canvas import BuilderMapView, Mode
 from ..state import BuilderState
 from . import WizardPage
@@ -52,9 +52,7 @@ class LayoutPage(WizardPage):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        bar = QWidget()
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(0, 0, 0, 0)
+        bar = ToolBar()
         self._b_select = QPushButton("Select")
         self._b_rect = QPushButton("Draw limits")
         self._b_wall = QPushButton("Add wall")
@@ -64,13 +62,10 @@ class LayoutPage(WizardPage):
         self._b_fit = QPushButton("Fit view")
         for b in (self._b_select, self._b_rect, self._b_wall):
             b.setCheckable(True)
-        row.addWidget(self._b_select)
-        row.addWidget(self._b_rect)
-        row.addWidget(self._b_wall)
-        row.addWidget(self._b_del)
-        row.addWidget(self._b_straight)
-        row.addStretch(1)
-        row.addWidget(self._b_fit)
+        bar.add(self._b_select, self._b_rect, self._b_wall, self._b_del,
+                self._b_straight)
+        bar.separator()
+        bar.add(self._b_fit)
         self._layout.addWidget(bar)
 
         self.map = BuilderMapView()

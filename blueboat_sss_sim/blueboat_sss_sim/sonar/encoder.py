@@ -110,7 +110,10 @@ class PingEncoder:
         # ``src`` device tag, so it is derived from the side rather than
         # passed in -- a caller cannot get it wrong or leave it defaulted.
         self._channel = side.channel
-        self._ping_number = 0
+        # The two units number their pings independently (corpus: offsets of
+        # 0, -1 and +60 measured), so the fault knob offsets one side only.
+        self._ping_number = (int(model.fault_counter_offset)
+                             if side is Side.STARBOARD else 0)
         self._frame_id = f"sss_{side.value}_link"
 
     def reconfigure(self, acquisition: AcquisitionParams,
@@ -133,6 +136,12 @@ class PingEncoder:
     def encode(self, ping: Ping, gain_multiplier: float = 1.0) -> EncodedPing:
         acq, cfg = self._acq, self._cfg
         self._ping_number += 1
+        if (cfg.fault_counter_reset_pings > 0
+                and self._ping_number % cfg.fault_counter_reset_pings == 0):
+            # A device power cycle under a running processor (see the
+            # fault-injection block in SonarModelConfig).
+            self._ping_number = 1 + (int(cfg.fault_counter_offset)
+                                     if self._side is Side.STARBOARD else 0)
 
         # Linear power -> the device's wire representation. `pwr_results` is
         # NOT absolute counts: the Omniscan rescales every ping to full scale
@@ -149,6 +158,11 @@ class PingEncoder:
         # The *resolved* gain index is used: a raw -1 (device auto) has no
         # analog-gain figure and cannot be packed into the u16 frame field.
         gain_index = acq.effective_gain_index
+        if cfg.fault_gain_walk_pings > 0:
+            # The device's own auto-gain walks the ladder inside a recording;
+            # a constant-gain simulation never makes the processor compensate.
+            step = ((self._ping_number - 1) // cfg.fault_gain_walk_pings) % 4
+            gain_index = 4 + int(step)
         gain_db = gain_step_db(gain_index)
 
         # Receive-chain gain is a level shift, not an image change -- it moves
@@ -165,7 +179,15 @@ class PingEncoder:
         ).astype(np.uint16)
 
         vehicle_heading = enu_yaw_to_compass_deg(ping.pose.yaw)
-        transducer_heading = (vehicle_heading - self._side.sign * 90.0) % 360.0
+        # `transducer_heading_deg` is the transducer's MOUNTING angle
+        # relative to the bow, as the real Omniscan 450 reports it: a
+        # constant -90 on every port packet and +90 on every starboard
+        # packet across 100 % of the field corpus (project_review.md
+        # §3.6), never an absolute bearing. Until 2026-09-15 this encoded
+        # (vehicle ∓ 90) mod 360, which SonarView's sign-of-heading side
+        # fallback mirrored for every heading in 90..270 (CM-2 violation);
+        # the absolute heading rides in `vehicle_heading_deg` alone.
+        transducer_heading = -self._side.sign * 90.0
 
         enc = EncodedPing(
             side=self._side,
@@ -178,7 +200,7 @@ class PingEncoder:
             gain_index=gain_index,
             num_results=acq.num_results,
             sos_dmps=int(round(SPEED_OF_SOUND_MPS * 10.0)),
-            channel_number=self._channel,
+            channel_number=255 if cfg.fault_channel_255 else self._channel,
             pulse_duration_sec=acq.pulse_duration_s(cfg.max_ping_rate_hz),
             analog_gain=ANALOG_GAIN_TABLE[gain_index],
             max_pwr_db=float(max_db),

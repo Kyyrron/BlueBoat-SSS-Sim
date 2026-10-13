@@ -37,6 +37,7 @@ setup(
             "mission_metrics = blueboat_sss_sim.analysis.cli:main",
             "sss_calibration_report = blueboat_sss_sim.analysis.calibration_cli:main",
             "sss_svlog_compare = blueboat_sss_sim.analysis.svlog_compare:main",
+            "sss_sea_validation = blueboat_sss_sim.analysis.sea_validation:main",
         ],
     },
 )

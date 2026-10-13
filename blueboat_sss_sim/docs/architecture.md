@@ -50,7 +50,13 @@ blueboat_sss_sim/
 │   ├── worldgen/    noise.py → terrain.py (texture) → objects.py → scene.py
 │   │                depth/   (authored bathymetry: ingest.py CSV/GeoTIFF,
 │   │                          interpolate.py wall-aware fill, presets.py
-│   │                          harbour/river/beach/canal + DEPTH_PRESETS)
+│   │                          harbour/river/beach/canal + DEPTH_PRESETS,
+│   │                          layers/ + compose.py / bake.py / masks.py /
+│   │                          paint.py / recipes.py the layered seabed,
+│   │                          svlog.py / smooth.py / coverage.py depth
+│   │                          from a recording → docs/seabed_model.md)
+│   │                materials.py (seabed + object materials, _ACOUSTIC)
+│   │                material_map.py (baked material map)
 │   │                sdf_writer.py (world.sdf + seabed.stl + spherical coords
 │   │                               + wall collisions + invisible limits)
 │   │                world_folder.py (~/worlds/<path>/<world>/ builder,
@@ -60,17 +66,24 @@ blueboat_sss_sim/
 │   │                solids.py (rotated 3-D primitives: z-buffer stamps,
 │   │                           stable rest poses, settling on the seabed)
 │   ├── sonar/       config.py / acoustics.py / multipath.py / noise.py /
-│   │                renderer.py / encoder.py
+│   │                renderer.py / facets.py (smooth-object Kirchhoff
+│   │                patches, NC #17) / encoder.py
 │   ├── sea/         ROS-free sea state: spectrum.py (JONSWAP/PM, dispersion)
-│   │                wavefield.py / current.py (Gauss-Markov) / hull.py
+│   │                wavefield.py / current.py (seeded, smooth Gauss-Markov
+│   │                + weak eddies: a function of seed, t, x, y) / hull.py
 │   │                (hydrostatic catamaran vs the Gazebo box) / presets.py
-│   │                (sea_states.yaml, schedules, commands) / model.py /
+│   │                (sea_states.yaml, schedules, commands) / events.py
+│   │                (Poisson wake groups) / motion.py (predict_pose,
+│   │                HighRatePose, damping, simulate_3dof) / model.py /
 │   │                markers.py   → docs/sea_state_model.md
 │   ├── builder/     the World Builder GUI (PySide6; the ONLY Qt code):
 │   │                state.py (BuilderState ↔ builder_state.yaml, Qt-free)
 │   │                paths.py (MCS anchored-path discovery, Qt-free)
 │   │                map/ (tiles.py fetcher, canvas.py drawing view)
-│   │                pages/ (path, layout, depth, objects, preview)
+│   │                pages/ (path, layout, depth, objects, place, preview)
+│   │                layers/ (Screen 3's seabed layer editor)
+│   │                layout.py (screen-size contract: ToolBar, ScaledImage,
+│   │                split) / imaging.py
 │   │                wizard.py / worker.py / forms.py / theme.py / app.py
 │   ├── analysis/    svlog_reader.py (.svlog → pose track, read-only)
 │   │                contacts.py (replay / svlog / jsonl → observations)
@@ -78,6 +91,12 @@ blueboat_sss_sim/
 │   │                → report.py → cli.py (mission_metrics CLI)
 │   │                calibration.py / calibration_cli.py (sim-to-real)
 │   │                svlog_compare.py (timing/level/texture reductions)
+│   │                svlog_digest.py / object_signature.py (.svlog reads)
+│   │                bathymetry.py / backscatter.py / shading.py (depth,
+│   │                reflectivity and relief from a recording)
+│   │                sea_validation.py (a recorded Gazebo run or a field
+│   │                .svlog → track / attitude / footprint / coverage /
+│   │                waterfall / mosaic metrics; sss_sea_validation CLI)
 │   │                wall_contrast.py (quay face / beyond / far contrasts)
 │   └── ros/         sss_sim_node.py       ← replaces sss_node.py
 │                    mavros_shim_node.py   (GPS/heading/IMU under MAVROS names)
@@ -85,13 +104,17 @@ blueboat_sss_sim/
 │                                           wrench → gz ApplyLinkWrench, status)
 ├── config/          default_world / shallow_water_world / enclosed_basin_world
 │                    default_sonar / coverage_pass_sonar / enclosed_basin_sonar
-│                    materials / sea_states / sea_schedule_example
+│                    shallow_beach_sonar / fault_injection_sonar (test only)
+│                    materials / materials_literature (override) /
+│                    seabed_recipes / sea_states / sea_schedule_example
 ├── launch/          sss_sim_launch, sim_world_launch, full_mission_launch,
 │                    sea_state_launch (also standalone next to Sim_launch.py)
 ├── docs/            this documentation set
 ├── msg_reference/   OmniscanProfile.msg (reference copy only)
 └── test/            smoke_test.py (offline gate) · gui_smoke.py (offscreen Qt)
+                     gazebo_sea_test.py (Gazebo sea gate, not in the hook)
                      fixtures/survey_lawnmower.yaml (frozen calibration context)
+                     fixtures/render_baseline_v1.npz (render regression)
 ```
 
 ## 3. Dataflow
@@ -100,7 +123,7 @@ blueboat_sss_sim/
 MCS anchored path (geo_anchor)          real soundings (CSV / GeoTIFF)
         │                                        │
         ▼            world_builder GUI           ▼
-   Screen 1 path → Screen 2 limits+walls → Screen 3 depth+paint+texture (live previews) → Screen 4 objects → Screen 5 save
+   Screen 1 path → Screen 2 limits+walls → Screen 3 depth+paint+texture (live previews) → Screen 4 objects (scatter) → Screen 5 hand placement → Screen 6 save
         │                                                              (or generate_world, headless)
         ▼
 world folder ~/worlds/<path>/<world>/     [immutable, _i-deduped]
@@ -109,7 +132,7 @@ world folder ~/worlds/<path>/<world>/     [immutable, _i-deduped]
    ├─ metadata.yaml (GPS ground truth)         │           /side_scan_sonar/ground_truth/contacts
    ├─ depth.npz · preview_objects.png          ├─► mavros_shim_node ─► /mavros/* (GPS about the anchor)
    └─ builder_state.yaml (Edit mode)           └─► sea_state_node ─► /current ─► gz /ocean_current (Hydrodynamics)
-MCS sea choice (sea_* args / /sim/sea_state/command)   │            /world/<w>/wrench ─► gz ApplyLinkWrench (heave/pitch/roll)
+MCS sea choice (sea_schedule:= scenario / /sim/sea_state/command)   │            /world/<w>/wrench ─► gz ApplyLinkWrench (heave/pitch/roll)
                                                        └─► /sim/sea_state (JSON, latched) ─► MCS "SEA STATE" box
 Missions: MCS deploys a trajectory → blueboat_control path_generation
 (from_yaml) → master_control — unmodified, outside this package.
@@ -132,9 +155,12 @@ mission bundles still load everywhere (their frozen `sonar.yaml` /
 | `SonarRenderer` ABC | `sonar/renderer.py` | plug a higher-fidelity acoustic model with zero changes elsewhere |
 | `DEPTH_PRESETS` | `worldgen/depth/presets.py` | add a bathymetry pattern — fn + label + schema rows; the GUI form is generated |
 | Object `CATALOG` | `worldgen/objects.py` | add litter classes (mask + material + priors + optional `fill_fraction_range` / `params_schema`); GUI, placement and metadata pick it up |
-| `Material` table | `worldgen/materials.py` + `config/materials.yaml` | tune or add seabed/object acoustic responses |
-| `objects.classes` / `objects.explicit` | world YAML / `BuilderState` | per-class scattering with clustering, or verbatim matched-pair placement |
+| `Material` table | `worldgen/materials.py` + `config/materials.yaml` | add seabed/object materials: a material's two-way `transmission` (0 = opaque, the default; `pp_shell` 0.11 is the flooded field box), its physical acoustic constants (`_ACOUSTIC`: density, sound speed, backing, wall — which give a smooth object its reflection coefficient, NC #17) and the literature-anchored override `config/materials_literature.yaml`. Never a per-object brightness |
+| Facet layer | `sonar/facets.py` + `worldgen/solids.tessellate` | smooth solid objects scattered from their geometry (Kirchhoff patches + the incoherent residual); a new primitive needs a tessellator — `docs/sonar_model.md` §12 |
+| `objects.classes` / `objects.explicit` | world YAML / `BuilderState` | per-class scattering with clustering, or verbatim placement — matched pairs, RTK clusters, and the World Builder's hand-placed objects (`BuilderState.objects.placed` pins the scatter into the same form) |
 | plugin prefix (`gz` default / `ignition`) | `sdf_writer.py` | target Gazebo Fortress instead of Garden/Harmonic |
+| `LayerSpec` registry | `worldgen/depth/layers/` | add a seabed layer kind — fn + schema + geometry + channels + `reference`; the menu, the property form, the compositor and the bake pick it up. A kind whose parameters invert what its blend mode means can override the blend on its own result (`LayerOutput.blend`, as a dredged basin with a floor above the bed does) |
+| sonar profiles | `config/*_sonar.yaml` | one file per idea: the calibration anchor, the coverage pass, the shallow-beach paths, the fault-injection knobs. A profile carries the whole model, so a legacy frozen copy renders with the constants it was frozen with |
 
 ## 6. Why not a Gazebo sensor plugin? (decision record)
 

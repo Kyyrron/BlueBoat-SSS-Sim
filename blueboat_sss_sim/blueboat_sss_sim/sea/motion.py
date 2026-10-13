@@ -9,8 +9,9 @@ odometry at 20 Hz while the node publishes at 100 Hz, so the restoring
 spring acted on a pose up to 50 ms stale -- a *delayed* spring on a
 heave mode of 0.59 s with ζ ≈ 0.03 (BlueROV2 damping coefficients on a
 BlueBoat hull). Delayed restoring feedback pumps energy into the mode:
-an offline integration reproduced a 0.63 s heave bounce of 0.34 m
-peak-to-peak at 'smooth' -- the regular 1.6 Hz "wave" the user saw --
+an offline integration reproduces a 0.6 s heave bounce of 0.27 m
+peak-to-peak at 'smooth' (seed 3, 40 s) -- the regular 1.6 Hz "wave" the
+user saw --
 while the same model with a 100 Hz pose simply contours the sea.
 
 Two fixes, both here:
@@ -103,6 +104,65 @@ def predict_pose(pose: Pose3D, v_body, w_body, dt: float,
                   roll=pose.roll + float(w[0]) * dt,
                   pitch=pose.pitch + float(w[1]) * dt,
                   yaw=pose.yaw + float(w[2]) * dt)
+
+
+class HighRatePose:
+    """The boat's pose from Gazebo's 100 Hz ``PosePublisher``
+    (``/sim/sea_state/boat_pose``, a stamped ``TransformStamped`` bridged
+    from gz ``/model/blueboat/pose`` by ``sea_state_launch.pose_bridge``),
+    with the body-frame velocity and angular rates differenced
+    from consecutive samples -- what the wrench and the sonar need instead
+    of the 20 Hz odometry (2026-10-09).
+
+    Why: the hull wrench carries the catamaran's stiff restoring (roll
+    C44 ≈ 577 N·m/rad against the Gazebo box's 39). Fed from 20 Hz
+    odometry whose twist is itself an average over its 50 ms period, plus
+    ~2 physics steps of transport, that spring is delayed enough to pump
+    the 0.4 s roll mode: Gazebo showed a self-sustained ±0.5° roll at
+    3.2 Hz on calm water, reproduced by a roll-only discrete model (and
+    hidden under the wave roll before 2026-10-09). With the 10 ms pose and
+    differenced rates the same model is stable up to 4 steps of delay.
+
+    ``update(t, pose)`` per sample; ``state()`` -> ``(pose, v_body,
+    w_body, t)`` or None before two samples.
+    """
+
+    def __init__(self, max_gap_s: float = 0.1) -> None:
+        self.max_gap_s = float(max_gap_s)
+        self._prev: tuple[float, Pose3D] | None = None
+        self._last: tuple[float, Pose3D, np.ndarray, np.ndarray] | None = None
+
+    def update(self, t: float, pose: Pose3D) -> None:
+        prev = self._prev
+        if prev is not None and float(t) - prev[0] <= 1e-6:
+            return                       # a duplicate of the same physics step
+        self._prev = (float(t), pose)
+        if prev is None:
+            return
+        dt = float(t) - prev[0]
+        if dt > self.max_gap_s:
+            self._last = None
+            return
+        q = prev[1]
+        r = rotation_zyx(pose.roll, pose.pitch, pose.yaw)
+        v_world = np.array([pose.x - q.x, pose.y - q.y, pose.z - q.z]) / dt
+        dphi = (pose.roll - q.roll + np.pi) % (2 * np.pi) - np.pi
+        dth = pose.pitch - q.pitch
+        dpsi = (pose.yaw - q.yaw + np.pi) % (2 * np.pi) - np.pi
+        phid, thd, psid = dphi / dt, dth / dt, dpsi / dt
+        sph, cph = np.sin(pose.roll), np.cos(pose.roll)
+        sth, cth = np.sin(pose.pitch), np.cos(pose.pitch)
+        # ZYX Euler rates -> body rates
+        w_body = np.array([phid - psid * sth,
+                           thd * cph + psid * sph * cth,
+                           -thd * sph + psid * cph * cth])
+        self._last = (float(t), pose, r.T @ v_world, w_body)
+
+    def state(self):
+        if self._last is None:
+            return None
+        t, pose, v_body, w_body = self._last
+        return pose, v_body, w_body, t
 
 
 def damping_wrench(v_world, w_body, water_v_world, spec: DampingSpec,

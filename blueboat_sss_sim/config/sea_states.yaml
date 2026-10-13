@@ -9,9 +9,13 @@
 # Scale: harbour-realistic (the study site is an enclosed harbour basin --
 # fetch-limited chop, tidal / river current) plus one stress level per
 # component. Wave presets are placed on the Douglas / WMO 3700 sea-state
-# code by Hs; Tp follows DNV-RP-C205 §3.5.10 (Tp ≈ 4.3 √Hs, mid-band of
-# 3.6-5 √Hs) as young fetch-limited seas are steep. Current sigmas are the
-# first-order Gauss-Markov stationary std devs (Fossen 2011 §8.3).
+# code by Hs (codes corrected 2026-10-08: 0.35 m is code 2, not 3); Tp sits
+# above the DNV-RP-C205 §3.5.10 wind-sea band, see the waves: comment.
+#
+# Plain-language blocks (2026-10-08, additive): `current_variation:` (how
+# much the current wanders around its mean -- the MCS "Variation" choice)
+# and `wave_options:` (crest length, passing wakes). Labels and
+# descriptions are what the operator reads; `reference` is for the docs.
 format: blueboat_sea_state_presets/1
 
 # Hulls used by the wave excitation (docs/sea_state_model.md §5):
@@ -20,7 +24,7 @@ format: blueboat_sea_state_presets/1
 #    buoyant_correction, buoyant_correction = 1.01·((mass + 2·prop_mass) /
 #    (1000·x·y·z))^(1/3) = 0.34342, centred at link z = +0.05). Mirrored
 #    here so its flat-plane term can be cancelled while waves are active.
-#    It has 1 % reserve buoyancy -- a URDF artefact the wave model must not
+#    It has 3 % reserve buoyancy (1.01 scales each dimension) -- a URDF artefact the wave model must not
 #    inherit. The smoke test recomputes it from that formula.
 #  * catamaran -- the hydrostatic hull the wave force integrates: BlueBoat
 #    120 demihulls (1.2 m long, ~0.15 m wide, ~0.76 m apart, 0.376 m high),
@@ -31,6 +35,16 @@ hull:
   gazebo_box: {mass: 16.01, prop_mass: 0.07, x_size: 1.2, y_size: 0.91, z_size: 0.376, offset_z: 0.05}
   catamaran: {length: 1.2, demihull_beam: 0.15, separation: 0.76, height: 0.376}
   target_entity: blueboat          # gz model name (canonical link = base_link)
+  # Which hydrostatics carry the hull (2026-10-09). `catamaran`: the
+  # catamaran replaces the Gazebo box in EVERY run, calm water included, so
+  # every scenario floats the same hull and a change of sea never switches
+  # the hydrostatics (resolves S11). The box's 2.2 deg under-way trim was a
+  # thrust couple on its unphysically soft pitch stiffness; the corpus shows
+  # a static 1.2-2.8 deg offset present at rest (load / IMU mounting) and a
+  # small dynamic part of inconsistent sign (+0.7..+0.9 deg harbour, -2.5 deg
+  # in 1.2 m of water) -- docs/sea_state_model.md §5. `gazebo_box_when_calm`
+  # restores the pre-2026-10-09 swap-only-with-waves behaviour.
+  hydrostatics: catamaran
   # Extra hull damping the wave wrench carries (sea/motion.py, 2026-09-05).
   # The Hydrodynamics plugin's coefficients are the BlueROV2's (zW -18
   # N·s/m: heave damping ratio 0.03 on this hull), so the boat rang at its
@@ -46,6 +60,71 @@ hull:
   # buried demihull would otherwise publish (5.7 g measured pinned).
   wave_force_clip: {knee_g: 2.5, width_g: 1.0}
 
+# How much the current wanders around its configured mean (sea/current.py).
+# Fractions are of the MEAN SPEED: sigma_speed = sigma_speed_frac * U,
+# eddy RMS = spatial_frac * U. Temporal part: Fossen 2011 §8.3 Gauss-Markov,
+# sampled exactly (Gillespie 1996) and joined smoothly, soft-bounded at
+# ~2.8 sigma. Spatial part: weak divergence-free eddies, 25-100 m, evolving
+# over 5-15 min (Kraichnan 1970 random Fourier modes) -- scale and strength
+# are judgement values for a harbour basin (no site measurement exists).
+# 'natural' uses the ~10 % turbulence intensity measured in tidal flows
+# (Thomson et al. 2012, doi:10.1109/JOE.2012.2191656).
+current_variation:
+  steady:
+    sigma_speed_frac: 0.05
+    sigma_dir_deg: 3.0
+    tau_speed_s: 60.0
+    tau_dir_s: 120.0
+    spatial_frac: 0.0
+    label: "Steady"
+    description: "Almost constant: speed within about ±5 %, direction within a few degrees, the same everywhere. For controlled comparisons."
+    reference: "Fossen 2011 §8.3 (Gauss-Markov current)"
+  natural:
+    sigma_speed_frac: 0.10
+    sigma_dir_deg: 10.0
+    tau_speed_s: 60.0
+    tau_dir_s: 120.0
+    spatial_frac: 0.05
+    label: "Natural"
+    description: "Typical water: speed wanders about ±10 % and direction about ±10° over a minute or two, with weak eddies a few tens of metres across."
+    reference: "Fossen 2011 §8.3; Thomson et al. 2012 (turbulence intensity ~10 %); Kraichnan 1970 (eddy field)"
+  strong:
+    sigma_speed_frac: 0.20
+    sigma_dir_deg: 20.0
+    tau_speed_s: 60.0
+    tau_dir_s: 120.0
+    spatial_frac: 0.10
+    label: "Gusty / eddying"
+    description: "Unsettled flow, as near a basin mouth or a jetty: speed about ±20 %, direction about ±20°, clear eddies. A stress level."
+    reference: "Fossen 2011 §8.3; Thomson et al. 2012 (upper end); stress level"
+
+# Wave choices that are not a height (sea/presets.py::apply_wave_options).
+wave_options:
+  crest:                       # directional spreading cos^2s(Δθ/2)
+    short:
+      spread_s: 3.0
+      label: "Short-crested chop"
+      description: "Waves come from a broad spread of directions, as wind chop in a basin does: the boat rolls and pitches at any heading."
+      reference: "Longuet-Higgins et al. 1963; presets since 2026-09-05"
+    long:
+      spread_s: 25.0
+      label: "Long-crested swell"
+      description: "Long regular crests from one direction, as swell entering through a harbour mouth: mostly pitch when heading into them, mostly roll when side-on."
+      reference: "Goda & Suzuki 1975, PARI Tech. Note 230 (s_max 10 wind sea, 75 swell); 25 = the intermediate 'swell, short decay distance' value of secondary sources -- harbour-entrance swell has travelled little; frequency-independent here"
+  wakes:                       # scale on the wave level's wake-group rate
+    none:
+      rate_scale: 0.0
+      label: "None"
+      description: "No passing boats."
+    occasional:
+      rate_scale: 1.0
+      label: "Occasional"
+      description: "A passing wake every several minutes rocks the boat for half a minute."
+    frequent:
+      rate_scale: 2.5
+      label: "Frequent"
+      description: "Busy harbour traffic: wake groups every few minutes."
+
 current:
   none:
     speed_mps: 0.0
@@ -56,37 +135,25 @@ current:
     reference: "--"
   weak:
     speed_mps: 0.10
-    sigma_speed_mps: 0.02
-    sigma_dir_deg: 8.0
-    tau_speed_s: 60.0
-    tau_dir_s: 120.0
+    variation: natural
     label: "Weak (0.1 m/s)"
     description: "Residual harbour circulation. Drag ~2.5 N at rest: the controllers barely notice, the track drifts a few metres over a survey line."
     reference: "Fossen 2011 §8.3 (Gauss-Markov current); harbour tidal currents 0.1-0.5 m/s"
   moderate:
     speed_mps: 0.25
-    sigma_speed_mps: 0.05
-    sigma_dir_deg: 10.0
-    tau_speed_s: 60.0
-    tau_dir_s: 120.0
+    variation: natural
     label: "Moderate (0.25 m/s)"
     description: "Typical tidal flow in a basin mouth. ~8 N of drag; visible cross-track offset and crab angle on lines across the current."
     reference: "Fossen 2011 §8.3"
   strong:
     speed_mps: 0.50
-    sigma_speed_mps: 0.08
-    sigma_dir_deg: 10.0
-    tau_speed_s: 60.0
-    tau_dir_s: 120.0
+    variation: natural
     label: "Strong (0.5 m/s)"
     description: "Spring-tide / river outflow. ~21 N of drag at rest, a quarter of the modelled thrust: line keeping degrades, turns overshoot down-current."
     reference: "Fossen 2011 §8.3"
   very_strong:
     speed_mps: 0.80
-    sigma_speed_mps: 0.12
-    sigma_dir_deg: 12.0
-    tau_speed_s: 60.0
-    tau_dir_s: 120.0
+    variation: natural
     label: "Very strong (0.8 m/s) -- stress test"
     description: "Beyond what the harbour produces. ~42 N of drag, over half the modelled thrust: station keeping into the current is marginal and cross-current lines are lost."
     reference: "Fossen 2011 §8.3; stress level, not a field condition"
@@ -104,15 +171,15 @@ waves:
   # every harbour has (DNV-RP-C205 §3.5.10 gives 3.6-5 √Hs for pure wind
   # sea; a basin open to a channel carries longer energy), and an
   # `events:` block: random wave groups -- passing-vessel wakes and swell
-  # trains -- as a Poisson process (sea/events.py; Soomere 2007
-  # doi:10.1007/s10236-007-0113-8 for wake groups in harbours; the arrival
-  # statistics are an assumption, no site measurement exists).
+  # trains -- as a Poisson process (sea/events.py; Soomere 2007,
+  # Appl. Mech. Rev. 60(3), doi:10.1115/1.2730847, for wake groups; the
+  # arrival statistics are an assumption, no site measurement exists).
   calm:
     hs_m: 0.0
     tp_s: 0.0
     douglas: 0
-    label: "Calm, glassy (Douglas 0)"
-    description: "Flat water. Strict no-op: no wrench is published and the SSS sees no attitude motion."
+    label: "Calm (flat water)"
+    description: "Flat water: the boat stays level and the sonar sees no motion at all."
     reference: "WMO No. 306 code table 3700 / Douglas sea scale"
   rippled:
     hs_m: 0.05
@@ -121,8 +188,8 @@ waves:
     spread_s: 3.0
     douglas: 1
     events: {rate_per_hour: 4.0, hs_m: 0.08, tp_s: 5.0, duration_s: 25.0, from_spread_deg: 60.0}
-    label: "Rippled (Douglas 1, Hs 0.05 m)"
-    description: "Light ripples at ~2 s: sub-degree roll, millimetre heave, barely visible in the sonar; about four passing wakes an hour (8 cm, 5 s) rock the boat for half a minute each."
+    label: "Ripples (0.05 m)"
+    description: "Light ripples: under a degree of roll, millimetres of heave, barely visible in the sonar image."
     reference: "Hasselmann et al. 1973 (JONSWAP); DNV-RP-C205 §3.5.10 (Tp); Soomere 2007 (wakes)"
   smooth:
     hs_m: 0.15
@@ -131,18 +198,18 @@ waves:
     spread_s: 3.0
     douglas: 2
     events: {rate_per_hour: 6.0, hs_m: 0.12, tp_s: 5.5, duration_s: 25.0, from_spread_deg: 60.0}
-    label: "Smooth (Douglas 2, Hs 0.15 m)"
-    description: "Harbour chop at ~2.8 s, irregular and groupy: roll/pitch of a few degrees, heave ±7 cm, with a 12 cm wake or swell group every ten minutes or so. Port/starboard banding and altitude ripple appear in the waterfall."
-    reference: "Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007"
+    label: "Light chop (0.15 m)"
+    description: "Ordinary harbour chop: the boat rolls and pitches one to two degrees and bobs a few centimetres. The waterfall shows port/starboard brightness banding and a wavy seabed line."
+    reference: "WMO 3700 code 2; Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007"
   slight:
     hs_m: 0.35
     tp_s: 3.6
     gamma: 1.5
     spread_s: 3.0
-    douglas: 3
+    douglas: 2
     events: {rate_per_hour: 8.0, hs_m: 0.25, tp_s: 6.0, duration_s: 25.0, from_spread_deg: 45.0}
-    label: "Slight (Douglas 3 lower, Hs 0.35 m)"
-    description: "Fresh breeze across the basin at ~3.6 s: roll to ~10°, heave ±17 cm, pitch a few degrees, plus a 25 cm long-period group every seven or eight minutes. Strong beam-pattern banding, along-track footprint shifts, occasional water-column bounce."
+    label: "Choppy (0.35 m)"
+    description: "A fresh breeze across the basin: clear rolling and pitching, heave of ten centimetres or more. Strong banding, the seabed line wobbles, features shift and repeat along the track."
     reference: "Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007"
   rough:
     hs_m: 0.60
@@ -151,6 +218,6 @@ waves:
     spread_s: 3.0
     douglas: 3
     events: {rate_per_hour: 15.0, hs_m: 0.35, tp_s: 7.0, duration_s: 30.0, from_spread_deg: 45.0}
-    label: "Rough for a harbour (Douglas 3 upper, Hs 0.6 m) -- stress test"
-    description: "Upper limit of what an enclosed basin can raise, and of what a 1.2 m boat should be surveyed in: 4.5 s seas with a 35 cm swell group every four minutes. Heave ±30 cm and large attitude excursions; the sonar geometry breaks down at times."
+    label: "Rough (0.6 m) -- stress test"
+    description: "The most an enclosed basin raises and more than a 1.2 m boat should survey in: large rolling and heaving, the sonar geometry breaks down at times."
     reference: "Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007; stress level"

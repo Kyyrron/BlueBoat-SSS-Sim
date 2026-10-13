@@ -7,7 +7,7 @@ Two things, cleanly separated:
    draw the world limits and reflective harbour walls on a satellite map,
    author the bathymetry (realistic harbour / river / beach / canal
    presets, or real soundings from CSV / GeoTIFF), scatter litter objects
-   from a 27-class catalog (clustered, sized and buried by simple
+   from a 29-class catalog (clustered, sized and buried by simple
    distributions), preview, save. Worlds land in
    `~/worlds/<path_name>/<world_name>/` and are **immutable** — every
    save, edited or not, creates a new folder.
@@ -39,12 +39,13 @@ ros2 launch blueboat_sss_sim full_mission_launch.py \
     world_dir:=$HOME/worlds/<path>/<world> \
     with_control:=true trajectory_file:=$HOME/worlds/<path>/<world>/source_path_world.yaml
 
-# Headless world generation from a world YAML (no GUI)
+# Headless world generation from a world YAML (no GUI; run from the
+# package source root, blueboat_sss_sim/, where config/ lives)
 ros2 run blueboat_sss_sim generate_world --config config/default_world.yaml --out ~/worlds/dev/w1
 ```
 
-Offline verification without ROS (also wired as the session gate):
-`python3 -m test.smoke_test` (~150 checks). GUI checks:
+Offline verification without ROS (also wired as the session gate), from
+`blueboat_sss_sim/`: `python3 -m test.smoke_test` (434 checks). GUI checks:
 `QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke`.
 
 ## GPS anchoring in one paragraph
@@ -68,14 +69,17 @@ automatically.
 
 | Doc | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | design principles, layout, dataflow, decision records |
-| [docs/integration_guide.md](docs/integration_guide.md) | install, launch composition, sim↔real swap, GPS contract |
-| [docs/configuration_guide.md](docs/configuration_guide.md) | every YAML knob (world / depth / sonar) + world-folder formats |
-| [docs/topics.md](docs/topics.md) | ROS interface + raw-frame byte map |
-| [docs/sonar_model.md](docs/sonar_model.md) | acoustic model, noise stack, walls/pontoons, explicit assumptions |
-| [docs/sea_state_model.md](docs/sea_state_model.md) | current + waves: physics, presets, Gazebo coupling, references (DOI) |
-| [docs/developer_guide.md](docs/developer_guide.md) | code tour, conventions, extension recipes, testing |
-| [docs/roadmap.md](docs/roadmap.md) | prioritized realism upgrades |
+| [docs/architecture.md](blueboat_sss_sim/docs/architecture.md) | design principles, layout, dataflow, decision records |
+| [docs/integration_guide.md](blueboat_sss_sim/docs/integration_guide.md) | install, launch composition, sim↔real swap, GPS contract |
+| [docs/configuration_guide.md](blueboat_sss_sim/docs/configuration_guide.md) | every YAML knob (world / depth / sonar) + world-folder formats |
+| [docs/topics.md](blueboat_sss_sim/docs/topics.md) | ROS interface + raw-frame byte map |
+| [docs/sonar_model.md](blueboat_sss_sim/docs/sonar_model.md) | acoustic model, noise stack, walls/pontoons, explicit assumptions |
+| [docs/seabed_model.md](blueboat_sss_sim/docs/seabed_model.md) | bathymetry presets, seabed layers, materials, measured seabed from a recording; geomorphology references |
+| [docs/svlog_depth_survey.md](blueboat_sss_sim/docs/svlog_depth_survey.md) | how to survey a site so a `.svlog` can become a world's depth and reflectivity |
+| [docs/sea_state_model.md](blueboat_sss_sim/docs/sea_state_model.md) | current + waves: physics, presets, Gazebo coupling, references (DOI), research log |
+| [docs/sea_state_validation.md](blueboat_sss_sim/docs/sea_state_validation.md) | the same survey in calm water / current / waves / both, in Gazebo: how to run it, what it shows, results |
+| [docs/developer_guide.md](blueboat_sss_sim/docs/developer_guide.md) | code tour, conventions, extension recipes, testing |
+| [docs/roadmap.md](blueboat_sss_sim/docs/roadmap.md) | prioritized realism upgrades |
 
 ## What's inside
 
@@ -84,7 +88,7 @@ automatically.
 | `core/` | shared types, geometry, **geodesy** (`geo.py`), trajectories |
 | `worldgen/` | scene model, terrain texture, **authored bathymetry** (`depth/`), object catalog + placement, SDF writer, **world folders** (`world_folder.py`), map exports |
 | `sonar/` | calibrated acoustic renderer, noise, Ping-Protocol encoder, walls (quays/pontoons) + multipath |
-| `sea/` | ROS-free sea state: JONSWAP wave field, Gauss-Markov current, hydrostatic wave force on the hull, presets and timelines |
+| `sea/` | ROS-free sea state: JONSWAP wave field, a seeded smooth Gauss-Markov current with weak eddies, hydrostatic wave force on the hull, presets, plain-language options and timelines |
 | `builder/` | the world-builder GUI (the only PySide6 code; zero ROS) |
 | `analysis/` | ground-truth detection metrics, `.svlog` reader, sim-to-real calibration |
 | `ros/` | `sss_sim_node` (the drop-in sonar), `mavros_shim_node`, `sea_state_node` (current + waves into Gazebo) |

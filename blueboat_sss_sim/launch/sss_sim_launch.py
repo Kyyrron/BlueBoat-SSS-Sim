@@ -28,9 +28,9 @@ The six run-dependent device parameters are passed to the node
 **explicitly**, read from the resolved sonar profile, so a run's
 acquisition is always traceable to a named file rather than to node
 defaults -- which is what makes a sim-vs-real comparison meaningful (root
-CLAUDE.md CM-2), since the simulator's own defaults (15 m, gain 4 -- the
-power-calibration anchor) differ from the real ``sss_node.py`` defaults
-(20 m, gain -1 = device auto).
+CLAUDE.md CM-2). The shipped default profile, the node's declared defaults
+and the real ``sss_node.py``'s are the same six values since 2026-09-28
+(20 m, gain -1 = device auto, 1200 bins, pulse 0.00125).
 
 Each may still be overridden per run, exactly as on the real system:
 
@@ -40,9 +40,20 @@ Each may still be overridden per run, exactly as on the real system:
 An empty override (the default) means "take the profile's value".
 """
 
-from simple_launch import SimpleLauncher
+# ROS is needed to *launch*, not to read the resolvers below. Importing
+# `simple_launch` pulls in `launch` -> `lark`, which the workspace venv does
+# not carry, so a plain `python3 -m test.smoke_test` used to die here before
+# reporting a single check (2026-09-18). The import is therefore optional:
+# under ROS every line behaves exactly as before, and without it the module
+# still yields its constants and its pure resolvers -- which is what
+# `CLAUDE.md` means by "module-scope, launch-free resolvers the smoke test
+# exercises directly".
+try:
+    from simple_launch import SimpleLauncher
+except ImportError:                       # no ROS on this interpreter
+    SimpleLauncher = None
 
-sl = SimpleLauncher(use_sim_time=True)
+sl = SimpleLauncher(use_sim_time=True) if SimpleLauncher is not None else None
 
 # The six run-dependent parameters of the real sss_node.py, in its own order.
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
@@ -51,17 +62,18 @@ ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
 #: Legacy origin (the GCS bench simulator's) for worlds without a geo anchor.
 LEGACY_ORIGIN = (43.6961, 7.3080)
 
-sl.declare_arg("world_dir", default_value="")
-sl.declare_arg("sonar_config", default_value="")
-sl.declare_arg("with_mavros_shim", default_value=True)
-sl.declare_arg("sim_origin_lat", default_value="")
-sl.declare_arg("sim_origin_lon", default_value="")
-sl.declare_arg("auto_ping", default_value=True)
-sl.declare_arg("quiet", default_value=True)
-for _a in ACQUISITION_ARGS:
-    sl.declare_arg(_a, default_value="",
-                   description=f"{_a} override; empty = use the resolved "
-                               "sonar profile's value")
+if sl is not None:
+    sl.declare_arg("world_dir", default_value="")
+    sl.declare_arg("sonar_config", default_value="")
+    sl.declare_arg("with_mavros_shim", default_value=True)
+    sl.declare_arg("sim_origin_lat", default_value="")
+    sl.declare_arg("sim_origin_lon", default_value="")
+    sl.declare_arg("auto_ping", default_value=True)
+    sl.declare_arg("quiet", default_value=True)
+    for _a in ACQUISITION_ARGS:
+        sl.declare_arg(_a, default_value="",
+                       description=f"{_a} override; empty = use the resolved "
+                                   "sonar profile's value")
 
 
 def resolve_sonar_config(world_dir, sonar_config=None) -> str:
@@ -179,4 +191,6 @@ def launch_setup():
     return sl.launch_description()
 
 
-generate_launch_description = sl.launch_description(opaque_function=launch_setup)
+generate_launch_description = (
+    sl.launch_description(opaque_function=launch_setup)
+    if sl is not None else None)

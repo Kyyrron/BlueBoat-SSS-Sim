@@ -8,8 +8,9 @@ frame, integrated identically:
   scaled by ``buoyant_correction = 1.01·((mass + 2·prop_mass) /
   (ρ·x·y·z))^(1/3)``, centred at link z = +0.05), on which the world-level
   ``Buoyancy`` system applies graded buoyancy about the flat plane z = 0.
-  That box floats with **1 % reserve buoyancy** (it is 99 % submerged at
-  rest): under a wave crest it can gain at most 1 % of the weight, under a
+  That box floats with **3 % reserve buoyancy** (1.01 scales each
+  dimension, 1.01³ = 1.030; it is 97 % submerged at rest): under a wave
+  crest it can gain at most 3 % of the weight, under a
   trough it loses most of its lift, so a boat driven by that box's own
   Froude-Krylov force would ride awash and sink by ~Hs/2 on average -- an
   artefact of the URDF, not of the water.
@@ -20,16 +21,18 @@ frame, integrated identically:
   buoyancy, hence realistic heave/roll/pitch stiffness (a catamaran is
   stiff in roll through its hull separation).
 
-The wrench published while waves are active is
+The wave part of the published wrench is
 
     F = H_cat(wave surface) − H_gz(flat plane)
 
 so that, added to the flat-plane term Gazebo itself applies (mirrored by
 ``H_gz(flat)``), the total force on the hull is the catamaran's buoyancy
 under the actual wave surface (Newman 1977, *Marine Hydrodynamics*, ch. 6:
-the long-wave Froude-Krylov limit; assumption S4 in the model doc). With
-calm water the model publishes nothing and Gazebo's own hydrostatics stand
-untouched -- the strict no-op the presets promise. Both hulls share the
+the long-wave Froude-Krylov limit; assumption S4 in the model doc). Since
+2026-10-09 the catamaran hydrostatics are published in calm water too (one
+hull in every scenario, S11; ~0 at rest at the trim); only
+``hull.hydrostatics: gazebo_box_when_calm`` restores the old "nothing while
+calm", leaving Gazebo's own hydrostatics untouched. Both hulls share the
 trim ``z_eq`` by construction, so the two flat-plane terms are equal at
 rest and the replacement introduces no static force.
 
@@ -45,24 +48,13 @@ from typing import Callable
 
 import numpy as np
 
+from ..core.geometry import rotation_zyx  # noqa: F401 -- re-exported
 from ..core.types import Pose3D
 from .spectrum import G
 
 SurfaceFn = Callable[[np.ndarray, np.ndarray], np.ndarray]
 #: (x, y) -> (dη/dx, dη/dy): the wave slope, for the horizontal force.
 SlopeFn = Callable[[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]
-
-
-def rotation_zyx(roll: float, pitch: float, yaw: float) -> np.ndarray:
-    """Body -> world rotation matrix, ZYX (yaw, pitch, roll) convention --
-    the inverse of :func:`core.geometry.quat_to_rpy`."""
-    cr, sr = np.cos(roll), np.sin(roll)
-    cp, sp = np.cos(pitch), np.sin(pitch)
-    cy, sy = np.cos(yaw), np.sin(yaw)
-    rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
-    ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
-    rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
-    return rz @ ry @ rx
 
 
 @dataclass(frozen=True)
@@ -151,7 +143,7 @@ class HullBoxes:
         ``config/sea_states.yaml``; unknown keys raise by name."""
         known = {"mass_kg", "gazebo_box", "catamaran", "water_density",
                  "target_entity", "target_entity_type", "damping",
-                 "wave_force_clip"}
+                 "wave_force_clip", "hydrostatics"}
         unknown = set(cfg) - known
         if unknown:
             raise KeyError(f"Unknown hull keys: {sorted(unknown)}")

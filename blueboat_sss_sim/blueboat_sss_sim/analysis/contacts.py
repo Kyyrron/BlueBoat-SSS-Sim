@@ -93,9 +93,11 @@ class ObservationSet:
 def _look_heading_deg(pose: Pose3D, side: Side) -> float:
     """Transducer compass look direction for this pose and side.
 
-    Mirrors ``PingEncoder.encode``: the transducer heading is the vehicle
-    heading minus ``side.sign * 90``, so port looks 90 deg counter-clockwise of
-    the bow and starboard 90 deg clockwise.
+    The vehicle heading minus ``side.sign * 90``: port looks 90 deg
+    counter-clockwise of the bow, starboard 90 deg clockwise. Computed
+    from the pose — the packet's ``transducer_heading_deg`` is the
+    constant mounting angle (-90 / +90), not a bearing (encoder,
+    2026-09-15).
     """
     return float((enu_yaw_to_compass_deg(pose.yaw) - side.sign * 90.0) % 360.0)
 

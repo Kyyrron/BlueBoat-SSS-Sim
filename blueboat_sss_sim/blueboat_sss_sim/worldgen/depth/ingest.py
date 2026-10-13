@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from ...core.geo import GeoAnchor
+from ...core.types import GridSpec
 
 # GeoTIFF tag ids (as exposed by PIL's tag_v2).
 TAG_MODEL_PIXEL_SCALE = 33550
@@ -42,6 +43,10 @@ class DepthSamples:
     east: np.ndarray
     north: np.ndarray
     depth: np.ndarray
+    #: True when the samples are exactly the cell centres of the grid they
+    #: were loaded for, in row-major grid order (a baked raster): the
+    #: interpolator then stamps them directly.
+    aligned: bool = False
 
     def __post_init__(self) -> None:
         self.east = np.asarray(self.east, dtype=np.float64).ravel()
@@ -140,8 +145,16 @@ def load_csv(path: str | Path, anchor: GeoAnchor,
 
 # --------------------------------------------------------------- GeoTIFF
 def load_geotiff(path: str | Path, anchor: GeoAnchor,
-                 values: str = "auto") -> DepthSamples:
-    """Read a geographic-CRS GeoTIFF depth/elevation raster via Pillow."""
+                 values: str = "auto", grid: GridSpec | None = None
+                 ) -> DepthSamples:
+    """Read a geographic-CRS GeoTIFF depth/elevation raster via Pillow.
+
+    With ``grid`` given, a raster whose pixel centres coincide with the
+    grid's cell centres (a baked layer stack, ``worldgen.depth.bake``)
+    is returned whole and flagged ``aligned`` -- no striding, and the
+    interpolator stamps it losslessly. Any other raster follows the
+    historical path unchanged.
+    """
     from PIL import Image
 
     path = Path(path)
@@ -180,6 +193,20 @@ def load_geotiff(path: str | Path, anchor: GeoAnchor,
                          float(tie[3]), float(tie[4]))
 
     ny, nx = arr.shape
+    if grid is not None and (ny, nx) == (grid.ny, grid.nx):
+        lon_c = tx + (np.arange(nx) - ti) * sx
+        lat_r = ty - (np.arange(ny) - tj) * sy
+        east_c, _ = anchor.to_en(np.full(nx, lat_r[0]), lon_c)
+        _, north_r = anchor.to_en(lat_r, np.full(ny, lon_c[0]))
+        xs = grid.origin_x + np.arange(nx) * grid.resolution
+        ys = grid.origin_y + np.arange(ny) * grid.resolution
+        tol = 1e-3 * grid.resolution
+        if (np.abs(np.asarray(east_c) - xs).max() < tol
+                and np.abs(np.asarray(north_r)[::-1] - ys).max() < tol
+                and np.isfinite(arr).all()):
+            xx, yy = np.meshgrid(xs, ys)
+            depth = _resolve_values(arr[::-1].ravel(), values, str(path))
+            return DepthSamples(xx.ravel(), yy.ravel(), depth, aligned=True)
     stride = max(1, int(np.ceil(np.sqrt(ny * nx / MAX_SAMPLES))))
     rows = np.arange(0, ny, stride)
     cols = np.arange(0, nx, stride)

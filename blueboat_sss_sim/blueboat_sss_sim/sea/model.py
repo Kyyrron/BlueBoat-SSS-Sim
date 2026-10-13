@@ -1,29 +1,32 @@
 """The sea model the ROS node drives: one ``update()`` per tick.
 
-Composes :class:`CurrentProcess`, :class:`WaveField` and :class:`HullBox`
+Composes :class:`CurrentField`, :class:`WaveField` and :class:`HullBox`
 under a :class:`SeaSchedule`. State changes never step: a new target
 (schedule keyframe crossing, or a runtime command) is reached by blending
-the previous and the next wave fields' *elevations* and current velocities
-over a ramp -- a blend of two linear wave fields is itself a valid linear
-wave field, and both fields share the same seeded phases, so a ramp in
-Hs is a pure amplitude ramp. Along a linearly interpolated schedule the
-target is re-sampled every ``resample_s`` and ramped over the same
-interval, which keeps the field rebuilds rare (a rebuild is ~100 µs).
+the previous and the next wave fields' *elevations* over a ramp -- a blend
+of two linear wave fields is itself a valid linear wave field, and both
+fields share the same seeded phases, so a ramp in Hs is a pure amplitude
+ramp -- while the current's mean, direction and sigmas follow the blended
+state and its variation keeps running (it is never restarted). Along a
+linearly interpolated schedule the target is re-sampled every
+``resample_s`` and ramped over the same interval, which keeps the field
+rebuilds rare (a rebuild is ~100 µs).
 
-Determinism: the wave phases derive from ``seed`` alone and the current's
-Gauss-Markov draws from a second stream ``[seed, 1]``, so a re-run of the
-same mission with the same seed sees the same sea.
+Determinism: the wave phases derive from ``seed`` alone, and the current
+is a pure function of ``(seed, t, x, y)`` and the schedule
+(sea/current.py), so a re-run of the same mission with the same seed sees
+the same sea -- however the ROS timer happens to tick.
 """
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
 from ..core.types import Pose3D
-from .current import CurrentProcess
+from .current import CurrentField
 from .events import WaveEventProcess
 from .hull import HullBoxes, WaveExcitation
 from .motion import DampingSpec, damping_wrench, hull_damping_from_config
@@ -40,11 +43,33 @@ class SeaSample:
     torque: np.ndarray                # (3,) world N·m about the link origin
     eta_m: float                      # surface elevation at the boat
     state: SeaState                   # the effective (blended) state
-    current_vec: np.ndarray           # (3,) the current alone
+    current_vec: np.ndarray           # (3,) the current alone (at the boat)
     waves_active: bool
     blend_w: float
     next_change: tuple[float, SeaState] | None
     event: dict | None = None         # the live wave group, if any
+    #: The current's parts at the boat: mean / temporal / spatial (3,) each.
+    current_parts: dict | None = None
+    #: A wrench is to be published: the catamaran hydrostatics (in every
+    #: run since 2026-10-09) and/or wave forcing. ``waves_active`` alone
+    #: says whether there is wave forcing.
+    wrench_active: bool = False
+
+
+HYDROSTATICS = ("catamaran", "gazebo_box_when_calm")
+
+
+def hydrostatics_from_config(hull_cfg) -> str:
+    """``hull.hydrostatics`` of ``config/sea_states.yaml`` (default
+    ``catamaran``); an unknown value raises by name."""
+    v = str((hull_cfg or {}).get("hydrostatics", "catamaran"))
+    if v not in HYDROSTATICS:
+        raise ValueError(f"hull.hydrostatics must be one of {HYDROSTATICS}, got {v!r}")
+    return v
+
+
+def _flat(x, y):
+    return np.zeros_like(x)
 
 
 class SeaModel:
@@ -59,6 +84,12 @@ class SeaModel:
             excitation = WaveExcitation(
                 gz_box, hull, **WaveExcitation.clip_from_config(presets.hull))
         self.excitation = excitation
+        #: ``catamaran`` (default since 2026-10-09): the catamaran
+        #: hydrostatics replace Gazebo's URDF box in EVERY run, calm water
+        #: included, so every scenario floats the same hull (S11, resolved:
+        #: docs/sea_state_model.md §5). ``gazebo_box_when_calm`` restores
+        #: the earlier swap-only-with-waves behaviour (old runs, A/B).
+        self.hydrostatics = hydrostatics_from_config(presets.hull)
         #: Extra hull damping (heave / roll / pitch) added to the wrench
         #: whenever ``update`` is given the boat's twist (sea/motion.py).
         self.damping = (damping if damping is not None
@@ -68,7 +99,9 @@ class SeaModel:
         self.ramp_s = float(ramp_s)
         self.resample_s = float(resample_s)
         self.n_freq, self.n_dir = int(n_freq), int(n_dir)
-        self._cur_rng = np.random.default_rng([self.seed, 1])
+        #: The run's current: mean + variation in time and space, a pure
+        #: function of (seed, t, x, y) and the state it is given.
+        self.current = CurrentField(self.seed)
         self._schedule = schedule
         self._schedule_t0 = 0.0
         self._t_last: float | None = None
@@ -93,11 +126,7 @@ class SeaModel:
         field = WaveField(w.hs_m, w.tp_s, w.gamma, w.from_deg, w.spread_s,
                           self.depth_m, self.n_freq, self.n_dir,
                           rng=np.random.default_rng(self.seed))
-        c = state.current
-        cur = CurrentProcess(c.speed_mps, c.from_deg, c.sigma_speed_mps,
-                             c.sigma_dir_deg, c.tau_speed_s, c.tau_dir_s,
-                             rng=self._cur_rng)
-        return {"state": state, "field": field, "current": cur}
+        return {"state": state, "field": field}
 
     def _retarget(self, state: SeaState, t: float, ramp: float) -> None:
         if state == self._target_state and self._blend_dur == 0.0:
@@ -160,7 +189,6 @@ class SeaModel:
         """One tick. ``twist`` = ``(v_world, w_body)`` -- the boat's world
         linear velocity and body angular rates -- enables the hull
         damping term; without it the wrench is the excitation alone."""
-        dt = 0.0 if self._t_last is None else max(t_sim - self._t_last, 0.0)
         self._t_last = t_sim
         # Follow the schedule (re-sample its interpolation sparsely).
         ts = t_sim - self._schedule_t0
@@ -169,30 +197,50 @@ class SeaModel:
             target = self._schedule.state_at(ts)
             if target != self._target_state:
                 nxt = self._schedule.next_change(ts)
-                ramp = (self.resample_s if self._schedule.interpolation == "linear"
-                        and nxt is not None else self.ramp_s)
+                if self._schedule.interpolation == "linear" and nxt is not None:
+                    ramp = self.resample_s
+                else:
+                    kf_ramp = self._schedule.ramp_for(ts)
+                    ramp = self.ramp_s if kf_ramp is None else kf_ramp
                 self._retarget(target, t_sim, ramp)
         w = self.blend_weight(t_sim)
         if w >= 1.0 and self._from is not self._to:
             self._from = self._to
             self._blend_dur = 0.0
-        # Current: both processes step with the same rng stream.
-        self._from["current"].step(dt)
-        if self._to is not self._from:
-            self._to["current"].step(dt)
-        cur = ((1.0 - w) * self._from["current"].velocity_world()
-               + w * self._to["current"].velocity_world())
         fa, fb = self._from["field"], self._to["field"]
         state = (self._to["state"] if w >= 1.0 else
                  SeaState.interpolate(self._from["state"], self._to["state"], w))
+        # Current at the boat (the origin before the first pose): the
+        # blended mean/sigmas, the from-state's time constants crossfaded
+        # into the target's (the same process when they agree).
+        ca, cb = self._from["state"].current, self._to["state"].current
+        spec = replace(state.current, tau_speed_s=ca.tau_speed_s,
+                       tau_dir_s=ca.tau_dir_s)
+        bx, by = (boat.x, boat.y) if boat is not None else (0.0, 0.0)
+        parts = self.current.components(t_sim, bx, by, spec, cb, w)
+        cur = parts["total"]
         self._events.advance(t_sim)
         ev = self._events
         active = ((fa.active or fb.active or ev.active) and self.waves_available)
+        hull_always = self.hydrostatics == "catamaran" and self.waves_available
         zeros = np.zeros(3)
-        if boat is None or not active:
+        if boat is None or not (active or hull_always):
             return SeaSample(t_sim, cur.copy(), zeros, zeros.copy(), 0.0, state,
                              cur, False, w, self._next_change(ts),
-                             ev.current_event(t_sim))
+                             ev.current_event(t_sim), parts, False)
+        if not active:
+            # Calm water, catamaran hydrostatics: the hull swap on the flat
+            # plane (no wave field evaluated) plus the hull damping -- the
+            # same hull as every wave run, so calm-vs-waves isolates the sea.
+            force, torque = self.excitation(boat, _flat)
+            if twist is not None and self.damping.active:
+                fd, td = damping_wrench(twist[0], twist[1], cur, self.damping,
+                                        boat.yaw)
+                force = force + fd
+                torque = torque + td
+            return SeaSample(t_sim, cur.copy(), force, torque, 0.0, state, cur,
+                             False, w, self._next_change(ts),
+                             ev.current_event(t_sim), parts, True)
 
         def surface(x, y):
             if w >= 1.0:
@@ -231,7 +279,8 @@ class SeaModel:
             force = force + fd
             torque = torque + td
         return SeaSample(t_sim, cur + orb, force, torque, eta, state, cur,
-                         True, w, self._next_change(ts), ev.current_event(t_sim))
+                         True, w, self._next_change(ts), ev.current_event(t_sim),
+                         parts, True)
 
     def _next_change(self, ts: float):
         nxt = self._schedule.next_change(ts)
@@ -245,7 +294,8 @@ class SeaModel:
         c, w = state.current, state.waves
         cur = ("no current" if c.speed_mps <= 0.0 else
                f"current {c.preset} {c.speed_mps:.2f} m/s from "
-               f"{compass_name(c.from_deg)} ({c.from_deg:.0f}°)")
+               f"{compass_name(c.from_deg)} ({c.from_deg:.0f}°)"
+               + (f", {c.variation} variation" if c.variation else ""))
         wav = ("calm" if w.hs_m <= 0.0 else
                f"waves {w.preset} Hs {w.hs_m:.2f} m Tp {w.tp_s:.1f} s from "
                f"{compass_name(w.from_deg)} ({w.from_deg:.0f}°)")
@@ -259,6 +309,8 @@ class SeaModel:
         inst_from = ((270.0 - np.degrees(np.arctan2(cur_vec[1], cur_vec[0]))) % 360.0
                      if speed > 1e-6 else c.from_deg)
         nxt = sample.next_change
+        parts = sample.current_parts or {}
+        spatial = parts.get("spatial")
         return {
             "t_sim": round(float(sample.t_sim), 3),
             "wall_time": time.time(),
@@ -275,6 +327,13 @@ class SeaModel:
                             "from_deg": round(float(inst_from), 1),
                             "vx": round(float(cur_vec[0]), 4),
                             "vy": round(float(cur_vec[1]), 4)},
+                # additive (2026-10-08): the variation around the mean
+                "variation": c.variation,
+                "sigma_speed_mps": round(float(c.sigma_speed_mps), 4),
+                "sigma_dir_deg": round(float(c.sigma_dir_deg), 2),
+                "spatial_rms_mps": round(float(c.spatial_rms_mps), 4),
+                "spatial_mps": (round(float(np.hypot(spatial[0], spatial[1])), 4)
+                                if spatial is not None else 0.0),
             },
             "waves": {
                 "preset": w.preset, "label": w.label, "douglas": int(w.douglas),
@@ -289,7 +348,15 @@ class SeaModel:
                 "reason": waves_reason,
                 "events_per_hour": round(float(w.events.rate_per_hour), 1),
                 "event": sample.event,
+                # additive (2026-10-08): plain-language choices
+                "crest": w.crest, "wakes": w.wakes,
+                "spread_s": round(float(w.spread_s), 2),
             },
+            # additive (2026-10-09): which hydrostatics carry the hull
+            "hull": {"model": ("catamaran" if (self.hydrostatics == "catamaran"
+                                               or sample.waves_active)
+                               and self.waves_available else "gazebo_box"),
+                     "active": bool(sample.wrench_active)},
             "water_velocity": [round(float(v), 4) for v in sample.water_velocity],
             "wrench": {"fz": round(float(sample.force[2]), 2),
                        "mx": round(float(sample.torque[0]), 3),

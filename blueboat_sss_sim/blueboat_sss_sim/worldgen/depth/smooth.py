@@ -34,6 +34,52 @@ MAX_COARSE_CELLS = 300
 MAX_FIT_SAMPLES = 20_000
 
 
+def _rasterize_relief(cg: GridSpec, relief, relief_max_m: float,
+                      smooth_m: float = 0.0
+                      ) -> tuple[np.ndarray, np.ndarray]:
+    """``(R, cov)`` on the coarse grid: the weighted mean depth relief of
+    the shading samples per cell (0 where none) and a coverage weight, 1
+    on a covered cell fading to 0 over ``TEXTURE_TAPER_M`` beyond it.
+
+    ``smooth_m`` is the standard deviation of a *coverage-weighted*
+    Gaussian applied to the assembled field: each pass leaves a hole at
+    its own nadir (the water column carries no bin) and meets its
+    neighbours at a seam, and neither is seabed. Weighting by the same
+    weights that formed the cell means (normalised convolution) bridges
+    the holes without pulling the surrounding relief toward zero. A metre
+    or so blends the seams while leaving the bedform band the method can
+    resolve: a Gaussian of sigma s attenuates a wavelength L by
+    ``exp(-2 (pi s / L)^2)``, so 0.75 m keeps 90 % of a 10 m ripple."""
+    from scipy import ndimage
+    shape = (cg.ny, cg.nx)
+    ci, cj = cg.world_to_grid(relief.east, relief.north)
+    ci = np.round(ci).astype(np.int64)
+    cj = np.round(cj).astype(np.int64)
+    ok = ((ci >= 0) & (ci < cg.nx) & (cj >= 0) & (cj < cg.ny)
+          & (relief.weight > 0.0) & np.isfinite(relief.dz))
+    flat = cj[ok] * cg.nx + ci[ok]
+    w = np.asarray(relief.weight, dtype=np.float64)[ok]
+    dz = np.clip(np.asarray(relief.dz, dtype=np.float64)[ok],
+                 -float(relief_max_m), float(relief_max_m))
+    W = np.bincount(flat, weights=w, minlength=cg.nx * cg.ny)
+    WD = np.bincount(flat, weights=w * dz, minlength=cg.nx * cg.ny)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        R = np.where(W > 0.0, WD / np.maximum(W, 1e-12), 0.0).reshape(shape)
+    covered = (W > 0.0).reshape(shape)
+    if not covered.any():
+        return np.zeros(shape), np.zeros(shape)
+    if smooth_m > 0.0:
+        sig = float(smooth_m) / cg.resolution
+        Wg = W.reshape(shape)
+        num = ndimage.gaussian_filter(Wg * R, sig, mode="nearest")
+        den = ndimage.gaussian_filter(Wg, sig, mode="nearest")
+        R = np.where(den > 1e-12, num / np.maximum(den, 1e-12), 0.0)
+    d = ndimage.distance_transform_edt(~covered) * cg.resolution
+    c = np.clip(1.0 - d / TEXTURE_TAPER_M, 0.0, 1.0)
+    cov = c * c * (3.0 - 2.0 * c)
+    return R, cov
+
+
 def _coarse_grid(grid: GridSpec, cell_m: float | None) -> GridSpec:
     xmin, ymin, xmax, ymax = grid.extent
     w, h = xmax - xmin, ymax - ymin
@@ -114,7 +160,10 @@ def interpolate_smooth_to_grid(east: np.ndarray, north: np.ndarray,
                                trend_length_m: float = DEFAULT_TREND_LENGTH_M,
                                texture_gain: float = 0.5,
                                rng: np.random.Generator | None = None,
-                               cell_m: float | None = None) -> np.ndarray:
+                               cell_m: float | None = None,
+                               relief=None, relief_gain: float = 1.0,
+                               relief_max_m: float = 1.5,
+                               relief_smooth_m: float = 0.75) -> np.ndarray:
     """Soundings (depth positive down) -> seabed height raster [ny, nx]
     (z, negative down), smooth, damped beyond the data, gently textured.
 
@@ -129,7 +178,14 @@ def interpolate_smooth_to_grid(east: np.ndarray, north: np.ndarray,
       ``texture_gain`` times the soundings' RMS residual about the fit,
       tapered to zero within ``TEXTURE_TAPER_M`` of a sounding
       (``texture_gain`` 0, or a residual of 0, adds exactly nothing);
-    * regions without a sounding and the wall cells take nearest values.
+    * regions without a sounding and the wall cells take nearest values;
+    * ``relief`` (an ``analysis.shading.ReliefSamples``): the relief the
+      recording's own shading measured across the swath, rasterised per
+      coarse cell (weighted mean, clamped to ``relief_max_m``) and added
+      times ``relief_gain`` where the swath was lit, the synthetic
+      undulation fading out over ``TEXTURE_TAPER_M`` of the covered cells
+      -- the measured relief replaces the guess where there is one.
+      ``None`` (the default) is today's behaviour, bit for bit.
 
     Evaluated on a coarse grid (``cell_m``, default ``max(0.5 m, 4 *
     resolution)``, at most ``MAX_COARSE_CELLS`` per axis) and bilinearly
@@ -241,12 +297,22 @@ def interpolate_smooth_to_grid(east: np.ndarray, north: np.ndarray,
         z = flood_fill_nearest(z, None)
 
     rms_res = float(np.sqrt(resid_sq / resid_n)) if resid_n else 0.0
+    synthetic = None
     if texture_gain > 0.0 and rms_res > 0.0:
         gen = rng if rng is not None else np.random.default_rng(0)
         noise = _band_noise(shape, cell, gen)
         d_smp = ndimage.distance_transform_edt(~stamped) * cell
         taper = np.clip(d_smp / TEXTURE_TAPER_M, 0.0, 1.0)
-        z = z + float(texture_gain) * rms_res * noise * taper
+        synthetic = float(texture_gain) * rms_res * noise * taper
+    if relief is None or len(relief) == 0:
+        if synthetic is not None:
+            z = z + synthetic                   # today's expression, unchanged
+    else:
+        R, cov = _rasterize_relief(cg, relief, relief_max_m,
+                                   smooth_m=relief_smooth_m)
+        if synthetic is not None:
+            z = z + synthetic * (1.0 - cov)
+        z = z + float(relief_gain) * R * cov
 
     # Coarse -> the target raster (bilinear).
     fx = grid.origin_x + np.arange(grid.nx) * grid.resolution

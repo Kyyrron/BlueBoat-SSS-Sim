@@ -30,8 +30,9 @@ from __future__ import annotations
 import math
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSPresetProfiles
 from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
@@ -57,6 +58,15 @@ class MavrosShimNode(Node):
         self._imu_pub = self.create_publisher(Imu, "/mavros/imu/data", 10)
         self._pose_pub = self.create_publisher(
             PoseStamped, "/mavros/local_position/pose", 10)
+        # `sss_processor_node` subscribes this to fill GLOBAL_POSITION_INT's
+        # vx/vy in every .svlog it writes. Nothing published it in
+        # simulation, so every simulated recording reported a stationary
+        # boat -- measured 2026-09-19 on sessions/beach_sim: 0.000 m/s on
+        # all 1480 fixes, over a track 191 m long. Anything downstream that
+        # scales a waterfall row by the reported speed degraded on
+        # simulated data and on it alone.
+        self._vel_pub = self.create_publisher(
+            TwistStamped, "/mavros/local_position/velocity_local", 10)
         # Real mavros publishes NavSatFix as sensor data (BEST_EFFORT).
         self._fix_pub = self.create_publisher(
             NavSatFix, "/mavros/global_position/global",
@@ -88,6 +98,20 @@ class MavrosShimNode(Node):
         pose.pose = msg.pose.pose
         self._pose_pub.publish(pose)
 
+        # `/blueboat/odom` carries the twist in the body frame
+        # (child_frame_id base_link); mavros publishes velocity_local in the
+        # world frame, so rotate it by the yaw before handing it on.
+        vel = TwistStamped()
+        vel.header = msg.header
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        vx_b = float(msg.twist.twist.linear.x)
+        vy_b = float(msg.twist.twist.linear.y)
+        vel.twist.linear.x = cy * vx_b - sy * vy_b
+        vel.twist.linear.y = sy * vx_b + cy * vy_b
+        vel.twist.linear.z = float(msg.twist.twist.linear.z)
+        vel.twist.angular = msg.twist.twist.angular
+        self._vel_pub.publish(vel)
+
         self._maybe_publish_fix(msg)
 
     def _maybe_publish_fix(self, msg: Odometry) -> None:
@@ -116,8 +140,8 @@ def main(args=None) -> None:
     node = MavrosShimNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass   # Ctrl-C, or a launch teardown (rclpy's own SIGINT handler)
     finally:
         node.destroy_node()
         if rclpy.ok():

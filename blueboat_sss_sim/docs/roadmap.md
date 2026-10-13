@@ -20,12 +20,14 @@ pontoon (no pontoon geometry ground truth exists in the field logs).
 ## 2b. Sea state — **shipped 2026-09-03**, open items
 `sea/` + `sea_state_node` (`docs/sea_state_model.md`). Next, in value
 order: wind load on the hull and superstructure (the current model has
-no wind at all); spatially varying current (a basin mouth jet, eddies);
+no wind at all); spatially varying current beyond the weak eddies shipped
+2026-10-08 (`sea/current.py` `EddyField`) — a basin mouth jet;
 wave diffraction/reflection off the quays (the wave field is open-water
 JONSWAP even inside a basin); a hydrodynamic identification of the
 BlueBoat itself (the damping coefficients Gazebo applies are BlueROV2's,
-named as such in `hydrodynamics.xacro` — a BlueBoat-Control item); and
-the live Gazebo acceptance pass listed in `.claude/TODO.md`.
+named as such in `hydrodynamics.xacro` — a post-v1.0 BlueBoat-Control
+item). The live Gazebo acceptance pass is done (2026-10-08/09,
+`test/gazebo_sea_test.py`, `docs/sea_state_validation.md`).
 
 ## 3. Mesh-accurate targets (medium)
 For cavity-bearing targets (wrecks, pipes on trestles) the 2.5-D stamp is
@@ -39,9 +41,11 @@ convolve along-track with the horizontal beam footprint. Makes turns
 smear realistically — relevant for adaptive-replanning imagery where the
 vehicle images while maneuvering.
 
-## 5. Correlated speckle & bottom-type spectra (low)
-Replace i.i.d. `Exp(1)` with correlated gamma speckle (spatial low-pass on
-the field) and per-material K-distribution parameters. Sharpens
+## 5. Bottom-type speckle spectra (low)
+Correlated speckle shipped 2026-09-02: `Exp(1)` comes from the coherent
+ground-scatterer field, correlated along range and track as the corpus
+measures (`coherent_scatterers: true`, NC #5, smoke `[2g]`). Still open:
+per-material K-distribution parameters. Sharpens
 texture-classification realism; detector-level impact is modest.
 
 ## 6. Vegetation dynamics (low)

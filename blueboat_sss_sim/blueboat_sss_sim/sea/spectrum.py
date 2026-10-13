@@ -16,6 +16,12 @@ from __future__ import annotations
 
 import numpy as np
 
+#: NumPy 2.0 removed `np.trapz` in favour of `np.trapezoid`. This workspace
+#: runs the package under both (the system interpreter carries numpy 1.26,
+#: the venv 2.4), so bind whichever the interpreter has rather than pinning
+#: the package to one of them. Same function, same result.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 G = 9.80665
 
 
@@ -49,7 +55,7 @@ def pierson_moskowitz(omega: np.ndarray, hs: float, tp: float) -> np.ndarray:
 
 def spectral_moment(omega: np.ndarray, s: np.ndarray, n: int = 0) -> float:
     """m_n = ∫ ωⁿ S(ω) dω by the trapezoid rule."""
-    return float(np.trapz(np.asarray(omega) ** n * np.asarray(s), omega))
+    return float(_trapezoid(np.asarray(omega) ** n * np.asarray(s), omega))
 
 
 def dispersion(omega: np.ndarray | float, depth_m: float) -> np.ndarray:
@@ -96,6 +102,6 @@ def equal_energy_frequencies(hs: float, tp: float, gamma: float,
         if sel.sum() < 2:
             centres[i] = 0.5 * (edges[i] + edges[i + 1])
         else:
-            centres[i] = float(np.trapz(w[sel] * s[sel], w[sel])
-                               / max(np.trapz(s[sel], w[sel]), 1e-30))
+            centres[i] = float(_trapezoid(w[sel] * s[sel], w[sel])
+                               / max(_trapezoid(s[sel], w[sel]), 1e-30))
     return centres, m0

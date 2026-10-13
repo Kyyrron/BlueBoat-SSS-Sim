@@ -45,7 +45,12 @@ from .svlog_reader import ProfileRecord, read_profiles
 MIN_PERIOD_MS = 50.0
 #: Shortest transmit pulse the device reports (18-27 m / 1200 bins).
 PULSE_FLOOR_S = 44.3e-6
-#: Pulse length in sample periods, measured per bin count (600: 1.2, 1200: 1.5).
+#: Pulse length in sample periods at the two settings the corpus was recorded
+#: with: the device law is max(44.3 us, pulse_len_percent x 2R/c)
+#: (``AcquisitionParams.pulse_duration_s``), and the ROS driver's former
+#: 0.002 at 600 bins is 1.2 periods, SonarView's 1.5 / num_results 1.5. The
+#: frame does not carry pulse_len_percent, so this reference assumes those; a
+#: 600-bin SonarView file (0.0025) reads 1.5 against it.
 PULSE_SAMPLES = {600: 1.2, 1200: 1.5}
 #: Slant ranges [m] at which the mean reported level is probed (+-10 %).
 RANGE_PROBES_M = (0.5, 1.0, 2.0, 3.0, 5.0, 7.5, 10.0, 12.5, 15.0, 20.0, 25.0,

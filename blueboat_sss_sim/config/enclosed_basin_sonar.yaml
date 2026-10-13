@@ -1,39 +1,66 @@
 # Enclosed-basin sonar profile: `default_sonar.yaml` with wall multipath ON
-# and nothing else changed -- same 15 m acquisition, same calibration anchor
+# and nothing else changed -- same acquisition, same calibration anchor
 # (NC #6), so imagery from this profile is directly comparable to the default's
 # and differs only by the ghosts the basin walls put into it.
 acquisition:
   range_start_mm: 0
-  range_length_mm: 15000
-  msec_per_ping: 0
-  gain_index: 4
-  num_results: 600
-  pulse_len_percent: 0.002
+  range_length_mm: 20000
+  msec_per_ping: 0          # 0 = free run (device-native: 20 pings/s to 30 m)
+  gain_index: -1            # device auto-gain, the real sss_node.py default.
+                            # The simulator has no AGC: -1 resolves to the
+                            # calibrated index 4 and reports 4 (the profile's
+                            # gain_index is uint16 and cannot carry -1).
+                            # 0-7 are accepted (4-7 measured); else rejected.
+  num_results: 1200         # the device maximum (1/1200 of range)
+  pulse_len_percent: 0.00125  # pulse = max(44.3 us, this x 2R/c), the
+                            # measured device law; 0.00125 is SonarView's own
+                            # 1.5 / num_results. Up to ~27 m it sits on the
+                            # 44.3 us floor, the device's shortest pulse
+                            # (33 mm true range resolution)
 
 model:
   sensor_depth_m: 0.15
   mount_x_m: 0.0
-  mount_y_abs_m: 0.20
+  mount_y_abs_m: 0.285
   beam_tilt_deg: 20.0
   vertical_aperture_deg: 50.0
   horizontal_aperture_deg: 0.5
   max_ping_rate_hz: 20.0
 
-  # Range law, fitted against the Shiraishi-jima corpus. Only the product
-  # spreading_exponent * (1 - tvg_compensation) is determined; the split is
-  # fixed by taking spreading at its physical two-way-intensity value, which
-  # makes tvg_compensation 0 -- the profile the device reports is pre-TVG.
-  lambert_exponent: 1.0       # not separated from site geometry by the corpus
+  # Range law, RE-FITTED 2026-09-18 on two altitudes at once -- the lever the
+  # single-altitude fit never had: bath3 (beach, 1.40 m altitude, 12371 pings)
+  # and reflectionEvidenceFullharbour (harbour, 7.33 m, 1445 pings). The
+  # seabed's absolute dB-vs-slant curve comes back to 0.9 dB rms at BOTH with
+  # lambert_exponent 1.0, tvg_compensation 0.30 and calibration_db_offset 81.1;
+  # the former (1.0, 0.0, 97.2) matched the harbour and ran ~18 dB hot at the
+  # beach. The device does compensate part of the range loss; only the pair
+  # (spreading_exponent, tvg_compensation) is determined, so spreading stays at
+  # its physical two-way value and the TVG carries the fitted part.
+  lambert_exponent: 1.0       # measured over the two altitudes together (2026-09-18)
   absorption_db_per_m: 0.10   # ~450 kHz seawater; not separated from spreading
-  spreading_exponent: 4.0     # two-way intensity spreading, r^-4
-  tvg_compensation: 0.0
+  spreading_exponent: 4.0     # two-way intensity spreading, r^-4 (incoherent)
+  tvg_compensation: 0.30
+  # The coherent (specular) component is the field of an IMAGE SOURCE and
+  # spreads once over the folded path, not twice like the diffuse field. With
+  # r^-2 the reported peak level follows altitude as the corpus measures it
+  # (66.6 - 11.3 log10 alt dB over 19 gain-4 files, rms 1.6; simulator
+  # 72.1 - 11.5), where sharing r^-4 gave -20 to -27 dB per decade.
+  specular_spreading_exponent: 2.0
+  # Along-track floor on the footprint (an array of length D cannot
+  # resolve finer than D). MEASURED 0: the corpus's own along-track
+  # texture correlation says the device's footprint follows r*theta to
+  # at least 10 m, so it focuses its near field; 0.35 m would put that
+  # correlation at 0.76 against the measured 0.36-0.66. Undetermined
+  # inside ~3 m -- a point target at 3 and 12 m would settle it.
+  array_length_m: 0.0
   beam_sidelobe_floor: 0.004
-  specular_strength: 30.0
+  specular_strength: 12.0
   specular_width_deg: 8.0
   specular_looks: 25
   pulse_smearing: true
+  filter_duration_percent: 0.0015
   alongtrack_beam_lines: 5
-  calibration_db_offset: 97.2
+  calibration_db_offset: 81.1
   max_span_db: 90.0
 
   multipath_enabled: false
@@ -59,8 +86,8 @@ model:
 
   speckle: true
   speckle_looks: 1
-  noise_floor: 8.3e-11          # measured receiver floor (see default_sonar.yaml)
-  watercolumn_noise: 1.15e-07   # measured 1-3 m water column
+  noise_floor: 3.39e-09          # measured receiver floor (see default_sonar.yaml)
+  watercolumn_noise: 4.68e-06   # measured 1-3 m water column
   gain_drift_amp: 0.0
   gain_drift_period_s: 45.0
   dropped_ping_prob: 0.0

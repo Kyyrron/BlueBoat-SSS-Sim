@@ -17,8 +17,8 @@ over the live events, and exact zeros when none is live.
 The Poisson arrival assumption and the Hann envelope are modelling
 choices, not measurements (no wake statistics exist for the study site);
 the *shape* of a wake group -- a few long-period cycles with a growing and
-decaying envelope -- follows the ship-wake literature (Soomere 2007,
-doi:10.1007/s10236-007-0113-8; Kelvin wake theory). Deterministic per
+decaying envelope -- follows the ship-wake literature (Soomere 2007, Appl. Mech. Rev. 60(3),
+doi:10.1115/1.2730847; Kelvin wake theory). Deterministic per
 seed: the arrival stream is ``[seed, 3]``, event ``k`` draws from
 ``[seed, 3, k]``.
 """

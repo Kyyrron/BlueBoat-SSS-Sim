@@ -7,7 +7,7 @@ clustering, size and burial distributions (uniform or gauss -- nothing
 fancier, per the design), an orientation rule (random / fixed heading /
 relative to the survey track), and any class-specific ``params_schema``
 rows. Rows collapse to their title while unticked; a text filter and a
-"Selected only" toggle keep the 27-class list navigable.
+"Selected only" toggle keep the 29-class list navigable.
 """
 
 from __future__ import annotations
@@ -469,7 +469,13 @@ class ObjectsPage(WizardPage):
             cfg = row.to_config()
             if cfg is not None:
                 classes[type_name] = cfg
+        # ``explicit`` and the pinned field belong to Screen 5; that
+        # screen re-scatters when this one's signature stops matching.
         state.objects = ObjectsState(seed=int(self._seed.value()),
                                      classes=classes,
-                                     explicit=state.objects.explicit)
+                                     explicit=state.objects.explicit,
+                                     placed=state.objects.placed,
+                                     placed_signature=(
+                                         state.objects.placed_signature),
+                                     pinned=state.objects.pinned)
         return True

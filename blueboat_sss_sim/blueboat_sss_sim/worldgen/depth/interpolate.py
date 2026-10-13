@@ -87,6 +87,15 @@ def interpolate_to_grid(samples: DepthSamples, grid: GridSpec,
     """
     if len(samples) == 0:
         raise ValueError("depth file yielded no samples")
+    if (getattr(samples, "aligned", False)
+            and len(samples) == grid.nx * grid.ny):
+        # A raster on this very grid (a baked layer stack): stamp it.
+        tol = 1e-3 * grid.resolution
+        xmin, ymin, xmax, ymax = grid.extent
+        if (abs(samples.east[0] - xmin) < tol and abs(samples.north[0] - ymin) < tol
+                and abs(samples.east[-1] - xmax) < tol
+                and abs(samples.north[-1] - ymax) < tol):
+            return -samples.depth.reshape(grid.ny, grid.nx).astype(np.float64)
     from scipy import ndimage
     from scipy.interpolate import griddata
 

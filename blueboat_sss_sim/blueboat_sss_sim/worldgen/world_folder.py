@@ -30,11 +30,14 @@ import yaml
 
 from ..core.geometry import curve_base_name, expand_walls
 from ..core.geo import GeoAnchor
+from ..core.types import GridSpec, Wall
 from .depth import build_height, build_height_with_info  # noqa: F401
+from .depth.bake import BakedFiles, bake_state
+from .depth.layers.survey import SURVEY_LAYER_ID
 from .export_maps import render_objects_preview
 from .materials import MaterialLibrary
-from .objects import normalise_orientation, place_objects, rasterize_objects
-from .scene import SceneModel, WorldConfig, generate_scene
+from .objects import normalise_orientation, place_objects
+from .scene import SceneModel, WorldConfig, generate_scene, stamp_objects
 from .sdf_writer import write_world_sdf
 from .terrain import synthesize_terrain
 
@@ -54,14 +57,31 @@ def _safe_name(name: str) -> str:
     return name or "world"
 
 
+#: Suffix of the hidden directory a world is built in before it is renamed
+#: into place (see :func:`build_world_folder`).
+PARTIAL_SUFFIX = ".partial"
+
+
 def _dedupe_dir(parent: Path, name: str) -> Path:
-    """First free ``name``, ``name_1``, ``name_2``, ... under ``parent``."""
+    """First free ``name``, ``name_1``, ``name_2``, ... under ``parent``
+    (the returned path is *not* created)."""
     cand = parent / name
     i = 0
-    while cand.exists():
+    while cand.exists() or (parent / f".{cand.name}{PARTIAL_SUFFIX}").exists():
         i += 1
         cand = parent / f"{name}_{i}"
     return cand
+
+
+def _sweep_partials(parent: Path) -> None:
+    """Remove the leftovers of builds that died before the rename."""
+    try:
+        for d in parent.iterdir():
+            if d.is_dir() and d.name.startswith(".") \
+                    and d.name.endswith(PARTIAL_SUFFIX):
+                shutil.rmtree(d, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _resolution_for(size_x: float, size_y: float) -> float:
@@ -73,8 +93,89 @@ def _resolution_for(size_x: float, size_y: float) -> float:
     return float(res)
 
 
+def world_block(state: "BuilderState") -> tuple[list[float], list[float],
+                                                  float, float, float]:
+    """``(size, origin, resolution, ox, oy)`` of the generated world: the
+    drawn rectangle re-based so that world (0, 0) is the spawn origin."""
+    r = state.limits_rect
+    ox, oy = state.spawn_origin()
+    size = [float(r["x_max"] - r["x_min"]), float(r["y_max"] - r["y_min"])]
+    origin = [float(r["x_min"] - ox), float(r["y_min"] - oy)]
+    return size, origin, _resolution_for(*size), ox, oy
+
+
+def build_grid(state: "BuilderState") -> GridSpec:
+    """The raster grid a build of ``state`` uses (world frame) -- the same
+    ``WorldConfig.grid()`` derives from the ``world:`` block."""
+    size, origin, res, _, _ = world_block(state)
+    return GridSpec(origin[0], origin[1], res,
+                    int(round(size[0] / res)) + 1, int(round(size[1] / res)) + 1)
+
+
+def _repoint(obj: Any, old: str, new: str) -> Any:
+    """Every absolute path recorded in the config snapshot rewritten from
+    the build directory to the name the folder ends up with.
+
+    The build writes into a hidden ``.<name>.partial`` sibling and renames
+    it into place at the end (see ``build_world_folder``), so the baked
+    GeoTIFF, the material map and the depth-source copy are *generated*
+    under one path and *read back* under another. The snapshot is the
+    provenance record ``generate_world`` regenerates a world from, so it
+    must name the final one."""
+    if isinstance(obj, dict):
+        return {k: _repoint(v, old, new) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_repoint(v, old, new) for v in obj]
+    if isinstance(obj, str) and obj.startswith(old):
+        return new + obj[len(old):]
+    return obj
+
+
+def bake_for_build(state: "BuilderState", out_dir: str | Path
+                   ) -> BakedFiles | None:
+    """Bake a layered ``state.depth`` into ``out_dir`` (``depth_baked.tif``
+    + ``material_map.npz``); ``None`` for a legacy (layer-less) state."""
+    if not state.depth.layers:
+        return None
+    _, _, _, ox, oy = world_block(state)
+    walls = []
+    for w in expand_walls(state.walls):
+        w = dict(w)
+        for k, d in (("x0", ox), ("y0", oy), ("x1", ox), ("y1", oy)):
+            w[k] = float(w[k]) - d
+        walls.append(Wall(**w))
+    anchor = state.world_anchor()
+    if anchor is None:
+        raise ValueError("a layered seabed needs a GPS-anchored path (Screen 1)")
+    return bake_state(state, out_dir, build_grid(state), walls, anchor,
+                      (ox, oy))
+
+
+def build_config(state: "BuilderState", out_dir: str | Path,
+                 depth_file: str | None = None
+                 ) -> tuple[dict[str, Any], BakedFiles | None]:
+    """The world YAML dict of ``state`` ready to generate, baking a
+    layered depth into ``out_dir`` first. Shared by the folder build and
+    the Screen-5 preview."""
+    baked = bake_for_build(state, out_dir)
+    return state_to_world_config(state, depth_file=depth_file, baked=baked), baked
+
+
+def engine_explicit(state: "BuilderState") -> list[dict[str, Any]]:
+    """The instances the engine must place verbatim, in build order.
+
+    The pinned scatter first (Screen 5 froze the random field so every
+    object could be moved and edited), then the hand-placed ones. A state
+    that never pinned anything returns ``explicit`` alone, so every world
+    built before that screen existed rebuilds byte-identically.
+    """
+    return ([dict(i) for i in state.objects.placed]
+            + [dict(i) for i in state.objects.explicit])
+
+
 def state_to_world_config(state: "BuilderState",
-                          depth_file: str | None = None) -> dict[str, Any]:
+                          depth_file: str | None = None,
+                          baked: BakedFiles | None = None) -> dict[str, Any]:
     """BuilderState -> the raw world-YAML dict ``WorldConfig`` consumes.
 
     The wizard draws in the source path's *design* frame; the generated
@@ -86,13 +187,13 @@ def state_to_world_config(state: "BuilderState",
     GPS value stays globally identical.
 
     ``depth_file`` overrides the depth source path (the folder-local copy
-    at build time); the returned dict is also stored verbatim as the
-    scene's config snapshot, so provenance survives inside the manifest.
+    at build time); ``baked`` (a layered state's ``depth_baked.tif`` +
+    ``material_map.npz``) turns the depth section into a file-mode one
+    and adds ``terrain.materials.map``. The returned dict is also stored
+    verbatim as the scene's config snapshot, so provenance survives
+    inside the manifest.
     """
-    r = state.limits_rect
-    ox, oy = state.spawn_origin()
-    size = [float(r["x_max"] - r["x_min"]), float(r["y_max"] - r["y_min"])]
-    origin = [float(r["x_min"] - ox), float(r["y_min"] - oy)]
+    size, origin, res, ox, oy = world_block(state)
     walls = []
     # Close endpoints merged, curves flattened to chords (core.geometry):
     # the one conversion from builder walls to engine walls, so scene,
@@ -102,23 +203,27 @@ def state_to_world_config(state: "BuilderState",
             w[k] = float(w[k]) - d
         walls.append(w)
     explicit = []
-    for item in state.objects.explicit:
-        item = dict(item)
+    for item in engine_explicit(state):
         item["x"] = float(item["x"]) - ox
         item["y"] = float(item["y"]) - oy
         explicit.append(item)
+    # A pinned scatter *replaces* the classes that produced it -- leaving
+    # them in would place the whole random field a second time.
+    classes = ({} if (state.objects.placed or state.objects.pinned)
+               else dict(state.objects.classes))
     raw: dict[str, Any] = {
         "world": {
             "seed": int(state.objects.seed),
             "size": size,
             "origin": origin,
-            "resolution": _resolution_for(*size),
+            "resolution": res,
             "limits_collision": True,
         },
         "geo": state.world_anchor().to_dict(),
-        "terrain": terrain_section(state, ox, oy),
-        "objects": {"classes": dict(state.objects.classes),
-                    "explicit": explicit},
+        "terrain": terrain_section(state, ox, oy,
+                                   material_map=(baked.material_map
+                                                 if baked else None)),
+        "objects": {"classes": classes, "explicit": explicit},
         "walls": walls,
     }
     # The survey path in world metres, so ``orientation.mode:
@@ -126,16 +231,17 @@ def state_to_world_config(state: "BuilderState",
     # when a class asks for it: the config snapshot of every other world
     # stays byte-identical.
     if any(str((c or {}).get("orientation", {}).get("mode", "random"))
-           == "path_relative" for c in state.objects.classes.values()):
+           == "path_relative" for c in classes.values()):
         raw["objects"]["path_xy"] = [
             [round(float(x), 3), round(float(y), 3)]
             for x, y in state.path_world_xy()]
-    raw["depth"] = depth_section(state, depth_file, ox, oy)
+    raw["depth"] = depth_section(state, depth_file, ox, oy, baked=baked)
     return raw
 
 
 def terrain_section(state: "BuilderState", ox: float = 0.0,
-                    oy: float = 0.0) -> dict[str, Any]:
+                    oy: float = 0.0,
+                    material_map: str | None = None) -> dict[str, Any]:
     """The world YAML's ``terrain:`` section from the wizard state, with
     material strokes re-based by ``(ox, oy)``. Shared by the build and
     the Screen-3 live preview (which works in the design frame, offset
@@ -152,15 +258,22 @@ def terrain_section(state: "BuilderState", ox: float = 0.0,
     if state.depth.material_paint:
         mats["paint"] = [_rebase_stroke(s, ox, oy)
                          for s in state.depth.material_paint]
+    if material_map:
+        mats["map"] = str(material_map)
     terrain["materials"] = mats
     return terrain
 
 
 def depth_section(state: "BuilderState", depth_file: str | None = None,
-                  ox: float = 0.0, oy: float = 0.0) -> dict[str, Any]:
+                  ox: float = 0.0, oy: float = 0.0,
+                  baked: BakedFiles | None = None) -> dict[str, Any]:
     """The world YAML's ``depth:`` section from the wizard state, depth
     strokes re-based by ``(ox, oy)`` (present only when non-empty, so an
-    unpainted state's snapshot is unchanged)."""
+    unpainted state's snapshot is unchanged). A baked layer stack is a
+    plain file-mode section on its GeoTIFF."""
+    if baked is not None:
+        return {"mode": "file", "file": baked.depth_tif,
+                "file_kind": "geotiff", "file_values": "depth"}
     if state.depth.mode == "svlog":
         raw = {"mode": "svlog",
                "file": depth_file or state.depth.file,
@@ -187,7 +300,8 @@ def _rebase_stroke(stroke: dict, ox: float, oy: float) -> dict:
 
 
 def _generate_with_base(cfg: WorldConfig, raw: dict[str, Any],
-                        info_out: dict[str, Any] | None = None
+                        info_out: dict[str, Any] | None = None,
+                        placed_out: list | None = None
                         ) -> tuple[SceneModel, np.ndarray]:
     """Exactly ``generate_scene``, but also returning the terrain-only
     height raster (pre-object-stamp) -- the "real depth map actually
@@ -195,6 +309,12 @@ def _generate_with_base(cfg: WorldConfig, raw: dict[str, Any],
     RNG streams; the smoke test asserts the two produce identical scenes.
     ``info_out`` (a dict) receives the depth source's info -- the survey
     summary of a recording -- when given.
+
+    ``placed_out`` (a list) receives a copy of the objects **as placed**,
+    before ``rasterize_objects`` banks each rested one onto the local
+    seabed slope (it overwrites ``roll``/``pitch`` in place). That
+    pre-settle pose is the one Screen 5 pins: pinning the banked pose
+    would bank it a second time on the next build.
     """
     rng_terrain = np.random.default_rng([cfg.seed, 0])
     rng_objects = np.random.default_rng([cfg.seed, 1])
@@ -211,10 +331,16 @@ def _generate_with_base(cfg: WorldConfig, raw: dict[str, Any],
     pre_stamp = terrain.height.copy()
     objects = place_objects(grid, cfg.objects, materials, rng_objects,
                             height=pre_stamp)
-    rasterize_objects(objects, grid, terrain.height, terrain.reflectivity)
+    if placed_out is not None:
+        placed_out.extend(copy.deepcopy(objects))
+    # The same stamping pass as generate_scene -- one function, so the two
+    # builders cannot diverge again (they did: this path used to skip the
+    # roughness raster, 2026-09-19 to 2026-09-28).
+    rasters = stamp_objects(objects, grid, terrain.height,
+                            terrain.reflectivity)
     scene = SceneModel(
         grid=grid, height=terrain.height, reflectivity=terrain.reflectivity,
-        material_id=terrain.material_id,
+        **rasters.scene_kwargs(), material_id=terrain.material_id,
         material_names=terrain.material_names, objects=objects,
         walls=list(cfg.walls), seed=cfg.seed, config_snapshot=dict(raw),
         geo_anchor=cfg.geo)
@@ -254,7 +380,7 @@ def _write_metadata(out: Path, state: "BuilderState", scene: SceneModel,
     # Per-object orientation provenance: the class's normalised
     # ``orientation`` block for placed instances; explicit instances are
     # pinned verbatim, which is a fixed heading with no jitter.
-    n_explicit = len(state.objects.explicit)
+    n_explicit = len(engine_explicit(state))
     n_placed = len(scene.objects) - n_explicit
 
     def orientation_of(o) -> dict[str, Any]:
@@ -347,9 +473,20 @@ def build_world_folder(state: "BuilderState",
     root = Path(worlds_root) if worlds_root else DEFAULT_WORLDS_ROOT
     parent = root / _safe_name(state.path.name)
     parent.mkdir(parents=True, exist_ok=True)
-    out = _dedupe_dir(parent, _safe_name(state.world_name or "world"))
+    _sweep_partials(parent)
+    final = _dedupe_dir(parent, _safe_name(state.world_name or "world"))
+    world_name = final.name
+    # Build into a hidden sibling and rename it into place at the very end.
+    # A world folder is the project's ground truth and is read by name; a
+    # build that dies half way (the OOM killer ended one on 2026-09-18)
+    # otherwise leaves a directory that looks like a world, carries a
+    # 180 MB recording copy and has no metadata.yaml, no scene.npz and no
+    # builder_state.yaml. The rename is atomic on POSIX, so a folder under
+    # ~/worlds is either a whole world or was never there.
+    out = parent / f".{world_name}{PARTIAL_SUFFIX}"
+    if out.exists():
+        shutil.rmtree(out, ignore_errors=True)
     out.mkdir()
-    world_name = out.name
 
     depth_copy: str | None = None
     if state.depth.mode in ("file", "svlog"):
@@ -361,31 +498,55 @@ def build_world_folder(state: "BuilderState",
         step(f"copying depth source ({src.stat().st_size / 1e6:.1f} MB)")
         shutil.copyfile(src, depth_copy)
 
+    if state.depth.layers:
+        step("baking the seabed layers")
+    raw, _baked = build_config(state, out, depth_file=depth_copy)
     step("generating scene")
-    raw = state_to_world_config(state, depth_file=depth_copy)
     cfg = WorldConfig.from_dict(raw)
     survey_info: dict[str, Any] = {}
     scene, pre_stamp = _generate_with_base(cfg, raw, survey_info)
+    if _baked is not None:
+        # A layered state was composed by the bake; the generation above
+        # ran on its GeoTIFF and only knows the aligned coverage. The
+        # recording's survey summary and soundings live in the bake's
+        # info -- without this a layered recording world lost its
+        # depth_samples.npz and svlog_quality (2026-09-16).
+        survey_info.update(_baked.info)
     arrays = survey_info.pop("soundings_arrays", None)
     if arrays:
         np.savez_compressed(out / "depth_samples.npz", **arrays)
+    has_survey_layer = any(
+        L.get("id") == SURVEY_LAYER_ID or L.get("kind") == "reflectivity_survey"
+        for L in (state.depth.layers or []))
     if (state.depth.mode == "svlog" and depth_copy
-            and bool((state.depth.svlog or {}).get("backscatter_layer"))):
-        # The optional reflectivity hint (uncalibrated, relative): kept
-        # beside the soundings so Edit mode and analysis can show it
-        # without re-reading the recording.
-        from .depth.svlog import backscatter_hint
-        step("deriving the backscatter hint")
-        hint = backscatter_hint(depth_copy, cfg.geo, scene.grid)
-        np.savez_compressed(out / "reflectivity_hint.npz",
-                            values=hint["values"],
-                            origin_x=float(hint["origin"][0]),
-                            origin_y=float(hint["origin"][1]),
-                            cell_m=float(hint["cell_m"]),
-                            n_samples=int(hint["n"]))
-        survey_info["backscatter_samples"] = int(hint["n"])
+            and (has_survey_layer
+                 or bool((state.depth.svlog or {}).get("backscatter_layer")))):
+        # The measured reflectivity (analysis/backscatter.py): the audit
+        # record of what the reflectivity_survey layer applied, beside the
+        # soundings, so analysis never re-reads the recording. The layer
+        # itself is the consumer; a legacy state with only the flag gets
+        # the record and no layer.
+        from ..analysis.backscatter import mu_raster, summarize
+        step("inverting the recording's backscatter")
+        ref = "sand"
+        for L in (state.depth.layers or []):
+            if L.get("kind") == "reflectivity_survey":
+                ref = str((L.get("params") or {}).get("reference", ref))
+        r = mu_raster(depth_copy, cfg.geo, 1.0)
+        np.savez_compressed(out / "reflectivity_survey.npz",
+                            mu_db=r.mu_db.astype(np.float32),
+                            count=r.count.astype(np.int32),
+                            spread_db=r.spread_db.astype(np.float32),
+                            origin_x=float(r.origin_x),
+                            origin_y=float(r.origin_y),
+                            cell_m=float(r.cell_m),
+                            reference=str(ref),
+                            gain_index_ref=int(r.gain_index_ref),
+                            angle_norm=str(r.angle_norm))
+        survey_info.setdefault("backscatter", summarize(r, ref))
 
     step("writing world files")
+    scene.config_snapshot = _repoint(scene.config_snapshot, str(out), str(final))
     scene.save(out)
     write_world_sdf(scene, out, material_overrides=None,
                     limits_collision=True)
@@ -419,8 +580,9 @@ def build_world_folder(state: "BuilderState",
         saved.depth = dataclasses.replace(
             state.depth, file=Path(depth_copy).name)
     saved.save(out / "builder_state.yaml")
+    out.rename(final)                 # atomic: see the note at the top
     step("done")
-    return out
+    return final
 
 
 def load_builder_state(world_dir: str | Path):

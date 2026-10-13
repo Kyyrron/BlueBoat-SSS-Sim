@@ -65,10 +65,106 @@ from blueboat_sss_sim.worldgen.objects import (CATALOG as _CATALOG_V3,  # noqa: 
 OUT = Path("/tmp/blueboat_sss_smoke")
 FIXTURES = PKG_ROOT / "test" / "fixtures"
 
+#: The acquisition the model gates were calibrated and measured at: the
+#: anchors' 20 m / 600 bins (`beach_sept/bath3`), the former driver pulse
+#: 0.002 and the fixed calibration gain 4. The SHIPPED default profile runs
+#: the device's best acquisition since 2026-09-28 (1200 bins, pulse 0.00125,
+#: auto-gain -- the real driver's defaults too), but those are run
+#: parameters, not model constants: re-basing every calibration gate on them
+#: would change what they measure and double the suite's cost. `[4b]`
+#: asserts the shipped default separately.
+CAL_NUM_RESULTS = 600
+CAL_PULSE_LEN_PERCENT = 0.002
+CAL_GAIN_INDEX = 4
+
+
+def _cal_config() -> SonarConfig:
+    """``config/default_sonar.yaml`` at the calibration acquisition."""
+    c = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+    c.acquisition.num_results = CAL_NUM_RESULTS
+    c.acquisition.pulse_len_percent = CAL_PULSE_LEN_PERCENT
+    c.acquisition.gain_index = CAL_GAIN_INDEX
+    return c
+
 #: Minimal stand-in for analysis.svlog_reader.ProfileRecord, so the corpus's
 #: normalisation invariants can be asserted on freshly encoded pings without
 #: routing them through a file.
 _PowerRec = namedtuple("_PowerRec", "pwr_results min_pwr_db max_pwr_db")
+
+
+def _sim_frame(pid: int, payload: bytes, src: int = 0) -> bytes:
+    """One framed Ping-Protocol packet (the ``_frame`` of section [4c])."""
+    buf = bytearray(b"BR")
+    buf += len(payload).to_bytes(2, "little")
+    buf += pid.to_bytes(2, "little") + bytes([src, 0]) + payload
+    return bytes(buf + (sum(buf) & 0xFFFF).to_bytes(2, "little"))
+
+
+def _write_sim_svlog(scene, traj, anchor, out_path, *, n_pings: int = 200,
+                     skew_ms: int = 2_644_886, sonar_cfg=None,
+                     noise_seed: int | None = None, nav_every: int = 4):
+    """Render ``traj`` over ``scene`` through the real renderer + encoder
+    and write a SonarView-style ``.svlog`` (live autopilot clock skewed by
+    ``skew_ms``, nav frames every ``nav_every`` pings), the machinery of
+    section [4c] as a function so later sections can survey a scene of
+    their own. ``noise_seed`` applies the node's speckle / floor before
+    encoding (what a device would have recorded); ``None`` writes the
+    noiseless means as [4c] does. Returns ``(path, {k: Pose3D})``."""
+    import json as _j
+    cfg = sonar_cfg or _cal_config()
+    rend = GeometricRenderer(scene, cfg.acquisition, cfg.model)
+    encs = {s: PingEncoder(s, cfg.acquisition, cfg.model) for s in Side}
+    period = cfg.acquisition.ping_period_s(cfg.model.max_ping_rate_hz)
+    rng = np.random.default_rng(noise_seed) if noise_seed is not None else None
+    acq = cfg.acquisition
+    bins_r = (acq.range_start_mm / 1000.0
+              + (np.arange(acq.num_results) + 0.5) * acq.bin_size_m)
+    blob, poses = bytearray(), {}
+    for k in range(n_pings):
+        t = k * period
+        px, py, pyaw = traj.pose_at(t)
+        pose = Pose3D(px, py, 0.0, yaw=pyaw)
+        poses[k] = pose
+        if k % nav_every == 0:
+            lat_k, lon_k = anchor.to_latlon(px, py)
+            boot = int(t * 1000) - skew_ms
+            for msg in (
+                    {"type": "LOCAL_POSITION_NED", "time_boot_ms": boot,
+                     "x": py, "y": px, "z": -0.0, "vx": 0.0, "vy": 0.0, "vz": 0.0},
+                    {"type": "GLOBAL_POSITION_INT", "time_boot_ms": boot,
+                     "lat": int(round(lat_k * 1e7)), "lon": int(round(lon_k * 1e7)),
+                     "alt": 5000, "relative_alt": 0, "vx": 0, "vy": 0, "vz": 0,
+                     "hdg": int(round((90.0 - np.degrees(pyaw)) % 360.0 * 100))},
+                    {"type": "ATTITUDE", "time_boot_ms": boot, "roll": 0.0,
+                     "pitch": 0.0, "yaw": float(pyaw), "rollspeed": 0.0,
+                     "pitchspeed": 0.0, "yawspeed": 0.0}):
+                blob += _sim_frame(150, _j.dumps({"header": {"sequence": k % 256},
+                                                  "message": msg}).encode(), src=3)
+        for side in Side:
+            r = rend.render(side, pose, t)
+            if rng is not None:
+                r.ping.power = apply_ping_noise(
+                    r.ping.power, bins_r < r.ping.altitude_m, 1.0, cfg.model,
+                    rng, specular=r.ping.specular, texture=r.ping.texture)
+            enc = encs[side].encode(r.ping)
+            blob += _sim_frame(2198, enc.raw_frame[8:-2],
+                               src=1 if side is Side.PORT else 2)
+    out_path = Path(out_path)
+    out_path.write_bytes(bytes(blob))
+    return out_path, poses
+
+
+def _line_trajectory(path: Path, x0: float, x1: float, y: float,
+                     speed: float = 1.0):
+    """A straight east-bound survey line as a loadable trajectory file."""
+    n = max(int(abs(x1 - x0) / speed) + 1, 2)
+    pts = [[float(i * abs(x1 - x0) / (n - 1) / speed),
+            float(x0 + (x1 - x0) * i / (n - 1)), float(y), 0.0] for i in range(n)]
+    import yaml as _yaml_line
+    path.write_text(_yaml_line.safe_dump({"format": "blueboat_trajectory/1",
+                                          "name": path.stem, "speed": speed,
+                                          "loop": False, "points": pts}))
+    return load_trajectory(path)
 
 
 def _ringing_settle_bin(mean_db, search_max: int = 60, drop_db: float = 10.0,
@@ -100,6 +196,116 @@ def _processor_lock_bin(mean_db, noise_window: int = 20,
                  ).all()):
             return i
     return 0
+
+
+def _baseline_scene(objects=()):
+    """A small deterministic flat scene, used by the render bit-identity
+    fixture and by the object measurement harness.
+
+    Flat sand at -3.0 m over a 20 x 12 m patch at 0.05 m, reflectivity 0.3 --
+    the same geometry section [8] renders its object families on, so the two
+    report comparable numbers."""
+    from blueboat_sss_sim.worldgen.scene import stamp_objects
+    objects = list(objects)
+    g = GridSpec(origin_x=0.0, origin_y=-6.0, resolution=0.05, nx=401, ny=241)
+    h = np.full((241, 401), -3.0)
+    r = np.full((241, 401), 0.3)
+    # The builders' own stamping pass, so the harness renders objects
+    # exactly as a generated world does (the World Builder's path once
+    # skipped a raster these harnesses built by hand, and nothing noticed).
+    ras = stamp_objects(objects, g, h, r)
+    return SceneModel(grid=g, height=h, reflectivity=r,
+                      **ras.scene_kwargs(),
+                      material_id=np.zeros((241, 401), dtype=np.uint8),
+                      material_names=["sand"], objects=objects, walls=[],
+                      seed=0, config_snapshot={})
+
+
+def _reported_db(scene, side, pose, acq, model, seed=11, n_avg=16):
+    """The dB curve a downstream consumer reads back from one ping.
+
+    Not ``Ping.power``: that is the noiseless *diffuse* channel alone, so a
+    measurement taken on it misses the coherent lobe entirely -- which is
+    exactly where an object's highlight lives. This runs the full chain the
+    wire carries (diffuse + specular + texture -> noise -> encoder -> the
+    device's per-ping dB normalisation), which is what the real corpus is
+    measured on. ``n_avg`` pings are averaged in the linear domain to take
+    the speckle down without smoothing the geometry, and the pose ADVANCES
+    along-track between them, by less than half an object length in all.
+    That last part is
+    load-bearing: the renderer's scatterer field is ground-fixed and
+    deterministic, so re-rendering the *same* pose returns the same speckle
+    realisation every time and averages nothing at all -- which read an
+    +8 dB object edge as +20 dB until it was noticed.
+    """
+    r = GeometricRenderer(scene, acq, model)
+    rng = np.random.default_rng(seed)
+    acc = None
+    fwd = (float(np.cos(pose.yaw)), float(np.sin(pose.yaw)))
+    for _k in range(n_avg):
+        step = (_k - 0.5 * (n_avg - 1)) * 0.04
+        pg = r.render(side, Pose3D(pose.x + fwd[0] * step,
+                                   pose.y + fwd[1] * step, pose.z,
+                                   roll=pose.roll, pitch=pose.pitch,
+                                   yaw=pose.yaw), 0.0).ping
+        wc = (acq.range_start_mm / 1000.0
+              + (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+              ) < pg.altitude_m
+        pw = apply_ping_noise(np.array(pg.power), wc, 1.0, model, rng,
+                              specular=pg.specular, texture=pg.texture,
+                              unoccluded=pg.unoccluded, ambient=pg.ambient)
+        acc = pw if acc is None else acc + pw
+    return 10.0 * np.log10(np.maximum(acc / n_avg, 1e-300))
+
+
+def _object_signature(p_obj, p_ref, bin_m, r_obj, rel_thr_db=-3.0):
+    """The measured signature of one object against the same ping without it.
+
+    Reports exactly the four statistics the 2026-09-19 sim-vs-real comparison
+    measured on the real corpus, so the two are directly comparable:
+
+    * ``highlight_db``  peak dB over the object-free seabed, in the 0.6 m
+      before the shadow;
+    * ``shadow_min_db`` / ``shadow_mean_db`` over the shadow run;
+    * ``edge_10_90_m``  the across-track distance from 10 % to 90 % of the
+      shadow depth -- how sharp the object's trailing edge is;
+    * ``shadow_len_m``  the length of the shadow run.
+
+    Real NAFCO box, ``beach_sept/object_boiteVsDistance.svlog``: highlight
+    +2.5 dB at 19 deg grazing and +5.7 dB at 7 deg, shadow -13.6 / -7.9 dB,
+    edge 1.10-1.84 m.
+    """
+    eps = 1e-30
+    rel = 10.0 * np.log10((np.asarray(p_obj) + eps)
+                          / (np.asarray(p_ref) + eps))
+    bins = (np.arange(rel.size) + 0.5) * bin_m
+    past = bins > r_obj - 0.6
+    idx = np.flatnonzero(past & (rel < rel_thr_db))
+    if idx.size == 0:
+        return {"highlight_db": float(rel[past].max()) if past.any() else 0.0,
+                "shadow_min_db": 0.0, "shadow_mean_db": 0.0,
+                "edge_10_90_m": 0.0, "shadow_len_m": 0.0}
+    # The shadow is the first contiguous run below the threshold.
+    s0 = int(idx[0])
+    s1 = s0
+    while s1 + 1 < rel.size and rel[s1 + 1] < rel_thr_db:
+        s1 += 1
+    hl_lo = max(0, s0 - int(round(0.6 / bin_m)))
+    hl = rel[hl_lo:s0 + 1]
+    depth = float(rel[s0:s1 + 1].min())
+    # 10 -> 90 % of the shadow depth, walking out from the highlight peak.
+    k_hl = hl_lo + int(np.argmax(hl)) if hl.size else s0
+    seg = rel[k_hl:s1 + 1]
+
+    def _cross(v):
+        w = np.flatnonzero(seg <= v)
+        return int(w[0]) if w.size else seg.size - 1
+    edge = (_cross(0.9 * depth) - _cross(0.1 * depth)) * bin_m
+    return {"highlight_db": float(hl.max()) if hl.size else 0.0,
+            "shadow_min_db": depth,
+            "shadow_mean_db": float(rel[s0:s1 + 1].mean()),
+            "edge_10_90_m": float(max(edge, 0.0)),
+            "shadow_len_m": float((s1 - s0 + 1) * bin_m)}
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -162,7 +368,7 @@ def main() -> None:
 
     # ---- 2. Sonar simulation along the trajectory ----------------------------
     print("[2] sonar rendering along lawnmower pass")
-    cfg = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+    cfg = _cal_config()
     acq, model = cfg.acquisition, cfg.model
     traj = WaypointTrajectory.load_yaml(FIXTURES / "survey_lawnmower.yaml")
     renderer = GeometricRenderer(scene, acq, model)
@@ -176,6 +382,8 @@ def main() -> None:
     contact_pings = 0
     roundtrip_checked = False
     channels_seen: dict = {s: set() for s in Side}   # side -> byte-34 values
+    headings_seen: dict = {s: set() for s in Side}   # side -> transducer_heading_deg
+    vehicle_heading_err = 0.0                        # vs the pose's compass heading
     altitudes = []
     # Probes carry what a downstream consumer actually sees: the dB curve the
     # device formula recovers from the normalised counts. `pwr_results` itself
@@ -208,6 +416,11 @@ def main() -> None:
                                             texture=r.ping.texture)
             enc = encoders[side].encode(r.ping)
             channels_seen[side].add(enc.raw_frame[34])
+            headings_seen[side].add(round(float(enc.transducer_heading_deg), 6))
+            from blueboat_sss_sim.core.geometry import enu_yaw_to_compass_deg
+            vehicle_heading_err = max(vehicle_heading_err, abs(
+                (float(enc.vehicle_heading_deg) - enu_yaw_to_compass_deg(yaw)
+                 + 180.0) % 360.0 - 180.0))
 
             if not roundtrip_checked:
                 # parse_frame raises on bad magic/id/checksum, so reaching
@@ -256,6 +469,77 @@ def main() -> None:
           channels_seen[Side.PORT] == {0} and channels_seen[Side.STARBOARD] == {1},
           f"port {sorted(channels_seen[Side.PORT])}, "
           f"starboard {sorted(channels_seen[Side.STARBOARD])}")
+    # The device convention on the wire (project_review.md §3.6, CM-2):
+    # transducer_heading_deg is the constant mounting angle, -90 port /
+    # +90 starboard on 100 % of the field corpus, and the absolute compass
+    # heading rides in vehicle_heading_deg only. An absolute bearing here
+    # made SonarView's sign-of-heading side fallback mirror every ping
+    # with a heading in 90..270.
+    check("transducer_heading_deg is -90 on every port ping, +90 on every "
+          "starboard ping; vehicle_heading_deg is the pose's compass heading",
+          headings_seen[Side.PORT] == {-90.0}
+          and headings_seen[Side.STARBOARD] == {90.0}
+          and vehicle_heading_err < 1e-6,
+          f"port {sorted(headings_seen[Side.PORT])}, starboard "
+          f"{sorted(headings_seen[Side.STARBOARD])}, vehicle heading error "
+          f"{vehicle_heading_err:.1e} deg")
+
+    # ---- render bit-identity fixture -----------------------------------
+    # Every stage of the 2026-09-19 acoustic rework lands behind a knob whose
+    # default reproduces today's arrays exactly, so that "which change moved
+    # which number" stays auditable (NC #6). This is the check that proves it:
+    # four noiseless pings, frozen to a file. A deliberate model change
+    # rebaselines it by deleting the fixture; an accidental one fails here.
+    _bl_objs = [PlacedObject(0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425,
+                             0.323, 0.0, 0.18, "pp_shell", transmission=0.11)]
+    _bl_cases = [("legacy_port", scene, Side.PORT, Pose3D(12.0, 8.0, 0.0)),
+                 ("legacy_stbd", scene, Side.STARBOARD, Pose3D(12.0, 8.0, 0.0)),
+                 ("box_port", _baseline_scene(_bl_objs), Side.PORT,
+                  Pose3D(10.0, 0.0, 0.0)),
+                 ("flat_port", _baseline_scene(), Side.PORT,
+                  Pose3D(10.0, 0.0, 0.0))]
+    _bl_now = {}
+    for _nm, _sc, _sd, _ps in _bl_cases:
+        _pg = GeometricRenderer(_sc, acq, model).render(_sd, _ps, 0.0).ping
+        for _fld in ("power", "specular", "unoccluded", "texture"):
+            _v = getattr(_pg, _fld, None)
+            if _v is not None:
+                _bl_now[f"{_nm}.{_fld}"] = np.asarray(_v, dtype=np.float64)
+    _bl_path = FIXTURES / "render_baseline_v1.npz"
+    if not _bl_path.exists():
+        np.savez_compressed(_bl_path, **_bl_now)
+        check("render baseline fixture written (first run)", True,
+              f"{len(_bl_now)} arrays -> {_bl_path.name}")
+    else:
+        # To float precision, not bit-for-bit: the workspace venv's numpy 2
+        # and the system numpy 1.26 round a few sums differently (measured
+        # 7e-16 of an array's scale, a few ULP), and the gate runs on both.
+        # 1e-12 of the scale is four decades above that noise and many below
+        # any model change -- which is what the check exists to catch.
+        def _bl_same(a, b):
+            return a.shape == b.shape and bool(
+                np.abs(a - b).max(initial=0.0)
+                <= 1e-12 * max(float(np.abs(b).max(initial=0.0)), 1e-300))
+        _bl_old = np.load(_bl_path)
+        _bl_bad = [k for k in sorted(set(_bl_now) | set(_bl_old.files))
+                   if k not in _bl_now or k not in _bl_old.files
+                   or not _bl_same(_bl_now[k], _bl_old[k])]
+        _bl_worst = ""
+        if _bl_bad:
+            _k = _bl_bad[0]
+            if _k in _bl_now and _k in _bl_old.files:
+                if _bl_now[_k].shape != _bl_old[_k].shape:
+                    _bl_worst = (f"; {_k} changed shape "
+                                 f"{_bl_old[_k].shape} -> {_bl_now[_k].shape}")
+                else:
+                    _bl_worst = (f"; worst {_k} max|d| "
+                                 f"{np.abs(_bl_now[_k] - _bl_old[_k]).max():.3g}")
+        check("the renderer reproduces the frozen baseline to float "
+              "precision (delete test/fixtures/render_baseline_v1.npz to "
+              "rebaseline a deliberate model change)",
+              not _bl_bad,
+              f"{len(_bl_now)} arrays, {len(_bl_bad)} differ{_bl_worst}"
+              if _bl_bad else f"{len(_bl_now)} arrays")
 
     # ---- 2b. FBR structure (what downstream bottom-tracking locks onto) ----
     print("[2b] first-bottom-return structure")
@@ -314,18 +598,25 @@ def main() -> None:
           and abs(_p(125_639) - 0.170) < 0.0015,
           f"15 m {_p(15_000)*1000:.1f} ms, 30 m {_p(30_000)*1000:.1f} ms, "
           f"95.6 m {_p(95_646)*1000:.1f} ms, 125.6 m {_p(125_639)*1000:.1f} ms")
-    # The transmit pulse follows the device's sample-period law (1.2 sample
-    # periods at 600 bins, 1.5 at 1200, 44.3 us floor), reproducing every
-    # pulse_duration_sec the corpus reports.
-    _pl = lambda mm, n: dataclasses.replace(  # noqa: E731
-        acq, range_length_mm=mm, num_results=n).pulse_duration_s()
-    check("pulse duration follows the device law (44.3 / 106.4 / 159.6 us)",
-          abs(_pl(18_400, 1200) - 44.3e-6) < 1.5e-6
-          and abs(_pl(40_000, 600) - 106.4e-6) < 2e-6
-          and abs(_pl(95_646, 1200) - 159.6e-6) < 2e-6
-          and abs(_pl(80_000, 600) - 212.8e-6) < 2e-6,
-          f"{_pl(18_400, 1200)*1e6:.1f} / {_pl(40_000, 600)*1e6:.1f} / "
-          f"{_pl(95_646, 1200)*1e6:.1f} / {_pl(80_000, 600)*1e6:.1f} us")
+    # The transmit pulse follows the device law max(44.3 us, p x 2R/c),
+    # reproducing the pulse_duration_sec of every corpus recording (measured
+    # 2026-09-28; frozen here so no corpus is needed): the ROS driver's 0.002,
+    # SonarView's 1.5 / num_results, and the floor at short range.
+    _pl = lambda mm, n, pp: dataclasses.replace(  # noqa: E731
+        acq, range_length_mm=mm, num_results=n,
+        pulse_len_percent=pp).pulse_duration_s()
+    _pulse_corpus = [  # (range mm, bins, pulse_len_percent, measured us)
+        (40_000, 600, 0.002, 106.4), (80_000, 600, 0.002, 212.8),
+        (20_000, 600, 1.5 / 600, 66.5), (72_270, 1200, 1.5 / 1200, 119.7),
+        (39_940, 1200, 1.5 / 1200, 66.5), (95_646, 1200, 1.5 / 1200, 159.6),
+        (27_740, 1200, 1.5 / 1200, 46.6), (19_710, 1200, 1.5 / 1200, 44.3),
+        (18_400, 1200, 1.5 / 1200, 44.3)]
+    _pulse_err = max(abs(_pl(mm, n, pp) * 1e6 - us)
+                     for mm, n, pp, us in _pulse_corpus)
+    check("pulse duration follows the device law max(44.3 us, p x 2R/c) on "
+          "all nine corpus settings",
+          _pulse_err < 1.5, f"worst {_pulse_err:.2f} us over "
+          f"{len(_pulse_corpus)} settings")
     _enc_cnt = PingEncoder(Side.PORT, acq, model)
     _n1 = _enc_cnt.encode(r.ping).ping_number
     _enc_cnt.reconfigure(dataclasses.replace(acq, range_length_mm=30_000), model)
@@ -352,10 +643,61 @@ def main() -> None:
     # still catching a moved anchor (NC #6). Never widen it to make a fit
     # pass. `calibration_db_offset` itself is checked against the corpus at
     # matched geometry in [2f].
-    check("max_pwr_db sits on the measured level anchor (67.85 +- 0.5 dB)",
-          abs(float(np.mean(fbr_maxdb)) - 67.85) <= 0.5,
+    #
+    # 2026-09-18: 67.85 -> 66.10, because the level constants moved once,
+    # together, on a two-altitude fit (calibration_db_offset 97.2 -> 81.1,
+    # tvg_compensation 0 -> 0.30, specular_spreading_exponent 4 -> 2,
+    # specular_strength 30 -> 12; docs/sonar_model.md section 6). The device's
+    # own law for this quantity, measured over 19 gain-4 corpus files, is
+    # 66.60 - 11.28*log10(altitude) dB -- 60.1 dB at this fixture's altitude.
+    # The seabed *level* now matches the corpus within 0.6 dB at 1.4 m and at
+    # 7.3 m; the peak still reads ~6 dB hot, which is the documented residual.
+    check("max_pwr_db sits on the measured level anchor (66.10 +- 0.5 dB)",
+          abs(float(np.mean(fbr_maxdb)) - 66.10) <= 0.5,
           f"mean {np.mean(fbr_maxdb):.2f} dB at {mean_alt:.1f} m altitude "
-          f"(calibration_db_offset {model.calibration_db_offset:g} dB)")
+          f"(calibration_db_offset {model.calibration_db_offset:g} dB; the "
+          f"corpus law gives {66.60 - 11.28 * np.log10(mean_alt):.1f} dB "
+          f"there)")
+    # The altitude law of that same quantity. The device's own, measured over
+    # every gain-4 ping of the 19 corpus recordings (0.92-12.19 m altitude),
+    # is 66.60 - 11.28*log10(alt) dB with 1.57 dB rms; what makes the
+    # simulator follow it is the coherent component spreading once over the
+    # folded path (`specular_spreading_exponent` 2.0) rather than twice like
+    # the diffuse field -- sharing r^-4 gave 20-27 dB per decade, i.e. a
+    # simulator that was right at one altitude and nowhere else. This gate is
+    # the one that fails if that split is undone; it needs no corpus.
+    def _peak_at(alt_m: float) -> float:
+        g_a = GridSpec(-40.0, -40.0, 0.25, 321, 321)
+        h_a = np.full((g_a.ny, g_a.nx), -(alt_m + model.sensor_depth_m))
+        sc_a = SceneModel(grid=g_a, height=h_a,
+                          reflectivity=np.full(h_a.shape, 0.55),
+                          material_id=np.zeros(h_a.shape, dtype=np.uint8),
+                          material_names=["sand"], objects=[], walls=[],
+                          seed=0, config_snapshot={})
+        rr_a = GeometricRenderer(sc_a, acq, model)
+        en_a = PingEncoder(Side.PORT, acq, model)
+        rg_a = np.random.default_rng(7)
+        bins_a = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+        pk = []
+        for k in range(3):
+            pg_a = rr_a.render(Side.PORT, Pose3D(0.3 * k, 0.0, 0.0), 0.0).ping
+            pg_a.power = apply_ping_noise(pg_a.power, bins_a < pg_a.altitude_m,
+                                          1.0, model, rg_a,
+                                          specular=pg_a.specular,
+                                          texture=pg_a.texture)
+            pk.append(en_a.encode(pg_a).max_pwr_db)
+        return float(np.median(pk))
+    alts_a = np.array([1.0, 1.8, 3.2, 5.6, 10.0])
+    pk_a = np.array([_peak_at(a) for a in alts_a])
+    A_a = np.vstack([np.ones(alts_a.size), np.log10(alts_a)]).T
+    c0_a, sl_a = np.linalg.lstsq(A_a, pk_a, rcond=None)[0]
+    check("the reported peak follows the corpus's altitude law (the coherent "
+          "component spreads once, the diffuse twice)",
+          abs(sl_a + 11.28) < 2.5 and abs(c0_a - 66.60) < 8.0,
+          f"sim {c0_a:.1f} {sl_a:+.1f}*log10(alt); device 66.6 -11.3 "
+          f"(19 files, rms 1.6). Level residual {c0_a - 66.60:+.1f} dB -- the "
+          f"seabed itself matches within 0.6 dB (docs/sonar_model.md s6)")
+
     # Speckle lives in the LINEAR power field. The encoded array is a dB axis,
     # where Exp(1) does not have CV 1 -- checking it there would silently
     # relax the statistic NC #5 makes load-bearing.
@@ -432,6 +774,25 @@ def main() -> None:
     t1 = _corr(tex_db[:-1], tex_db[1:])
     check("texture is correlated along range (corpus lag-1 0.30-0.68)",
           0.2 < r1 < 0.7, f"lag-1 range correlation {r1:.2f}")
+    # The range envelope follows the acquisition (pulse + receive filter +
+    # one sample, 2026-09-28), so the correlation does too: the corpus reads
+    # 0.29 at 600 bins / 0.002 and 0.46 at 1200 / 0.00125 (20 m, beach day).
+    acq_hi = dataclasses.replace(acq, range_length_mm=20_000, num_results=1200,
+                                 pulse_len_percent=0.00125)
+    rend_hi = GeometricRenderer(scene, acq_hi, model)
+    tex_hi = np.stack([rend_hi.render(
+        Side.PORT, Pose3D(*traj.pose_at(k * period)[:2], 0.0,
+                          yaw=traj.pose_at(k * period)[2]),
+        k * period).ping.texture for k in range(40)])
+    mid_hi = slice(int(0.3 * 1200), int(0.7 * 1200))
+    tex_hi_db = 10 * np.log10(tex_hi[:, mid_hi] + 1e-9)
+    r1_hi = _corr(tex_hi_db[:, :-1], tex_hi_db[:, 1:])
+    check("range correlation follows the acquisition as the device's does "
+          "(corpus 0.29 at 600 / 0.002, 0.46 at 1200 / 0.00125)",
+          renderer.smear_bins() == 3 and rend_hi.smear_bins() == 5
+          and abs(r1 - 0.29) < 0.06 and abs(r1_hi - 0.46) < 0.06,
+          f"{renderer.smear_bins()} bins -> {r1:.2f}, "
+          f"{rend_hi.smear_bins()} bins -> {r1_hi:.2f}")
     check("texture is correlated along track (corpus lag-1 0.36-0.66)",
           0.12 < t1 < 0.7, f"lag-1 along-track correlation {t1:.2f} at "
           f"{traj.speed if hasattr(traj, 'speed') else float('nan'):.2f} m/s")
@@ -511,11 +872,12 @@ def main() -> None:
     # ---- 2e. calibration identifiability ---------------------------------------
     # What a sim-to-real calibration fit can and cannot determine, and from
     # which statistic. These are properties of the model's parameterisation
-    # rather than of a particular tuning, and the capture-day fit plan
-    # (.claude/specs/sim-to-real-calibration-WITH_SVLOG.md) rests on them: if
-    # sonar/acoustics.py or the encoder ever changes the range law or the
-    # count mapping, these fail and the capture plan is revisited, instead of
-    # the fit silently returning a confident meaningless answer.
+    # rather than of a particular tuning, and every calibration this project
+    # has done rests on them: if sonar/acoustics.py or the encoder ever
+    # changes the range law or the count mapping, these fail and the fit is
+    # revisited, instead of silently returning a confident meaningless
+    # answer. The 2026-09-18 two-altitude fit (docs/sonar_model.md section 6)
+    # is the current one; the ridge below is why it needed two altitudes.
     print("[2e] calibration identifiability (what one capture can fit)")
 
     bin_r = (acq.range_start_mm / 1000.0
@@ -581,13 +943,16 @@ def main() -> None:
     #     capture must span >= 2 altitudes (grazing angle at a given slant
     #     range moves the Lambert term but not the TVG term), or one of the
     #     two must be fixed independently.
-    # The washing pair is a property of the range law, so it moved when the
-    # law was fitted: at spreading 4.0 / tvg 0.0 it is tvg 0.20 vs lambert
-    # 0.10, not the tvg 0.80 vs lambert 1.945 the old law washed at.
+    # The washing pair is a property of the range law, so it moves whenever
+    # the law is fitted: against the 2026-09-18 base (tvg 0.30, lambert 1.0)
+    # it is tvg 0.20 vs lambert 1.45. It was tvg 0.20 vs lambert 0.10 against
+    # the tvg-0 law before that, and tvg 0.80 vs lambert 1.945 before *that*.
+    # The ridge itself is what made the single-altitude fit return a confident
+    # wrong answer, and why the current constants were fitted on two.
     c_tvg = _mean_db(_pings(dataclasses.replace(model,
                                                 tvg_compensation=0.20), 150))
     c_lam = _mean_db(_pings(dataclasses.replace(model,
-                                                lambert_exponent=0.10), 150))
+                                                lambert_exponent=1.45), 150))
     c_off = _mean_db(_pings(dataclasses.replace(model,
                                                 lambert_exponent=2.6), 150))
 
@@ -604,7 +969,7 @@ def main() -> None:
     # in principle.
     check("tvg_compensation/lambert_exponent confounded at one altitude",
           p_match <= 0.4 and p_off > 1.0,
-          f"tvg 0.20 vs lambert 0.10: {p_match:.3f} dB p-p over 6.0-14.5 m "
+          f"tvg 0.20 vs lambert 1.45: {p_match:.3f} dB p-p over 6.0-14.5 m "
           f"(under the 0.67 dB reduction floor); vs a mismatched lambert 2.6: "
           f"{p_off:.2f} dB p-p (clearly separable)")
 
@@ -744,6 +1109,60 @@ def main() -> None:
                             f"beyond {v.beyond_minus_before_db:+.1f} far "
                             f"{v.far_minus_before_db:+.1f} dB band "
                             f"{v.band_width_m:.2f} m" for v in got))
+        # Reflectivity from a real beach recording (2026-09-16): the whole
+        # swath inverts to a map with a meaningful spread, cells averaged
+        # over enough bins that their dB spread is the single-look 5.6 dB.
+        _bath1 = corpus / "beach_sept" / "bath1.svlog"
+        if _bath1.is_file():
+            import time as _time
+            from blueboat_sss_sim.analysis.backscatter import mu_raster as _mu2f
+            from blueboat_sss_sim.analysis.backscatter import summarize as _ms2f
+            from blueboat_sss_sim.analysis.bathymetry import recording_extent as _rx2f
+            _ext = _rx2f(_bath1)
+            _lat_c = float(_ext.get("lat_c", 0.5 * (_ext.get("lat_min", 0.0)
+                                                    + _ext.get("lat_max", 0.0))))
+            _lon_c = float(_ext.get("lon_c", 0.5 * (_ext.get("lon_min", 0.0)
+                                                    + _ext.get("lon_max", 0.0))))
+            _t2f = _time.time()
+            _r2f = _mu2f(_bath1, GeoAnchor(lat0=_lat_c, lon0=_lon_c), 1.0)
+            _s2f = _ms2f(_r2f)
+            _dt2f = _time.time() - _t2f
+            _spread2f = float(np.nanmedian(_r2f.spread_db[_r2f.count >= 200]))
+            from blueboat_sss_sim.analysis.shading import (calibrate_gain as _cg2f,
+                                                           relief_quality as _rq2f,
+                                                           relief_samples as _rs2f)
+            from blueboat_sss_sim.analysis.bathymetry import survey_track as _stk2f
+            _a2f = GeoAnchor(lat0=_lat_c, lon0=_lon_c)
+            _t2f_r = _time.time()
+            _rel2f = _rs2f(_bath1, _a2f, bin_step=2)
+            _res2f = _stk2f(_bath1, _a2f)
+            _snd2f = {"east": _res2f.soundings.east, "north": _res2f.soundings.north,
+                      "depth": _res2f.soundings.depth, "t_ms": _res2f.soundings.t_ms}
+            _g2f, _gi2f = _cg2f(_rel2f, _snd2f)
+            _q2f = _rq2f(_rel2f, _snd2f)
+            _dt2f_r = _time.time() - _t2f_r
+            check("corpus: the beach recording's shading yields a relief field "
+                  "over most of the survey hull, self-consistent between "
+                  "passes, and the tie lines calibrate its amplitude",
+                  _q2f["coverage_fraction"] > 0.15 and _q2f["rms_m"] < 1.0
+                  and (_q2f["overlap_rms_m"] or 0.0) < 0.5
+                  and _gi2f["gain_pairs"] >= 30 and 0.1 <= _g2f <= 3.0
+                  and _dt2f_r < 120.0,
+                  f"{100 * _q2f['coverage_fraction']:.0f} % of the hull, "
+                  f"{_q2f['cells']} cells, rms {_q2f['rms_m']:.2f} m, overlap "
+                  f"{_q2f['overlap_rms_m']:.2f} m, gain x{_g2f:.2f} on "
+                  f"{_gi2f['gain_pairs']} pairs, {_dt2f_r:.1f} s")
+            check("corpus: the beach recording inverts to a reflectivity map "
+                  "(thousands of cells, a 6-25 dB p5-p95 spread, single-look "
+                  "cell statistics) in a few seconds",
+                  _s2f["cells"] > 2000
+                  and 6.0 < (_s2f["mu_db_p95"] - _s2f["mu_db_p5"]) < 25.0
+                  and 3.0 < _spread2f < 9.0 and _dt2f < 60.0,
+                  f"{_s2f['cells']} cells, p5-p95 "
+                  f"{_s2f['mu_db_p95'] - _s2f['mu_db_p5']:.1f} dB, cell spread "
+                  f"{_spread2f:.1f} dB, model residual slope "
+                  f"{_s2f['angle_slope_db_per_decade']:+.1f} dB/decade, "
+                  f"{_dt2f:.1f} s")
 
     print("[4] shallow-regime world config")
     scene_sh = legacy_world(PKG_ROOT / "config" / "shallow_water_world.yaml",
@@ -820,17 +1239,28 @@ def main() -> None:
 
     # The point of the shallow config: shadow length goes as h*R/altitude, so
     # the same object casts a longer shadow from lower down.
-    ratios = []
+    # Since 2026-09-18 `shadow_bins` is read off the rendered visibility mask
+    # rather than from `h*r/altitude`, so an object whose shadow ends inside
+    # its own footprint -- a drink can, a rope, a low wide blob -- reports
+    # none, exactly as the picture shows none. The pairing therefore runs
+    # over the objects that cast a *resolved* shadow (over one bin) at both
+    # altitudes; the flat-bottom formula reported a number for every object,
+    # including those.
+    ratios, unresolved = [], 0
     for key in set(shad_sh) & set(shad_4m):
         d4 = float(np.median(shad_4m[key]))
-        if d4 > 0:
-            ratios.append(float(np.median(shad_sh[key])) / d4)
+        dsh = float(np.median(shad_sh[key]))
+        if d4 > 1.0 and dsh > 1.0:
+            ratios.append(dsh / d4)
+        else:
+            unresolved += 1
     check("shadows lengthen at the shallower altitude",
-          len(ratios) >= 5 and float(np.median(ratios)) > 1.3
+          len(ratios) >= 3 and float(np.median(ratios)) > 1.3
           and min(ratios) > 1.0,
           f"{len(ratios)} objects paired, median x{np.median(ratios):.2f}, "
           f"range x{min(ratios):.2f}-x{max(ratios):.2f} "
-          f"({alt_4m.mean():.2f} m -> {alt_sh.mean():.2f} m altitude)")
+          f"({alt_4m.mean():.2f} m -> {alt_sh.mean():.2f} m altitude); "
+          f"{unresolved} cast no resolved shadow at either")
 
     # ---- 4b. Device-facing acquisition constants -------------------------------
     # These are the numbers this module and the real stack must not silently
@@ -839,6 +1269,40 @@ def main() -> None:
     # being explicit and traceable to a named profile -- that is what is
     # gated here.
     print("[4b] acquisition constants: auto-gain, ladder, profile binding")
+    # The reflectivity and relief inversions (analysis/backscatter.py,
+    # analysis/shading.py) build a bare SonarModelConfig() -- they invert a
+    # *recording* through the package's calibrated constants, not through
+    # whatever profile a particular run happens to use. That is correct only
+    # while the shipped default profile and the dataclass agree; if they ever
+    # drift, the forward model and the model that inverts it become two
+    # different models and [4c] measures nothing. Pin the invariant.
+    import dataclasses as _dc4
+    from blueboat_sss_sim.sonar.config import SonarModelConfig as _SMC4
+    _dflt4 = _SMC4()
+    _yml4 = _y1.safe_load(
+        (PKG_ROOT / "config" / "default_sonar.yaml").read_text())["model"]
+    _drift4 = []
+    for _k4, _v4 in _yml4.items():
+        if not hasattr(_dflt4, _k4):
+            _drift4.append(f"{_k4}: not a model field")
+            continue
+        _d4 = getattr(_dflt4, _k4)
+        _same4 = (abs(float(_v4) - float(_d4)) < 1e-12
+                  if isinstance(_d4, (int, float))
+                  and not isinstance(_d4, bool) else _v4 == _d4)
+        if not _same4:
+            _drift4.append(f"{_k4}: yaml {_v4!r} vs dataclass {_d4!r}")
+    check("config/default_sonar.yaml's model block equals the dataclass "
+          "defaults (the inversion tools build a bare SonarModelConfig)",
+          not _drift4,
+          f"{len(_yml4)} keys, {len(_dc4.fields(_dflt4))} fields, "
+          + ("; ".join(_drift4) if _drift4 else "no drift"))
+    from blueboat_sss_sim.sonar.config import AcquisitionParams as _AP4
+    check("... and its acquisition block equals the AcquisitionParams defaults",
+          _dc4.asdict(_AP4()) == _dc4.asdict(SonarConfig.from_yaml(
+              PKG_ROOT / "config" / "default_sonar.yaml").acquisition),
+          ", ".join(f"{k} {v}" for k, v in _dc4.asdict(_AP4()).items()))
+
 
     # gain_index -1 carries the real node's meaning (device auto-gain). It must
     # produce a defined, reportable gain: the profile field is uint16, so a
@@ -910,9 +1374,43 @@ def main() -> None:
           and len(ACQUISITION_ARGS) == 6,
           ", ".join(ACQUISITION_ARGS))
     check("launch binds the named sonar profile, not node defaults",
-          bundle_acq == dataclasses.asdict(acq),
+          bundle_acq == dataclasses.asdict(
+              SonarConfig.from_yaml(profile_yaml).acquisition),
           f"range_length_mm {bundle_acq['range_length_mm']}, "
           f"gain_index {bundle_acq['gain_index']}")
+    # What a Gazebo run started from the station gets when nothing is passed
+    # (MCS -> full_mission_launch.py -> this profile): the device's best
+    # acquisition, which is also the real driver's default (2026-09-28).
+    _best = {"range_start_mm": 0, "range_length_mm": 20000, "msec_per_ping": 0,
+             "gain_index": -1, "num_results": 1200, "pulse_len_percent": 0.00125}
+    check("the shipped default profile is the device's best acquisition: "
+          "20 m, auto-gain, 1200 bins, pulse 0.00125",
+          bundle_acq == _best,
+          ", ".join(f"{k} {v}" for k, v in bundle_acq.items()))
+    # ... and equal to what the real driver declares, read from its source
+    # (never imported -- CM-3). Skips visibly without the neighbour checkout.
+    _real_node = (PKG_ROOT.parents[1] / "BlueBoat-SSS" / "blueboat_sss" / "src"
+                  / "sss_node.py")
+    if _real_node.is_file():
+        _decl = {m.group(1): float(m.group(2)) for m in re.finditer(
+            r'declare_parameter\("(\w+)",\s*(-?[\d.]+)\)',
+            _real_node.read_text())}
+        check("the simulator's default acquisition equals the real "
+              "sss_node.py's declared defaults (CM-2)",
+              all(abs(_decl.get(k, float("nan")) - v) < 1e-12
+                  for k, v in _best.items()),
+              ", ".join(f"{k} {_decl.get(k)}" for k in _best))
+    else:
+        print(f"  SKIP: real sss_node.py not found at {_real_node}")
+    # The node's own declared defaults (used only when a launch passes
+    # nothing) are the same six values.
+    _sim_node = (PKG_ROOT / "blueboat_sss_sim" / "ros" / "sss_sim_node.py")
+    _sim_decl = {m.group(1): float(m.group(2)) for m in re.finditer(
+        r'declare_parameter\("(\w+)",\s*(-?[\d.]+)\)', _sim_node.read_text())}
+    check("sss_sim_node declares the same six defaults",
+          all(abs(_sim_decl.get(k, float("nan")) - v) < 1e-12
+              for k, v in _best.items()),
+          ", ".join(f"{k} {_sim_decl.get(k)}" for k in _best))
     over = resolve_acquisition(profile_yaml,
                                {"range_length_mm": "30000", "gain_index": "-1",
                                 "num_results": "", "pulse_len_percent": "0.004"})
@@ -938,11 +1436,82 @@ def main() -> None:
           cov.model == model
           and cov.acquisition.range_length_mm == 30_000
           and dataclasses.asdict(dataclasses.replace(
-              cov.acquisition, range_length_mm=acq.range_length_mm))
-          == dataclasses.asdict(acq),
+              cov.acquisition, range_length_mm=bundle_acq["range_length_mm"]))
+          == bundle_acq,
           f"{cov.acquisition.range_length_mm} mm, "
           f"{cov.acquisition.bin_size_m*1000:.0f} mm bins, "
           f"free-run {cov.acquisition.ping_period_s(0.0)*1000:.0f} ms")
+    # Fault injection (2026-09-18, P6-10): the four downstream paths a clean
+    # simulation never takes. Each one is something the corpus shows, and each
+    # must reach the wire -- the frame, not just the message.
+    fi = SonarConfig.from_yaml(PKG_ROOT / "config" / "fault_injection_sonar.yaml")
+    _fi_m = dataclasses.replace(fi.model, fault_gain_walk_pings=0,
+                                fault_counter_reset_pings=0,
+                                fault_counter_offset=0,
+                                fault_channel_255=False,
+                                dropped_ping_prob=model.dropped_ping_prob)
+    enc_p8 = PingEncoder(Side.PORT, acq, fi.model)
+    enc_s8 = PingEncoder(Side.STARBOARD, acq, fi.model)
+    walk = dataclasses.replace(fi.model, fault_gain_walk_pings=3,
+                               fault_counter_reset_pings=7)
+    enc_w8 = PingEncoder(Side.PORT, acq, walk)
+    ping8 = GeometricRenderer(scene, acq, model).render(
+        Side.PORT, Pose3D(*traj.pose_at(60.0)[:2], 0.0), 60.0).ping
+    seq8 = [enc_w8.encode(ping8) for _ in range(9)]
+    e_p8, e_s8 = enc_p8.encode(ping8), enc_s8.encode(ping8)
+    check("the fault-injection profile exercises the downstream paths: the "
+          "gain walks the measured ladder, the counter restarts and carries "
+          "a per-device offset, and side identity falls back to the mounting "
+          "angle -- all on the wire",
+          _fi_m == model
+          and [e.gain_index for e in seq8][:6] == [4, 4, 4, 5, 5, 5]
+          and [e.ping_number for e in seq8][:8] == [1, 2, 3, 4, 5, 6, 1, 2]
+          # a power cycle restarts the walk with the counter, as it would
+          and [e.gain_index for e in seq8][6:] == [4, 4, 4]
+          and e_p8.ping_number == 1 and e_s8.ping_number == 61
+          and e_p8.channel_number == 255 and e_p8.raw_frame[34] == 255
+          and e_p8.transducer_heading_deg == -90.0
+          and fi.model.dropped_ping_prob > 0.0,
+          f"gains {[e.gain_index for e in seq8[:6]]}, counter "
+          f"{[e.ping_number for e in seq8[:8]]}, starboard starts at "
+          f"{e_s8.ping_number}, channel {e_p8.channel_number}")
+
+    # The near-field knob and what rules it out (2026-09-18, P6-8): an
+    # unfocused 0.38 m array would set the along-track footprint across the
+    # whole swath, and the corpus's own texture correlation says it does not.
+    # The knob exists, defaults to off, and widens the footprint when set.
+    _ap_r = GeometricRenderer(scene, acq,
+                              dataclasses.replace(model, array_length_m=0.35))
+    check("the near-field aperture floor is available, off by default, and "
+          "widens the along-track footprint when set",
+          model.array_length_m == 0.0
+          and abs(_ap_r._line_pitch  # noqa: SLF001 -- the footprint itself
+                  - 0.35 / (model.alongtrack_beam_lines - 1)) < 1e-9
+          and GeometricRenderer(scene, acq, model)._line_pitch  # noqa: SLF001
+              < 0.35 / (model.alongtrack_beam_lines - 1),
+          f"line pitch {GeometricRenderer(scene, acq, model)._line_pitch*1000:.0f} mm "  # noqa: SLF001
+          f"at r*theta, {_ap_r._line_pitch*1000:.0f} mm with a 0.35 m array")  # noqa: SLF001
+
+    # The shallow-beach profile (2026-09-18) is the same one knob at a time:
+    # the range the beach day ran, plus the two return paths that only reach
+    # a shadow at a metre of altitude.
+    shb = SonarConfig.from_yaml(PKG_ROOT / "config" / "shallow_beach_sonar.yaml")
+    _shb_m = dataclasses.replace(shb.model, multipath_enabled=False,
+                                 surface_mirror_enabled=False)
+    _shipped = SonarConfig.from_yaml(PKG_ROOT / "config"
+                                     / "default_sonar.yaml").acquisition
+    check("the shallow-beach profile differs from the shipped default in the "
+          "two shallow-water paths alone (the beach day's 20 m / 1200 bins)",
+          shb.acquisition.range_length_mm == 20_000
+          and shb.acquisition.num_results == 1200
+          and shb.model.multipath_enabled and shb.model.surface_mirror_enabled
+          and _shb_m == model
+          and dataclasses.asdict(shb.acquisition)
+          == dataclasses.asdict(_shipped),
+          f"{shb.acquisition.range_length_mm} mm, n="
+          f"{shb.acquisition.num_results}, second-bottom ghost and surface "
+          f"mirror on, everything else the shipped default")
+
     rend_cov = GeometricRenderer(scene, cov.acquisition, model)
     enc_cov = PingEncoder(Side.PORT, cov.acquisition, model)
     rng_cov = np.random.default_rng(1)
@@ -1052,7 +1621,7 @@ def main() -> None:
         buf += pid.to_bytes(2, "little") + bytes([src, 0]) + payload
         return bytes(buf + (sum(buf) & 0xFFFF).to_bytes(2, "little"))
 
-    met_cfg = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+    met_cfg = _cal_config()
     met_rend = GeometricRenderer(met_scene, met_cfg.acquisition, met_cfg.model)
     met_enc = {s: PingEncoder(s, met_cfg.acquisition, met_cfg.model)
                for s in Side}
@@ -1125,6 +1694,232 @@ def main() -> None:
           f"{len(sv_obs.observations)} observations from "
           f"{sv_obs.ping_cycles} located pings")
 
+    # The reader's channel-255 fallback is the wrapped sign of the bearing
+    # (the rule the GCS and the processor share): the device's -90 / +90,
+    # and an older simulator log's absolute 270 (port, boat heading north).
+    _sfp = svlog_reader._side_from_packet
+
+    def _sfp_raises(h):
+        try:
+            _sfp({"channel_number": 255, "transducer_heading_deg": h})
+        except ValueError:
+            return True
+        return False
+    check("svlog reader resolves channel 255 by the wrapped bearing sign",
+          _sfp({"channel_number": 255, "transducer_heading_deg": -90.0}) is Side.PORT
+          and _sfp({"channel_number": 255, "transducer_heading_deg": 90.0}) is Side.STARBOARD
+          and _sfp({"channel_number": 255, "transducer_heading_deg": 270.0}) is Side.PORT
+          and _sfp({"channel_number": 255, "transducer_heading_deg": 450.0}) is Side.STARBOARD
+          and _sfp({"channel_number": 0, "transducer_heading_deg": 90.0}) is Side.PORT
+          and _sfp_raises(0.0) and _sfp_raises(float("nan")),
+          "-90/270 -> port, 90/450 -> starboard, 0 / NaN -> unresolved")
+
+    # Backscatter placement uses the pose's look direction (vehicle heading
+    # rotated side.sign*90), never the wire field: port samples lie abeam
+    # to port of the nearest track pose and starboard ones to starboard.
+    from blueboat_sss_sim.analysis.backscatter import backscatter_bins
+    _bins4c = backscatter_bins(svlog_path, anchor, bin_step=7)
+    bs_e, bs_n = _bins4c.east, _bins4c.north
+    pk = np.array([[poses[k].x, poses[k].y, poses[k].yaw] for k in range(200)])
+    yaw_spread = float(np.degrees(np.ptp(np.unwrap(pk[:, 2]))))
+    left = right = off_beam = 0
+    for e_s, n_s in zip(bs_e, bs_n):
+        k = int(np.argmin(np.hypot(pk[:, 0] - e_s, pk[:, 1] - n_s)))
+        de, dn = e_s - pk[k, 0], n_s - pk[k, 1]
+        along = np.cos(pk[k, 2]) * de + np.sin(pk[k, 2]) * dn
+        across = -np.sin(pk[k, 2]) * de + np.cos(pk[k, 2]) * dn
+        if abs(along) > 0.5:
+            off_beam += 1
+        elif across > 0.0:
+            left += 1
+        else:
+            right += 1
+    n_bs = len(bs_e)
+    check("svlog backscatter bins lie abeam of the track, port to the "
+          "left and starboard to the right",
+          n_bs >= 100 and yaw_spread < 5.0 and off_beam <= 0.05 * n_bs
+          and min(left, right) >= 0.4 * n_bs,
+          f"{n_bs} bins over a {yaw_spread:.1f} deg leg: {left} left, "
+          f"{right} right, {off_beam} off-beam")
+
+    # Reflectivity from a recording (analysis/backscatter.py): the
+    # calibrated forward model inverted per bin must give the renderer's
+    # own reflectivity back -- on a flat uniform-sand floor surveyed with
+    # the node's speckle and floor, the cell estimate is 10 log10(0.55).
+    from blueboat_sss_sim.analysis.backscatter import (InversionConfig as _Inv,
+                                                       mu_raster as _mu,
+                                                       summarize as _msum)
+    from blueboat_sss_sim.worldgen.depth.compose import (compose as _cmp_bs,
+                                                         source_layer as _src_bs)
+    from blueboat_sss_sim.worldgen.materials import (REFLECTIVITY_MAX,
+                                                     MaterialLibrary as _ML_bs)
+    from blueboat_sss_sim.worldgen.terrain import (TerrainConfig as _TC_bs,
+                                                   synthesize_terrain as _st_bs)
+
+    def _bs_world(materials):
+        return WorldConfig.from_dict({
+            "world": {"seed": 21, "size": [60.0, 40.0],
+                      "origin": [-15.0, -4.0], "resolution": 0.5},
+            "geo": {"lat0": anchor.lat0, "lon0": anchor.lon0},
+            "depth": {"mode": "preset", "preset": "flat",
+                      "params": {"depth": 3.5}},
+            "terrain": {"dunes": {"enabled": False},
+                        "roughness": {"amplitude": 0.0},
+                        "materials": materials},
+            "objects": {"density_per_hectare": 0.0}})
+
+    sc_sand = generate_scene(_bs_world({"layout": "uniform", "uniform": "sand"}))
+    traj_bs = _line_trajectory(OUT / "bs_line.yaml", 0.0, 20.0, 16.0)
+    bs_log, _ = _write_sim_svlog(sc_sand, traj_bs, anchor, OUT / "bs_sand.svlog",
+                                 n_pings=400, noise_seed=7)
+    r_id = _mu(bs_log, anchor, 1.0, _Inv(angle_norm="model"))
+    well = r_id.count >= 100
+    mu_id = float(np.nanmedian(r_id.mu_db[well]))
+    r_emp = _mu(bs_log, anchor, 1.0)
+    s_emp = _msum(r_emp)
+    check("a surveyed flat sand floor inverts to the renderer's own "
+          "reflectivity (10 log10 0.55 = -2.6 dB) through the model",
+          abs(mu_id - 10.0 * np.log10(0.55)) < 1.0 and int(well.sum()) > 200
+          and abs(r_id.floor_db - (10 * np.log10(met_cfg.model.noise_floor)
+                                   + met_cfg.model.calibration_db_offset)) < 1e-6,
+          f"median {mu_id:+.2f} dB over {int(well.sum())} cells, floor "
+          f"{r_id.floor_db:+.1f} dB (calibrated)")
+    check("the angular-slope normalisation leaves a uniform floor uniform "
+          "(p5-p95 spread under 2.5 dB) and reports its angular residual",
+          (s_emp["mu_db_p95"] - s_emp["mu_db_p5"]) < 2.5
+          and abs(r_emp.angle_slope_db_per_decade) < 4.0,
+          f"spread {s_emp['mu_db_p95'] - s_emp['mu_db_p5']:.2f} dB, model "
+          f"residual slope {r_emp.angle_slope_db_per_decade:+.2f} dB/decade")
+
+    # A mud capsule on the starboard side: the survey layer's gain channel
+    # reads the renderer's sand-mud contrast (10 log10(0.30/0.55) = -2.6 dB)
+    # and classes it as mud when told the sim's contrast (the literature
+    # thresholds -- 5 dB at 450 kHz -- cannot be asserted on renderer data,
+    # whose material spread is a few dB, TODO.md).
+    sc_mud = generate_scene(_bs_world({
+        "layout": "painted", "uniform": "sand",
+        "paint": [{"points": [[4.0, 6.0], [16.0, 6.0]], "radius_m": 4.0,
+                   "value": "mud", "erase": False}]}))
+    mud_log, _ = _write_sim_svlog(sc_mud, traj_bs, anchor, OUT / "bs_mud.svlog",
+                                  n_pings=400, noise_seed=8)
+    g_bs = GridSpec(-15.0, -4.0, 0.5, 121, 81)
+    src_bs = _src_bs(mode="svlog", file=str(mud_log), svlog={"texture_gain": 0.0})
+    lay_bs = {"kind": "reflectivity_survey",
+              "params": {"mud_below_db": -1.3, "cell_m": 1.0, "smooth_m": 0.0,
+                         "feather_m": 1.0}}
+    c_on = _cmp_bs(g_bs, [src_bs, lay_bs], [], anchor, np.random.default_rng(0), 3)
+    c_off = _cmp_bs(g_bs, [src_bs, dict(lay_bs, enabled=False)], [], anchor,
+                    np.random.default_rng(0), 3)
+    xs_bs = g_bs.origin_x + np.arange(g_bs.nx) * g_bs.resolution
+    ys_bs = g_bs.origin_y + np.arange(g_bs.ny) * g_bs.resolution
+    X_bs, Y_bs = np.meshgrid(xs_bs, ys_bs)
+    in_mud = (X_bs >= 5.0) & (X_bs <= 15.0) & (np.abs(Y_bs - 6.0) <= 2.5)
+    in_sand = ((X_bs >= 4.0) & (X_bs <= 16.0)
+               & (((Y_bs > 11.5) & (Y_bs < 14.0)) | ((Y_bs > 18.0) & (Y_bs < 28.0))))
+    gdb = 10.0 * np.log10(c_on.gain)
+    med_mud, med_sand = float(np.median(gdb[in_mud])), float(np.median(gdb[in_sand]))
+    mud_idx = c_on.material_names.index("mud")
+    pred_mud = c_on.material_id == mud_idx
+    check("the survey layer's gain reads the sand-mud contrast where the "
+          "recording saw mud, ~0 dB over the sand, and classes the patch",
+          abs((med_mud - med_sand) - 10.0 * np.log10(0.30 / 0.55)) < 0.8
+          and abs(med_sand) < 0.8
+          and float(pred_mud[in_mud].mean()) > 0.85
+          and float(pred_mud[in_sand].mean()) < 0.10,
+          f"mud {med_mud:+.2f} dB, sand {med_sand:+.2f} dB; classed mud on "
+          f"{100 * pred_mud[in_mud].mean():.0f} % of the patch, "
+          f"{100 * pred_mud[in_sand].mean():.0f} % of the sand")
+    check("a disabled survey layer is a strict no-op (no gain, no material, "
+          "the source's height untouched)",
+          c_off.gain is None and c_off.material_id is None
+          and np.array_equal(c_off.height, c_on.height)
+          and "backscatter" in c_on.info and c_on.info["backscatter"]["cells"] > 50)
+    # The reflectivity ceiling opens only under a gain map: uniform rocks
+    # (0.85 x (1 + 0.30 texture)) still clip at 1.0 without one, exactly
+    # as before, while a +8 dB gain on sand renders 3.5.
+    tcfg_bs = _TC_bs.from_dict({"dunes": {"enabled": False},
+                                "roughness": {"amplitude": 0.0},
+                                "materials": {"layout": "uniform",
+                                              "uniform": "rocks"}})
+    t_rock = _st_bs(g_bs, tcfg_bs, _ML_bs(), np.random.default_rng(0),
+                    base_height=c_on.height)
+    tcfg_sand = _TC_bs.from_dict({"dunes": {"enabled": False},
+                                  "roughness": {"amplitude": 0.0},
+                                  "materials": {"layout": "uniform",
+                                                "uniform": "sand"}})
+    t_gain = _st_bs(g_bs, tcfg_sand, _ML_bs(), np.random.default_rng(0),
+                    base_height=c_on.height,
+                    reflectivity_gain=np.full((g_bs.ny, g_bs.nx), 10 ** 0.8))
+    check("the rendered reflectivity clips at 1.0 without a gain map and "
+          "opens to REFLECTIVITY_MAX under one (+8 dB on sand -> 3.5)",
+          float(t_rock.reflectivity.max()) <= 1.0
+          and abs(float(np.median(t_gain.reflectivity)) - 0.55 * 10 ** 0.8) < 0.15
+          and float(t_gain.reflectivity.max()) <= REFLECTIVITY_MAX,
+          f"rocks max {t_rock.reflectivity.max():.3f}, gained sand median "
+          f"{np.median(t_gain.reflectivity):.2f}")
+
+    # Relief from shading (analysis/shading.py): a rippled sand floor
+    # surveyed with speckle must come back as its ripples (per-ping
+    # detrended truth vs the estimate), a flat floor as ~nothing, and the
+    # fusion must leave the synthetic default bit-identical.
+    from blueboat_sss_sim.analysis.shading import (detrend_along_ray as _dtr,
+                                                   relief_samples as _rsh)
+    sc_rip = generate_scene(WorldConfig.from_dict({
+        "world": {"seed": 21, "size": [60.0, 40.0],
+                  "origin": [-15.0, -4.0], "resolution": 0.5},
+        "geo": {"lat0": anchor.lat0, "lon0": anchor.lon0},
+        "depth": {"mode": "preset", "preset": "sandbar_ripples",
+                  "params": {"depth": 3.0, "bar_spacing_m": 10.0,
+                             "bar_height_m": 0.4, "heading_deg": 0.0,
+                             "asymmetry": 0.0}},
+        "terrain": {"dunes": {"enabled": False},
+                    "roughness": {"amplitude": 0.0},
+                    "materials": {"layout": "uniform", "uniform": "sand"}},
+        "objects": {"density_per_hectare": 0.0}}))
+    rip_log, _ = _write_sim_svlog(sc_rip, traj_bs, anchor, OUT / "bs_ripples.svlog",
+                                  n_pings=400, noise_seed=9)
+    rel_rip = _rsh(rip_log, anchor)
+    rel_flat = _rsh(bs_log, anchor)
+    good_r = rel_rip.weight > 0.0
+    truth_r = -sc_rip.sample_height(rel_rip.east, rel_rip.north)
+    # The truth detrended exactly as the estimate is (running mean over
+    # the trend length along each ray), so the two compare like with like.
+    t_rel = _dtr(truth_r, rel_rip, 15.0)[good_r]
+    e_rel = rel_rip.dz[good_r]
+    corr_r = float(np.corrcoef(t_rel, e_rel)[0, 1])
+    rms_err = float(np.sqrt(np.mean((e_rel - t_rel) ** 2)))
+    rms_truth = float(np.sqrt(np.mean(t_rel ** 2)))
+    rms_est = float(np.sqrt(np.mean(e_rel ** 2)))
+    good_f = rel_flat.weight > 0.0
+    rms_flat = float(np.sqrt(np.mean(rel_flat.dz[good_f] ** 2)))
+    check("shading reads a rippled sand floor back as its ripples (per-ping "
+          "detrended: correlated, within the ripple amplitude) and a flat "
+          "floor as far less relief",
+          corr_r > 0.6 and rms_err < 0.7 * rms_truth
+          and rms_flat < 0.5 * rms_est and rip_log.stat().st_size > 1000,
+          f"corr {corr_r:.2f}, rms err {rms_err:.3f} m vs truth "
+          f"{rms_truth:.3f} m (estimate {rms_est:.3f} m); flat floor "
+          f"{rms_flat:.3f} m; {int(good_r.sum())} lit bins")
+
+    # The inversion is cached per (file, mtime, size, anchor, config): the
+    # World Builder re-reads a selected recording on every parameter change
+    # and every preview, and a 180 MB survey takes minutes and gigabytes
+    # (the 2026-09-18 OOM). A *changed* file must still be re-read.
+    import time as _tc
+    _t0 = _tc.perf_counter()
+    rel_again = _rsh(rip_log, anchor)
+    dt_cache = _tc.perf_counter() - _t0
+    mt_old = rip_log.stat().st_mtime_ns
+    os.utime(rip_log, ns=(mt_old + 10 ** 9, mt_old + 10 ** 9))
+    rel_fresh = _rsh(rip_log, anchor)
+    os.utime(rip_log, ns=(mt_old, mt_old))
+    check("a recording's shading inversion is cached, and a rewritten file "
+          "is inverted again",
+          rel_again is rel_rip and dt_cache < 0.05
+          and rel_fresh is not rel_rip
+          and np.array_equal(rel_fresh.dz, rel_rip.dz),
+          f"cache hit in {1e3 * dt_cache:.2f} ms")
+
     # GPS + attitude envelopes, and the two clock regimes of the corpus.
     s_live = svlog_reader.read_svlog(svlog_path)
     s_frz = svlog_reader.read_svlog(frozen_path)
@@ -1149,6 +1944,26 @@ def main() -> None:
           s_frz.clock_frozen and s_frz.skew_ms == 0 and len(fi) == 400
           and ferr < 4.5 * met_period * 1.0 + 0.05 and len(paired_f) == 400,
           f"max position error {ferr * 100:.1f} cm")
+
+    # The one-screen digest an agent runs first on any .svlog (2026-09-28;
+    # the superproject skill `svlog` points at it): census, both sides, the
+    # mavlink streams and the clock regime, read off the same in-test log.
+    from blueboat_sss_sim.analysis.svlog_digest import digest, format_digest
+    dg, dg_f = digest(svlog_path), digest(frozen_path)
+    dg_sides = dg["sides"].values()
+    check("the svlog digest reads the census, both sides, the streams and "
+          "both clock regimes of the in-test log",
+          dg["packets"].get("2198 OS_MONO_PROFILE") == 400
+          and dg["packets"].get("150 mavlink JSON") == 150
+          and set(dg["sides"]) == {sd.value for sd in Side}
+          and all(v["pings"] == 200 and sum(v["acquisition"].values()) == 200
+                  and v["counter_restarts"] == 0
+                  and np.isfinite(v["fbr_median_m"]) for v in dg_sides)
+          and dg["gps_fixes"] == 50 and dg["attitude"] == 50
+          and not dg["clock_frozen"] and dg_f["clock_frozen"]
+          and "FROZEN" in format_digest(dg_f),
+          f"{dg['packets']}, fbr "
+          + ", ".join(f"{v['fbr_median_m']:.2f} m" for v in dg_sides))
 
     # Bathymetry: FBR soundings under the boat reproduce the scene depth.
     from blueboat_sss_sim.analysis.bathymetry import survey_track
@@ -1283,12 +2098,12 @@ def main() -> None:
                           seed=1)
 
     veh = Pose3D(x=0.0, y=4.0, z=0.0, yaw=0.0)      # heading +x, port faces
-    mp_cfg = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+    mp_cfg = _cal_config()
 
     def _mp_render(walls: list, on: bool, bins: int = 600,
                    surface: bool = False, echo: bool = False,
                    pose: Pose3D | None = None):
-        c = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+        c = _cal_config()
         c.model.wall_multipath_enabled = on
         c.model.surface_mirror_enabled = surface
         c.model.wall_echo_enabled = echo    # the two wall features are
@@ -1409,6 +2224,40 @@ def main() -> None:
                              wall_gain=1.0, surface_enabled=False,
                              surface_reflectivity=0.9)[0].gain - 0.65 ** 2) < 1e-12,
           f"perfect mirror far ghost {smooth_far:+.1f} dB vs concrete {far_db:+.1f} dB")
+
+    # ---- occlusion of the wall features themselves (2026-09-18) -----------
+    # Until this pass the face loop stopped at the first wet hit, so a
+    # pontoon silenced the quay behind it, and neither the single-bounce
+    # corner band nor a ghost was tested against a nearer wall -- the review
+    # census found the band drawn straight through a quay in 97 % of the
+    # pings that saw two.
+    pont_near = Wall(name="pont", x0=-60.0, y0=W_Y - 2.0, x1=60.0,
+                     y1=W_Y - 2.0, top_z=0.5, reflectivity=0.4,
+                     kind="pontoon", draft_m=0.4)
+    quay_behind, _, _ = _mp_render([pont_near, basin_wall], False, echo=True)
+    pont_alone, _, _ = _mp_render([pont_near], False, echo=True)
+    b_face_q = int(d_face / mp_bin)
+    q_face = float(quay_behind.ping.specular[b_face_q - 2:b_face_q + 3].max())
+    p_face = float(pont_alone.ping.specular[b_face_q - 2:b_face_q + 3].max())
+    check("a quay standing behind a pontoon still echoes: the ray passes "
+          "under the floats, so the face loop does not stop there",
+          q_face > 10.0 * max(p_face, 1e-30),
+          f"{10 * np.log10(q_face / max(p_face, 1e-30)):.1f} dB over the "
+          "same scene without the quay")
+    quay_first = Wall(name="quay_far", x0=-60.0, y0=W_Y + 6.0, x1=60.0,
+                      y1=W_Y + 6.0, top_z=1.0, reflectivity=0.65)
+    two_w, two_c, _ = _mp_render([basin_wall, quay_first], True, echo=True)
+    one_w, _, _ = _mp_render([basin_wall], True, echo=True)
+    beyond_sel = bins_w > r_foot + 1.0
+    leak_db = float(10 * np.log10(
+        (two_w.ping.power + two_w.ping.specular)[beyond_sel].sum() + 1e-30)
+        - 10 * np.log10(
+        (one_w.ping.power + one_w.ping.specular)[beyond_sel].sum() + 1e-30))
+    check("a second quay behind the first adds nothing beyond it: its face, "
+          "its corner band and its ghosts are all occluded by the nearer wall",
+          abs(leak_db) < 0.5,
+          f"{leak_db:+.2f} dB against the single-wall ping past "
+          f"{r_foot + 1.0:.1f} m")
 
     # ---- pontoon: floating, looked under -- the structure a boat can cross ----
     pont = Wall(name="pont", x0=-60.0, y0=W_Y, x1=60.0, y1=W_Y, top_z=0.5,
@@ -1818,6 +2667,20 @@ def main() -> None:
     err = np.abs(-h_csv - plane_depth(xx7, yy7))[interior]
     check("CSV soundings reproduce an analytic plane (linear interp)",
           float(err.max()) < 0.05, f"max interior error {err.max():.4f} m")
+    # Orientation pin: ``arr[j, i]`` sits at ``world_to_grid`` (col i, row j),
+    # row 0 = min y. Index the raster at the CSV points themselves and at
+    # their N-S mirror: only the former reproduces the file.
+    ci7, cj7 = d_grid.world_to_grid(en[:, 0], en[:, 1])
+    ci7 = np.round(ci7).astype(int)
+    cj7 = np.round(cj7).astype(int)
+    in7 = (np.abs(en[:, 0]) <= 8.0) & (np.abs(en[:, 1]) <= 8.0)
+    z7 = plane_depth(en[in7, 0], en[in7, 1])
+    err_row = np.abs(-h_csv[cj7[in7], ci7[in7]] - z7).max()
+    err_mir = np.abs(-h_csv[d_grid.ny - 1 - cj7[in7], ci7[in7]] - z7).max()
+    check("raster row 0 is the min-y row: the CSV points index their own "
+          "depth, their N-S mirror does not",
+          err_row < 0.08 and err_mir > 0.15,
+          f"as stored {err_row:.3f} m, mirrored {err_mir:.3f} m")
 
     # Smoothing spline (the recording path): plane inside the soundings,
     # the local slope continued -- damped -- beyond them, texture scaled by
@@ -1882,8 +2745,70 @@ def main() -> None:
         svf_ok = False
     except ValueError:
         svf_ok = True
+    try:
+        DepthConfig.from_dict({"mode": "svlog", "file": "x.svlog",
+                               "svlog": {"relief_smooth_m": -1.0}})
+        svs_ok = False
+    except ValueError as exc:
+        svs_ok = "relief_smooth_m" in str(exc)
     check("svlog depth config rejects unknown keys by name and needs a file",
-          svk_ok and svf_ok)
+          svk_ok and svf_ok and svs_ok)
+
+    # ---- the assembled relief is blended over its own coverage ------------
+    # Each pass leaves a hole at its own nadir and meets its neighbour at a
+    # seam; rasterised raw, that prints the boat's track into the seabed
+    # (the 2026-09-18 report). A coverage-weighted Gaussian bridges both
+    # without pulling the relief toward zero, and keeps the bedform band
+    # the method resolves.
+    from blueboat_sss_sim.worldgen.depth.smooth import (
+        _rasterize_relief as _rr7)
+    from blueboat_sss_sim.analysis.shading import ReliefSamples as _RS7
+    cg7 = GridSpec(0.0, 0.0, 0.5, 81, 81)
+    rng7 = np.random.default_rng(4)
+    e7, n7, d7, w7 = [], [], [], []
+    for k, xc in enumerate((8.0, 20.0, 32.0)):
+        off = np.concatenate([np.arange(-7.0, -1.5, 0.25),
+                              np.arange(1.5, 7.0, 0.25)])
+        ys = np.arange(2.0, 38.0, 0.25)
+        XX, YY = np.meshgrid(xc + off, ys)
+        e7.append(XX.ravel())
+        n7.append(YY.ravel())
+        # truth + a per-pass bias (the seam) + measurement noise
+        d7.append(0.30 * np.cos(2 * np.pi * XX.ravel() / 10.0)
+                  + (0.08 if k % 2 else -0.08)
+                  + rng7.normal(0.0, 0.05, XX.size))
+        w7.append(np.ones(XX.size))
+    rel7 = _RS7(east=np.concatenate(e7), north=np.concatenate(n7),
+                dz=np.concatenate(d7), depth_abs=np.zeros(0),
+                depth_nadir=np.zeros(0), weight=np.concatenate(w7),
+                ping=np.zeros(0), side=np.zeros(0), t_ms=np.zeros(0),
+                flags=np.zeros(0))
+    R_raw, cov7 = _rr7(cg7, rel7, 1.5, smooth_m=0.0)
+    R_sm, _ = _rr7(cg7, rel7, 1.5, smooth_m=0.75)
+    gx7 = cg7.origin_x + np.arange(cg7.nx) * cg7.resolution
+    gy7 = cg7.origin_y + np.arange(cg7.ny) * cg7.resolution
+    GX7, GY7 = np.meshgrid(gx7, gy7)
+    truth7 = 0.30 * np.cos(2 * np.pi * GX7 / 10.0)
+    band7 = (GY7 > 4.0) & (GY7 < 36.0) & (GX7 > 2.0) & (GX7 < 38.0)
+    nadir7 = band7 & (np.abs(GX7 - 20.0) < 1.0)          # the middle pass
+    hole_raw = float(np.mean(R_raw[nadir7] == 0.0))
+    hole_sm = float(np.mean(R_sm[nadir7] == 0.0))
+    err_raw_n = float(np.abs(R_raw[nadir7] - truth7[nadir7]).mean())
+    err_nadir = float(np.abs(R_sm[nadir7] - truth7[nadir7]).mean())
+    lit7 = band7 & (cov7 > 0.99)
+    amp = float(np.std(R_sm[lit7]) / np.std(truth7[lit7]))
+    corr7 = float(np.corrcoef(R_sm[lit7], truth7[lit7])[0, 1])
+    rms_raw7 = float(np.sqrt(np.mean((R_raw[band7] - truth7[band7]) ** 2)))
+    rms_sm7 = float(np.sqrt(np.mean((R_sm[band7] - truth7[band7]) ** 2)))
+    check("the assembled relief is blended over its own coverage: the nadir "
+          "holes fill from the neighbouring bins, the 10 m bedform survives, "
+          "and the field is closer to the truth than the raw assembly",
+          hole_raw > 0.9 and hole_sm < 0.05 and err_nadir < 0.4 * err_raw_n
+          and 0.75 < amp < 1.15 and corr7 > 0.9 and rms_sm7 < rms_raw7,
+          f"nadir holes {100 * hole_raw:.0f} % -> {100 * hole_sm:.0f} % "
+          f"(residual {err_raw_n:.3f} -> {err_nadir:.3f} m), "
+          f"ripple amplitude x{amp:.2f}, "
+          f"corr {corr7:.2f}, rms {rms_raw7:.3f} -> {rms_sm7:.3f} m")
 
     # ---- coverage: does the recording reach the world at all, and how far --
     # The [4c] recording (svlog_path) was sailed about `anchor`; the grid
@@ -2377,15 +3302,52 @@ def main() -> None:
     new_types = ["crate_plastic", "tin_18l", "polytank", "drum_200l",
                  "pail_20l", "fire_extinguisher", "pallet_wood",
                  "traffic_cone", "rope_coil", "net_ball", "bottle_glass",
-                 "bicycle", "mesh_crate", "shopping_trolley"]
-    check("all target-family classes registered (27 total)",
-          all(t in CATALOG for t in new_types) and len(CATALOG) == 27,
+                 "bicycle", "mesh_crate", "shopping_trolley",
+                 # 2026-09-18: the field target itself, and the harbour
+                 # furniture a pontoon line is actually held by
+                 "plastic_box", "mooring_pile"]
+    check("all target-family classes registered (29 total)",
+          all(t in CATALOG for t in new_types) and len(CATALOG) == 29,
           f"{len(CATALOG)} classes")
+    box8 = CATALOG["plastic_box"]
+    check("the field target is a class of its own: the NAFCO box's exact "
+          "dimensions as knobs, on a transmitting polypropylene shell",
+          box8.material == "pp_shell"
+          and {r[0] for r in box8.params_schema} == {
+              "length_m", "width_m", "height_m", "wall_mm", "flooded"}
+          and abs(_MatLib().get("pp_shell").transmission - 0.11) < 1e-9
+          and all(_MatLib().get(m).transmission == 0.0
+                  for m in _MatLib().names if m != "pp_shell"),
+          f"{box8.display_label}, rho {_MatLib().get('pp_shell').reflectivity}, "
+          f"two-way transmission {_MatLib().get('pp_shell').transmission}")
     check("legacy composition untouched by the additions",
           set(DEFAULT_COMPOSITION) == {
               "tire_car", "tire_bicycle", "pipe_pvc", "bottle_plastic", "can",
               "tent_weight", "rope", "cylinder_metal", "concrete_block",
               "brick", "chain", "anchor", "debris"})
+
+    # The seabed table's contrasts, and the literature-anchored override that
+    # widens them (2026-09-18, P6-16): the shipped values are judgement and
+    # span 5.9 dB where Jackson & Richardson par. 12.1 spans about 15 at
+    # 450 kHz. The override ships as a file, never as a default, so every
+    # existing world keeps the table it was built with.
+    import yaml as _yaml16
+    _lit16 = _yaml16.safe_load(
+        (PKG_ROOT / "config" / "materials_literature.yaml").read_text())["materials"]
+    _base16, _over16 = _MatLib(), _MatLib(_lit16)
+    _span = lambda L: 10 * math.log10(  # noqa: E731
+        L.get("rocks").reflectivity / L.get("seagrass").reflectivity)
+    check("the literature-anchored seabed table is available as an override "
+          "and widens the contrast to what J&R measure, leaving the shipped "
+          "defaults untouched",
+          abs(_span(_base16) - 5.9) < 0.2 and _span(_over16) > 13.0
+          and abs(10 * math.log10(_over16.get("gravel").reflectivity
+                                  / _over16.get("sand").reflectivity) - 3.0) < 0.2
+          and abs(10 * math.log10(_over16.get("sand").reflectivity
+                                  / _over16.get("mud").reflectivity) - 5.0) < 0.2
+          and _base16.get("sand").reflectivity == 0.55,
+          f"shipped span {_span(_base16):.1f} dB, literature "
+          f"{_span(_over16):.1f} dB (sand->gravel +3, mud->sand +5 as measured)")
 
     lib8 = _MatLib()
     grid8 = GridSpec(origin_x=-30.0, origin_y=-20.0, resolution=0.1,
@@ -2513,12 +3475,14 @@ def main() -> None:
     # Rendered echo dilution + FBR lock with the new families in scene
     # (NC #4): masks only ever add local height bumps, verified live.
     def _flat_scene(objects):
+        from blueboat_sss_sim.worldgen.scene import stamp_objects as _so8
         g = GridSpec(origin_x=0.0, origin_y=-6.0, resolution=0.05,
                      nx=401, ny=241)
         h = np.full((241, 401), -3.0)
         r = np.full((241, 401), 0.3)
-        rasterize_objects(objects, g, h, r)
+        ras8 = _so8(objects, g, h, r)
         return SceneModel(grid=g, height=h, reflectivity=r,
+                          **ras8.scene_kwargs(),
                           material_id=np.zeros((241, 401), dtype=np.uint8),
                           material_names=["sand"], objects=objects,
                           walls=[], seed=0, config_snapshot={})
@@ -2559,15 +3523,200 @@ def main() -> None:
         b1 = int((slant + 0.8) / acq.bin_size_m)
         return float(np.sum(ping8.power[b0:b1]))
 
+    # Both twins in the same ROUGH material, so both stay on the raster's
+    # Lambert path and the check measures the lattice mechanism alone. In
+    # a smooth material the solid twin is a facet object (NC #17): a mirror
+    # that returns almost nothing off its specular aspect, which is the
+    # physics and not a dilution -- an open frame of many members is an
+    # incoherent aggregate and outshines it.
     e_solid = _echo_window(_flat_scene(
         [PlacedObject(0, "crate_plastic", 10.0, 6.0, 0.0, 0.53, 0.37, 0.31,
-                      0.0, 0.7, "plastic")]))
+                      0.0, 0.7, "generic")]))
     e_mesh = _echo_window(_flat_scene(
         [PlacedObject(0, "mesh_crate", 10.0, 6.0, 0.0, 0.53, 0.37, 0.31,
-                      0.0, 0.7, "plastic", fill_fraction=0.35)]))
+                      0.0, 0.7, "generic", fill_fraction=0.35)]))
     check("open-frame echo is diluted vs its solid twin (rendered)",
           e_mesh < 0.9 * e_solid and e_mesh > 0.05 * e_solid,
           f"mesh {e_mesh:.3g} vs solid {e_solid:.3g}")
+
+    # A shadow is a measurement of the thing that cast it. The 2026-09-07
+    # beach box -- a flooded 2 mm PP shell -- shadowed the sand 9.6 dB, not
+    # to the receiver floor; an opaque twin of the same size still does.
+    def _shadow_pw(obj8):
+        sc8 = _flat_scene([obj8] if obj8 is not None else [])
+        return GeometricRenderer(sc8, acq, model).render(
+            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping.power
+    _open8 = _shadow_pw(None)
+    _box8 = _shadow_pw(PlacedObject(
+        0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425, 0.323, 0.0, 0.18,
+        "pp_shell", transmission=0.11))
+    _opq8 = _shadow_pw(PlacedObject(
+        0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425, 0.323, 0.0, 0.18,
+        "plastic"))
+    _bins8 = (np.arange(len(_open8)) + 0.5) * acq.bin_size_m
+    # The shadow is where the opaque twin returns nothing at all, beyond
+    # the object's own range.
+    _sel8 = (_opq8 == 0.0) & (_bins8 > math.hypot(6.0, 3.0 - model.sensor_depth_m))
+    _sh_db = 10 * math.log10((_box8[_sel8].mean() + 1e-30)
+                             / (_open8[_sel8].mean() + 1e-30))
+    check("a transmitting shell lightens its own shadow by its two-way "
+          "transmission and no more; an opaque object still blacks it out",
+          abs(_sh_db + 9.6) < 0.5 and int(_sel8.sum()) > 8
+          and float(_open8[_sel8].min()) > 0.0,
+          f"shadow {_sh_db:+.1f} dB under the open seabed over "
+          f"{int(_sel8.sum())} bins (the field box measured -9.6)")
+
+    # --- the sim-vs-real object signature at a GENERIC heading ----------
+    # The field comparison proper is [14] (the box at the field's own
+    # geometry, over every heading; 2026-09-28). This one keeps the
+    # 2026-09-19 regression intent at this section's 25 deg geometry: the
+    # box is a faint target, and nothing between it and the end of its
+    # shadow falls to the receiver floor (the black band). It is turned 20
+    # deg off the track: exactly parallel to it, a smooth box is the one
+    # aspect where Kirchhoff physics DOES glint (NC #17) -- its top, bottom
+    # and far-top edges light up -- which is [14]'s aligned check, not a
+    # regression.
+    _yaw8 = math.radians(20.0)
+    _db_box8 = _reported_db(_flat_scene([PlacedObject(
+        0, "plastic_box", 10.0, 6.0, _yaw8, 0.716, 0.425, 0.323, 0.0, 0.18,
+        "pp_shell", transmission=0.11)]), Side.PORT, Pose3D(10.0, 0.0, 0.0),
+        acq, model)
+    _db_ref8 = _reported_db(_flat_scene([]), Side.PORT, Pose3D(10.0, 0.0, 0.0),
+                            acq, model)
+    _sig8 = _object_signature(10.0 ** (_db_box8 / 10.0),
+                              10.0 ** (_db_ref8 / 10.0), acq.bin_size_m,
+                              math.hypot(6.0, 3.0 - model.sensor_depth_m))
+    _graze8 = math.degrees(math.atan2(3.0 - model.sensor_depth_m, 6.0))
+    print(f"  [----] object signature (plastic_box, {_graze8:.0f} deg "
+          f"grazing, 20 deg off the track): highlight "
+          f"{_sig8['highlight_db']:+.1f} dB, shadow "
+          f"{_sig8['shadow_min_db']:+.1f}/{_sig8['shadow_mean_db']:+.1f} dB, "
+          f"edge {_sig8['edge_10_90_m']:.2f} m, shadow "
+          f"{_sig8['shadow_len_m']:.2f} m  [real, 2026-09-28: near-edge +0.2 "
+          f"to +1.1, shadow -7.4 to -8.2]")
+    check("the field box images as a faint target, not a glint, off its "
+          "specular aspect (pre-2026-09-19 model: +22 dB)",
+          -1.0 < _sig8["highlight_db"] < 5.0,
+          f"highlight {_sig8['highlight_db']:+.1f} dB (real +0.2 to +1.1 "
+          f"near-edge; pre-rework +21.6 to +23.3 through this same harness)")
+    check("its shadow runs continuously from it at the shell's transmission "
+          "-- no bin of the object or its shadow falls to the receiver "
+          "floor (the black band of the pre-2026-09-19 model)",
+          -15.0 < _sig8["shadow_min_db"] < -6.0
+          and -13.0 < _sig8["shadow_mean_db"] < -5.0,
+          f"shadow {_sig8['shadow_min_db']:+.1f} / "
+          f"{_sig8['shadow_mean_db']:+.1f} dB (real mean -7.4 to -8.2; with "
+          f"the reverberation reference on `unoccluded` the worst bin reads "
+          f"-54)")
+
+    # --- the object's brightness must not depend on the raster it is
+    # stamped on. A hard mask on a 0.10 m grid turns a 0.32 m box wall into
+    # a one-cell ramp whose slope IS the grid spacing, so without the
+    # surface-area element the highlight moved 7.4 dB between 0.20 m and
+    # 0.05 m. With it the response converges on the wall's true height.
+    def _scene_at(res8, objs8):
+        from blueboat_sss_sim.worldgen.scene import stamp_objects as _so9
+        nx9 = int(round(20.0 / res8)) + 1
+        ny9 = int(round(12.0 / res8)) + 1
+        g9 = GridSpec(origin_x=0.0, origin_y=-6.0, resolution=res8,
+                      nx=nx9, ny=ny9)
+        h9 = np.full((ny9, nx9), -3.0)
+        r9 = np.full((ny9, nx9), 0.3)
+        ras9 = _so9(objs8, g9, h9, r9)
+        return SceneModel(grid=g9, height=h9, reflectivity=r9,
+                          **ras9.scene_kwargs(),
+                          material_id=np.zeros((ny9, nx9), dtype=np.uint8),
+                          material_names=["sand"], objects=objs8, walls=[],
+                          seed=0, config_snapshot={})
+
+    _res_hl = []
+    _sl9 = math.hypot(6.0, 3.0 - model.sensor_depth_m)
+    _c0, _c1 = int((_sl9 - 0.6) / acq.bin_size_m), int((_sl9 + 0.2) / acq.bin_size_m)
+    for _res in (0.20, 0.10, 0.05):
+        _bx = [PlacedObject(0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425,
+                            0.323, 0.0, 0.18, "pp_shell", transmission=0.11)]
+        _po = GeometricRenderer(_scene_at(_res, _bx), acq, model).render(
+            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+        _pr = GeometricRenderer(_scene_at(_res, []), acq, model).render(
+            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+        _to = (_po.power + _po.specular)[_c0:_c1]
+        _tr = (_pr.power + _pr.specular)[_c0:_c1]
+        _res_hl.append(10.0 * math.log10(_to.max() / max(_tr.max(), 1e-300)))
+    check("an object's highlight does not depend on the raster it is stamped "
+          "on: the same box at 0.20 / 0.10 / 0.05 m agrees within 2 dB",
+          max(_res_hl) - min(_res_hl) < 2.0,
+          " / ".join(f"{v:+.1f}" for v in _res_hl)
+          + f" dB, spread {max(_res_hl) - min(_res_hl):.1f} dB "
+          f"(7.4 dB before the surface-area element)")
+
+    # A shadow is dark, not empty: the sidelobes and the water volume keep
+    # returning a fraction of what the lit seabed at that range does. The
+    # corpus quay puts that fraction at 17-25 dB below the seabed; before
+    # 2026-09-18 a culled bin held only the white receiver floor, 50 dB down.
+    def _rev_shadow(rev_db):
+        m_r = dataclasses.replace(model, reverberation_db=rev_db)
+        sc_r = _flat_scene([PlacedObject(0, "concrete_block", 10.0, 6.0, 0.0,
+                                         0.60, 0.40, 0.35, 0.0, 0.8,
+                                         "concrete")])
+        rp_r = GeometricRenderer(sc_r, acq, m_r).render(
+            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)
+        sc_o = _flat_scene([])
+        rp_o = GeometricRenderer(sc_o, acq, m_r).render(
+            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)
+        bins_r = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+        dark = (rp_r.ping.power == 0.0) & (bins_r > 6.4) & (bins_r < 7.0)
+        acc_r = np.zeros(acq.num_results)
+        acc_o = np.zeros(acq.num_results)
+        rg_r = np.random.default_rng(3)
+        for _ in range(30):
+            acc_r += apply_ping_noise(rp_r.ping.power, bins_r < rp_r.ping.altitude_m,
+                                      1.0, m_r, rg_r, specular=rp_r.ping.specular,
+                                      texture=rp_r.ping.texture,
+                                      unoccluded=rp_r.ping.unoccluded)
+            acc_o += apply_ping_noise(rp_o.ping.power, bins_r < rp_o.ping.altitude_m,
+                                      1.0, m_r, rg_r, specular=rp_o.ping.specular,
+                                      texture=rp_o.ping.texture,
+                                      unoccluded=rp_o.ping.unoccluded)
+        return 10 * math.log10((acc_r[dark].mean() + 1e-30)
+                               / (acc_o[dark].mean() + 1e-30))
+    _rev_on, _rev_off = _rev_shadow(18.0), _rev_shadow(0.0)
+    check("a shadow sits on the reverberation floor, not on the receiver's: "
+          "18 dB under the lit seabed at the same range, as the corpus quay "
+          "measures, and 0 restores the old white floor",
+          abs(_rev_on + 18.0) < 3.0 and _rev_off < -35.0,
+          f"{_rev_on:+.1f} dB with the floor on, {_rev_off:+.1f} dB with it "
+          f"off (the review measured the simulator 30 dB too deep)")
+
+    # Ground-truth labels come off the rendered mask (2026-09-18), so they
+    # describe the picture a detector is trained on: an object whose shadow
+    # ends inside its own footprint has none, and one standing in another's
+    # shadow neither shows nor casts. `h*r/altitude` reported a number for
+    # all three.
+    def _label(objs, oid=0):
+        rp8 = GeometricRenderer(_flat_scene(objs), acq, model).render(
+            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)
+        for ct in rp8.contacts:
+            if ct.object_id == oid:
+                return ct
+        return None
+    _blk = PlacedObject(0, "concrete_block", 10.0, 6.0, 0.0, 0.60, 0.40, 0.35,
+                        0.0, 0.8, "concrete")
+    _can = PlacedObject(0, "can", 10.0, 6.0, 0.0, 0.14, 0.08, 0.05, 0.0, 0.9,
+                        "metal")
+    _hidden = PlacedObject(1, "brick", 10.0, 6.6, 0.0, 0.22, 0.10, 0.06, 0.0,
+                           0.7, "brickclay")
+    l_blk, l_can = _label([_blk]), _label([_can])
+    l_hid = _label([_blk, _hidden], oid=1)
+    check("ground truth reads its shadow off the rendered mask: measured "
+          "beyond the object's own far edge, and nothing at all for one "
+          "standing in another's shadow",
+          l_blk is not None and l_blk.visible and l_blk.shadow_bins > 15.0
+          and l_can is not None and 0.0 < l_can.shadow_bins < 5.0
+          and l_hid is not None and not l_hid.visible
+          and l_hid.shadow_bins == 0.0,
+          f"0.35 m block {l_blk.shadow_bins:.1f} bins, 0.05 m can "
+          f"{l_can.shadow_bins:.1f}, brick behind the block "
+          f"{l_hid.shadow_bins:.1f} (visible {l_hid.visible})")
 
     mixed = ObjectFieldConfig.from_dict({"classes": {
         t: {"amount": {"kind": "count", "value": 2}} for t in new_types}})
@@ -2974,6 +4123,24 @@ def main() -> None:
           and np.array_equal(sc9.height, sc9c.height)
           and [o.x for o in sc9b.objects] == [o.x for o in sc9c.objects])
 
+    # EVERY raster, not only the height: the World Builder's path once built
+    # height, reflectivity and transmission but no roughness raster, and this
+    # check -- comparing heights -- passed through it (2026-09-19 to 09-28).
+    def _same_raster(a, b):
+        return (a is None and b is None) or (
+            a is not None and b is not None and np.array_equal(a, b))
+    _rnames9 = [f.name for f in dataclasses.fields(SceneModel)
+                if f.type in ("np.ndarray", "np.ndarray | None")]
+    _rdiff9 = [n for n in _rnames9
+               if not _same_raster(getattr(sc9b, n), getattr(sc9c, n))]
+    _sc9d = SceneModel.load(wdir)
+    check("the World Builder's scene carries every raster generate_scene "
+          "builds -- and its saved folder is not stale",
+          not _rdiff9 and sc9c.roughness is not None
+          and _sc9d.roughness is not None and not _sc9d.stale_rasters(),
+          f"compared {', '.join(_rnames9)}; differing: {_rdiff9 or 'none'}; "
+          f"stale on load: {_sc9d.stale_rasters() or 'none'}")
+
     meta9 = _yaml.safe_load((wdir / "metadata.yaml").read_text())
     ga9 = GeoAnchor.from_dict(meta9["geo_anchor"])
     ok_gps = True
@@ -2998,6 +4165,57 @@ def main() -> None:
           wdir2.name == "smoke_world_1"
           and (wdir / "scene_manifest.yaml").read_bytes() == manifest_before)
 
+    # Crash safety: the build assembles in a hidden sibling and is renamed
+    # into place, so a folder under ~/worlds is either a whole world or was
+    # never there (an OOM kill left a half-built one on 2026-09-18). A
+    # partial left by a dead build is swept, and never shadows a name.
+    from blueboat_sss_sim.worldgen.world_folder import PARTIAL_SUFFIX as _PS9
+    parent9 = wroot / "wakamatsu_like"
+    live9 = sorted(d.name for d in parent9.iterdir()
+                   if d.is_dir() and d.name.endswith(_PS9))
+    stale9 = parent9 / f".smoke_world_2{_PS9}"
+    stale9.mkdir()
+    (stale9 / "world.sdf").write_text("half a world\n")
+    wdir_s9 = build_world_folder(st9, worlds_root=wroot)
+    check("the build assembles in a hidden sibling and is renamed into "
+          "place; a partial left by a dead build is swept and never "
+          "shadows a name",
+          not live9 and not stale9.exists() and wdir_s9.name == "smoke_world_2"
+          and (wdir_s9 / "metadata.yaml").exists()
+          and not [d for d in parent9.iterdir()
+                   if d.is_dir() and d.name.endswith(_PS9)],
+          f"{wdir_s9.name} after sweeping {stale9.name}")
+    snap_s9 = SceneModel.load(wdir_s9).config_snapshot
+    check("the config snapshot names the folder the world ends up in, not "
+          "the directory it was assembled in",
+          _PS9 not in json.dumps(snap_s9))
+
+    # The wizard autosaves every page turn, so a killed session is offered
+    # back instead of being lost.
+    from blueboat_sss_sim.builder.state import (autosave_path as _ap9,
+                                                clear_autosave as _ca9,
+                                                load_autosave as _la9)
+    _cache9 = os.environ.get("XDG_CACHE_HOME")
+    os.environ["XDG_CACHE_HOME"] = str(OUT / "cache9")
+    try:
+        _ca9()
+        none9 = _la9() is None
+        st9.autosave()
+        back9 = _la9()
+        there9 = _ap9().exists()
+        _ca9()
+        check("the wizard's autosave round-trips the whole state and is "
+              "cleared once the world is saved",
+              none9 and there9 and back9 is not None
+              and back9.to_dict() == st9.to_dict()
+              and _la9() is None and not _ap9().exists(),
+              f"{_ap9().name}")
+    finally:
+        if _cache9 is None:
+            os.environ.pop("XDG_CACHE_HOME", None)
+        else:
+            os.environ["XDG_CACHE_HOME"] = _cache9
+
     st9b = load_builder_state(wdir)
     check("builder_state round-trips for Edit mode",
           st9b.limits_rect == st9.limits_rect
@@ -3008,7 +4226,7 @@ def main() -> None:
     wdir3 = build_world_folder(st9b, worlds_root=wroot)
     sc9d = SceneModel.load(wdir3)
     check("an edited-then-rebuilt world reproduces the original scene",
-          wdir3.name == "smoke_world_2"
+          wdir3.name == "smoke_world_3"
           and np.array_equal(sc9d.height, sc9.height)
           and len(sc9d.objects) == len(sc9.objects))
 
@@ -3097,13 +4315,46 @@ def main() -> None:
           and meta_s["depth"]["svlog_quality"]["pings"] == 200
           and meta_s["depth"]["svlog_quality"]["clock_mode"] == "live"
           and len(smp_s["east"]) > 100 and meta_s["objects"] == []
-          and (wdir_s / "reflectivity_hint.npz").exists()
-          and np.isfinite(np.load(wdir_s / "reflectivity_hint.npz")["values"]).any()
-          and meta_s["depth"]["svlog_quality"]["backscatter_samples"] > 100,
+          and (wdir_s / "reflectivity_survey.npz").exists()
+          and np.isfinite(np.load(wdir_s / "reflectivity_survey.npz")["mu_db"]).any()
+          and meta_s["depth"]["svlog_quality"]["backscatter"]["cells"] > 50,
           f"{len(smp_s['east'])} soundings, "
           f"{meta_s['depth']['svlog_quality']['cells']} cells, "
-          f"{meta_s['depth']['svlog_quality']['backscatter_samples']} "
-          "backscatter samples")
+          f"{meta_s['depth']['svlog_quality']['backscatter']['cells']} "
+          "reflectivity cells")
+    st_svlog_explicit = dataclasses.replace(
+        st_svlog, depth=DepthState(mode="svlog", file=str(svlog_path),
+                                   svlog={"texture_gain": 0.3,
+                                          "backscatter_layer": True,
+                                          "relief": "synthetic"}),
+        world_name="svlog_world_explicit")
+    wdir_se = build_world_folder(st_svlog_explicit, worlds_root=wroot)
+    check("an explicit 'relief: synthetic' builds the recording world "
+          "bit-identically to the key-less default",
+          np.array_equal(np.load(wdir_s / "depth.npz")["height"],
+                         np.load(wdir_se / "depth.npz")["height"]))
+    st_svlog_sh = dataclasses.replace(
+        st_svlog, depth=DepthState(mode="svlog", file=str(svlog_path),
+                                   svlog={"texture_gain": 0.3,
+                                          "relief": "shading",
+                                          "relief_gain": 1.0}),
+        world_name="svlog_world_shading")
+    wdir_sh = build_world_folder(st_svlog_sh, worlds_root=wroot)
+    with open(wdir_sh / "metadata.yaml", "r", encoding="utf-8") as f:
+        meta_sh = _yaml.safe_load(f)
+    rel_meta = meta_sh["depth"]["svlog_quality"].get("relief") or {}
+    h_sh = np.load(wdir_sh / "depth.npz")["height"]
+    check("a 'relief: shading' recording world builds, differs from the "
+          "synthetic one only where the swath was lit, and records the "
+          "relief quality (coverage, rms, gain) in its metadata",
+          h_sh.shape == np.load(wdir_s / "depth.npz")["height"].shape
+          and not np.array_equal(h_sh, np.load(wdir_s / "depth.npz")["height"])
+          and rel_meta.get("cells", 0) > 50
+          and 0.0 < rel_meta.get("coverage_fraction", 0.0) <= 1.0
+          and rel_meta.get("gain") == 1.0 and "rms_m" in rel_meta,
+          f"{rel_meta.get('cells')} relief cells, "
+          f"{100 * rel_meta.get('coverage_fraction', 0):.0f} % of the hull, "
+          f"rms {rel_meta.get('rms_m', 0):.3f} m")
     cov_meta = meta_s["depth"]["svlog_quality"].get("coverage") or {}
     check("the world records how much of it was measured rather than "
           "inferred",
@@ -3129,7 +4380,9 @@ def main() -> None:
     listing = list_worlds(wroot)
     check("library scan finds every saved world",
           {w["world_name"] for w in listing} ==
-          {"smoke_world", "smoke_world_1", "smoke_world_2", "csv_world",
+          {"smoke_world", "smoke_world_1", "smoke_world_2", "smoke_world_3",
+           "csv_world",
+           "svlog_world_explicit", "svlog_world_shading",
            "painted_world", "painted_world_1", "svlog_world",
            "svlog_world_1"}
           and all(w["path_name"] == "wakamatsu_like" for w in listing))
@@ -3317,7 +4570,9 @@ def main() -> None:
     from blueboat_sss_sim.sea.markers import (gz_marker_request,  # noqa: E402
                                               rviz_markers)
     from blueboat_sss_sim.sea.presets import (SCHEDULE_FORMAT,  # noqa: E402
-                                              compass_name, parse_direction)
+                                              compass_name, douglas_from_hs,
+                                              parse_direction, state_from_dict)
+    from blueboat_sss_sim.sea.current import bounded as bounded_fn  # noqa: E402
     from blueboat_sss_sim.sea.spectrum import spectral_moment  # noqa: E402
 
     # Spectrum: JONSWAP integrates to Hs^2/16, peaks at Tp, gamma=1 is PM.
@@ -3378,7 +4633,7 @@ def main() -> None:
     flat = lambda x, y: np.zeros_like(x)  # noqa: E731
     z_eq = gz_box.equilibrium_z()
     f_flat, t_flat = gz_box.submerged_wrench(Pose3D(0.0, 0.0, z_eq), flat)
-    check("Gazebo box mirrored from the xacro formula floats at m*g with 1 % reserve",
+    check("Gazebo box mirrored from the xacro formula floats at m*g with 3 % reserve",
           abs(f_flat[2] / (gz_box.mass_kg * 9.80665) - 1.0) < 1e-3
           and abs(gz_box.mass_kg - 16.15) < 1e-9
           and abs(gz_box.boxes[0].lx - 1.2 * 0.34342) < 1e-3
@@ -3452,33 +4707,123 @@ def main() -> None:
           and fd[2] < -70.0 and td[0] < -3.9 and abs(td[1]) < 1e-12
           and hull_damping_from_config(presets.hull).active)
 
-    # Current: Gauss-Markov statistics, direction, exact zero.
-    cp = CurrentProcess(0.5, 90.0, 0.08, 10.0, 60.0, 120.0,
-                        rng=np.random.default_rng(5))
-    vs = []
-    for _ in range(60000):
-        cp.step(0.05)
-        vs.append(cp.velocity_world())
-    vs = np.array(vs)
+    # The 100 Hz pose the wrench and the sonar use (2026-10-09): body
+    # velocity and rates differenced from consecutive physics-step poses
+    # (ZYX kinematics), duplicate stamps ignored, a gap forgets the rates.
+    from blueboat_sss_sim.sea import HighRatePose  # noqa: E402
+    from blueboat_sss_sim.core.geometry import rotation_zyx  # noqa: E402
+    _hrp = HighRatePose()
+    for _k in range(4):
+        _t = 5.0 + _k * 0.01
+        _hrp.update(_t, Pose3D(0.8 * _t, 0.0, -0.11, roll=0.2 * _t,
+                               pitch=-0.1 * _t, yaw=0.5 + 0.3 * _t))
+        _hrp.update(_t, Pose3D(99.0, 99.0, 99.0))      # same-step duplicate
+    _hs = _hrp.state()
+    _ps, _vb, _wb, _th = _hs
+    _R = rotation_zyx(_ps.roll, _ps.pitch, _ps.yaw)
+    _gap = HighRatePose()
+    _gap.update(0.0, Pose3D(0.0, 0.0, 0.0))
+    _gap.update(1.0, Pose3D(1.0, 0.0, 0.0))
+    check("100 Hz pose: world velocity and Euler rates recovered from "
+          "successive poses; same-step duplicates ignored; a gap > 0.1 s "
+          "yields no rates",
+          np.allclose(_R @ _vb, [0.8, 0.0, 0.0], atol=1e-9)
+          and abs(_wb[0] - (0.2 - 0.3 * np.sin(_ps.pitch))) < 1e-6
+          and abs(_th - 5.03) < 1e-12 and _gap.state() is None,
+          f"v_world {(_R @ _vb).round(4).tolist()}, p {_wb[0]:.4f} rad/s")
+
+    # Current (2026-10-08): the configured speed/direction is the MEAN; the
+    # variation is Fossen's Gauss-Markov process sampled exactly on a fixed
+    # grid, joined smoothly, soft-bounded, plus weak divergence-free eddies
+    # -- a pure function of (seed, t, x, y).
+    from blueboat_sss_sim.sea.current import (FLUCTUATION_LIMIT,  # noqa: E402
+                                              CurrentField, EddyField,
+                                              UnitGaussMarkov)
+    cp = CurrentProcess(0.5, 90.0, 0.05, 10.0, 60.0, 120.0, seed=5)
+    t_long = np.arange(0.0, 36000.0, 1.0)                    # ten hours
+    vs = cp.series(t_long)
     sp = np.hypot(vs[:, 0], vs[:, 1])
-    check("current mean speed within 5 % of the preset, sigma within 35 %, saturated",
-          abs(sp.mean() / 0.5 - 1.0) < 0.05 and abs(sp.std() / 0.08 - 1.0) < 0.35
-          and sp.max() <= 0.5 + 2 * 0.08 + 1e-9,
-          f"mean {sp.mean():.3f}, std {sp.std():.3f}, max {sp.max():.3f}")
-    check("current 'from E' flows west (vx < 0), spatially uniform, vz 0",
-          vs[:, 0].mean() < -0.4 and abs(vs[:, 1].mean()) < 0.1
+    frm = (270.0 - np.degrees(np.arctan2(vs[:, 1], vs[:, 0]))) % 360.0
+    dfrm = (frm - 90.0 + 180.0) % 360.0 - 180.0
+    check("current: mean speed and direction are the configured ones, the "
+          "fluctuation has the configured sigma and never leaves its bound",
+          abs(sp.mean() / 0.5 - 1.0) < 0.03 and abs(sp.std() / 0.05 - 1.0) < 0.25
+          and np.abs(sp - 0.5).max() <= FLUCTUATION_LIMIT * 0.05 + 1e-9
+          and abs(dfrm.mean()) < 2.0 and abs(dfrm.std() / 10.0 - 1.0) < 0.25
+          and np.abs(dfrm).max() <= FLUCTUATION_LIMIT * 10.0 + 1e-6,
+          f"speed {sp.mean():.3f} +- {sp.std():.3f} (max dev "
+          f"{np.abs(sp - 0.5).max():.3f} <= {FLUCTUATION_LIMIT * 0.05:.3f}), from "
+          f"{90 + dfrm.mean():.1f} +- {dfrm.std():.1f} deg")
+    check("current 'from E' flows west (vx < 0), horizontal only",
+          vs[:, 0].mean() < -0.45 and abs(vs[:, 1].mean()) < 0.05
           and not np.any(vs[:, 2]))
-    c0 = CurrentProcess(0.0, 0.0)
-    c0.step(1.0)
+    # Smooth, not Brownian: increments over 2 dt are twice those over dt
+    # for a C1 path (sqrt(2) for the Euler-Maruyama OU it replaces).
+    _xi = UnitGaussMarkov(60.0, (5, 11))
+    _tt = 100.0 + np.arange(4000) * 0.37
+    _d1 = _xi(_tt + 0.01) - _xi(_tt)
+    _d2 = _xi(_tt + 0.02) - _xi(_tt)
+    _ratio = float(np.sqrt((_d2 ** 2).mean() / (_d1 ** 2).mean()))
+    _acc = np.abs(_xi(_tt + 0.02) - 2 * _xi(_tt + 0.01) + _xi(_tt)) / 0.01 ** 2
+    # An Euler-Maruyama OU at tau 60 s has a second difference of order
+    # sqrt(2 h / tau) / h^2 ~ 260 1/s^2 at h = 0.01 s (white-noise
+    # acceleration); the spline's is bounded by ~6 max|xi| / knot_dt^2.
+    check("current variation is smooth: increments scale with dt (not "
+          "sqrt(dt)), bounded second difference (no frame-to-frame noise)",
+          1.8 < _ratio < 2.2 and _acc.max() < 1.0,
+          f"rms(d 2dt)/rms(d dt) = {_ratio:.3f}, max |xi''| {_acc.max():.3f} 1/s^2 "
+          f"(Brownian at this step: ~{np.sqrt(2 * 0.01 / 60.0) / 0.01 ** 2:.0f})")
+    _f1, _f2 = CurrentField(42), CurrentField(42)
+    _spec = cp.spec
+    _dense = [_f1.velocity(float(t), 3.0, 4.0, _spec) for t in np.arange(0.0, 137.3, 0.0137)]
+    _a = _f1.velocity(137.3, 3.0, 4.0, _spec)
+    _b = _f2.velocity(137.3, 3.0, 4.0, _spec)       # fresh object, one call
+    _c = CurrentField(43).velocity(137.3, 3.0, 4.0, _spec)
+    check("current is a pure function of (seed, t, x, y): the same value "
+          "however often or when it was evaluated; another seed differs",
+          np.array_equal(_a, _b) and not np.array_equal(_a, _c) and len(_dense) > 0)
+    c0 = CurrentProcess(0.0, 0.0, seed=1)
     check("'none' current is an exact zero vector", not c0.active
-          and not np.any(c0.velocity_world()))
-    cp_a = CurrentProcess(0.25, 45.0, 0.05, 10.0, rng=np.random.default_rng(9))
-    cp_b = CurrentProcess(0.25, 45.0, 0.05, 10.0, rng=np.random.default_rng(9))
-    for _ in range(100):
-        cp_a.step(0.1)
-        cp_b.step(0.1)
-    check("current process is deterministic per seed",
-          np.array_equal(cp_a.velocity_world(), cp_b.velocity_world()))
+          and not np.any(c0.velocity_at(12.0, 5.0, 5.0)))
+    # No reset at a change of situation: a command changes the mean speed;
+    # after the ramp the fluctuation is the SAME realisation, rescaled.
+    _sea_c = SeaModel(presets, SeaSchedule.constant(state_from_dict(
+        presets, {"current": {"speed_mps": 0.3, "from_deg": 0.0,
+                              "variation": "steady"}})), seed=9)
+    _before = _sea_c.update(199.99, Pose3D(0.0, 0.0, 0.0)).current_vec
+    _sea_c.apply_command(json.dumps({"current": {"speed_mps": 0.6, "from_deg": 0.0,
+                                                 "variation": "steady"},
+                                     "ramp_s": 10.0}), 200.0)
+    _just = _sea_c.update(200.01, Pose3D(0.0, 0.0, 0.0)).current_vec
+    _after = _sea_c.update(215.0, Pose3D(0.0, 0.0, 0.0))
+    _xs = _sea_c.current.unit("speed", 60.0)(215.0)
+    _exp = 0.6 + 0.6 * 0.05 * float(np.asarray(bounded_fn(_xs)))
+    check("a change of situation ramps the mean and keeps the variation "
+          "running (no restart): continuous across the command, same "
+          "realisation after the ramp",
+          np.hypot(*(_just - _before)[:2]) < 0.002
+          and abs(np.hypot(*_after.current_vec[:2]) - _exp) < 1e-9,
+          f"jump {np.hypot(*(_just - _before)[:2]) * 1000:.2f} mm/s; speed "
+          f"{np.hypot(*_after.current_vec[:2]):.4f} vs {_exp:.4f}")
+    _ed = EddyField(seed=3)
+    _px = np.random.default_rng(0).uniform(-200, 200, 400)
+    _py = np.random.default_rng(1).uniform(-200, 200, 400)
+    _h = 1e-3
+    _div = ((_ed.velocity(_px + _h, _py, 50.0)[:, 0] - _ed.velocity(_px - _h, _py, 50.0)[:, 0])
+            + (_ed.velocity(_px, _py + _h, 50.0)[:, 1] - _ed.velocity(_px, _py - _h, 50.0)[:, 1])
+            ) / (2 * _h)
+    _grid = np.stack(np.meshgrid(np.linspace(0, 1000, 120), np.linspace(0, 1000, 120)), -1).reshape(-1, 2)
+    _uv = _ed.velocity(_grid[:, 0], _grid[:, 1], 0.0)
+    _rms = float(np.sqrt((_uv ** 2).sum(axis=1).mean()))
+    _sea_st = state_from_dict(presets, {"current": {"speed_mps": 0.4, "variation": "steady"}})
+    _parts = CurrentField(3).components(10.0, 5.0, 5.0, _sea_st.current)
+    check("eddy field: divergence-free, unit RMS over space, bounded; zero "
+          "under 'steady' variation",
+          np.abs(_div).max() < 1e-6 and abs(_rms - 1.0) < 0.2
+          and np.hypot(_uv[:, 0], _uv[:, 1]).max() <= _ed.bound + 1e-9
+          and _sea_st.current.spatial_rms_mps == 0.0
+          and not np.any(_parts["spatial"]),
+          f"max |div| {np.abs(_div).max():.1e} 1/s, RMS {_rms:.2f}, bound {_ed.bound:.2f}")
 
     # Presets file: every preset labelled and referenced, Tp in band,
     # unknown keys raise by name.
@@ -3503,6 +4848,69 @@ def main() -> None:
           and not presets.waves["calm"].events.active
           and [p.hs_m for p in presets.waves.values()]
           == sorted(p.hs_m for p in presets.waves.values()))
+    # Plain-language keys (2026-10-08, additive): a mean speed with a
+    # variation level; a wave height with automatic period, crest length
+    # and wakes; WMO 3700 codes; per-keyframe transitions.
+    _pl = state_from_dict(presets, {
+        "current": {"speed_mps": 0.3, "from": "NE", "variation": "natural"},
+        "waves": {"hs_m": 0.2, "tp_s": "auto", "crest": "long",
+                  "wakes": "frequent", "from_deg": 90}})
+    _near = presets.nearest_wave_preset(0.2)
+    _var = presets.variation["natural"]
+    check("plain keys resolve on the simulator side: variation -> sigmas "
+          "scaled by the mean speed; tp auto, crest, wakes, Douglas code",
+          abs(_pl.current.sigma_speed_mps - _var.sigma_speed_frac * 0.3) < 1e-12
+          and _pl.current.sigma_dir_deg == _var.sigma_dir_deg
+          and abs(_pl.current.spatial_rms_mps - _var.spatial_frac * 0.3) < 1e-12
+          and _pl.current.from_deg == 45.0
+          and abs(_pl.waves.tp_s - presets.auto_tp(0.2)) < 1e-12
+          and presets.waves["smooth"].tp_s < _pl.waves.tp_s < presets.waves["slight"].tp_s
+          and _pl.waves.spread_s == presets.crest["long"].spread_s
+          and abs(_pl.waves.events.rate_per_hour
+                  - _near.events.rate_per_hour * presets.wakes["frequent"].rate_scale) < 1e-9
+          and _pl.waves.douglas == 2,
+          f"sigma {_pl.current.sigma_speed_mps:.3f} m/s / {_pl.current.sigma_dir_deg:.0f} deg, "
+          f"eddies {_pl.current.spatial_rms_mps:.3f} m/s; Tp auto {_pl.waves.tp_s:.2f} s, "
+          f"s {_pl.waves.spread_s}, wakes {_pl.waves.events.rate_per_hour:.0f}/h")
+    _ex = state_from_dict(presets, {"current": {"preset": "weak", "sigma_speed_mps": 0.07}})
+    _sp = state_from_dict(presets, {"current": {"preset": "weak", "speed_mps": 0.4}})
+    _nw = state_from_dict(presets, {"waves": {"preset": "smooth", "wakes": "none"}})
+    _lg = state_from_dict(presets, {"current": {"preset": "strong"},
+                                    "waves": {"preset": "slight", "from": "E"}})
+    try:
+        state_from_dict(presets, {"current": {"speed_mps": 0.2, "variation": "wild"}})
+        _raised = ""
+    except KeyError as exc:
+        _raised = str(exc)
+    _hs = np.linspace(0.01, 1.0, 60)
+    _tps = [presets.auto_tp(h) for h in _hs]
+    check("explicit sigmas win, a speed override re-derives them, wakes 'none' "
+          "switches the groups off, an unknown level raises, legacy preset "
+          "blocks are unchanged, auto Tp is monotone and hits the presets",
+          _ex.current.sigma_speed_mps == 0.07
+          and abs(_sp.current.sigma_speed_mps - 0.04) < 1e-12
+          and not _nw.waves.events.active and "natural" in _raised
+          and _lg.waves == dataclasses.replace(presets.waves["slight"], from_deg=90.0)
+          and all(b >= a for a, b in zip(_tps, _tps[1:]))
+          and all(abs(presets.auto_tp(w.hs_m) - w.tp_s) < 1e-9
+                  for w in presets.waves.values() if w.hs_m > 0))
+    check("Douglas / WMO 3700 code by Hs (0.35 m is code 2, 0.6 m code 3)",
+          [douglas_from_hs(h) for h in (0.0, 0.05, 0.15, 0.35, 0.6, 1.5, 3.0)]
+          == [0, 1, 2, 2, 3, 4, 5]
+          and all(w.douglas == douglas_from_hs(w.hs_m) for w in presets.waves.values()))
+    _kf_doc = {"format": SCHEDULE_FORMAT, "interpolation": "hold", "keyframes": [
+        {"t_s": 0, "waves": {"preset": "calm"}},
+        {"t_s": 30, "ramp_s": 45.0, "waves": {"preset": "smooth", "from": "E"}}]}
+    _kf = SeaSchedule.from_dict(presets, _kf_doc)
+    _kf_model = SeaModel(presets, _kf, depth_m=5.0, seed=2)
+    for _tt in np.arange(0.0, 40.0, 0.5):
+        _kf_model.update(float(_tt), None)
+    check("a keyframe's ramp_s sets that transition's length (hold "
+          "timeline); it survives the YAML round-trip",
+          abs(_kf_model._blend_dur - 45.0) < 1e-9
+          and SeaSchedule.from_dict(presets, _kf.to_dict()).ramps == {30.0: 45.0}
+          and _kf.ramp_for(10.0) is None and _kf.ramp_for(31.0) == 45.0,
+          f"blend over {_kf_model._blend_dur:.0f} s")
     # Random wave groups (sea/events.py): Poisson arrivals at the preset
     # rate, exact zeros between groups, Hann-bounded height, seed
     # determinism, and the model carries them into the surface + readback.
@@ -3516,17 +4924,23 @@ def main() -> None:
         _e = float(_ev.elevation(0.0, 0.0, _t)[0])
         _eta.append(_e)
         _live += _ev.active
+        if _i == 36000:                           # half way: the reference
+            _t_mid, _c_mid = _t, _ev.count
     _eta = np.array(_eta)
+    # Seed determinism: a second process with the same seed, advanced in ONE
+    # jump to the half-way time, must hold the same groups (count) and give
+    # the same surface (bit-identical) as the one stepped at 0.05 s.
     _ev2 = _WEP(_ES(rate_per_hour=30.0, hs_m=0.3, tp_s=6.0, duration_s=30.0),
                 from_deg=90.0, depth_m=5.0, seed=11)
-    _ev2.advance(1800.0)
+    _ev2.advance(_t_mid)
+    _e2_mid = float(_ev2.elevation(0.0, 0.0, _t_mid)[0])
     _ev.advance(3600.0 + 120.0)          # every group has died by then
     check("wave events: ~30/h Poisson arrivals, zero between groups, bounded, seeded",
           15 <= _ev.count <= 50
           and abs(_eta.mean()) < 0.01 and _eta.max() < 0.3 * 1.3
           and (np.abs(_eta) < 1e-12).mean() > 0.4     # mostly quiet water
           and 0.1 < _live / 72000.0 < 0.6
-          and _ev2.count == sum(1 for _ in [0]) * _ev2.count
+          and _ev2.count == _c_mid and _e2_mid == _eta[36000]
           and _ev2.count <= _ev.count and not _ev.active,
           f"{_ev.count} groups/h, live {100 * _live / 72000:.0f}% of the time, "
           f"max eta {_eta.max():.2f} m")
@@ -3648,10 +5062,52 @@ def main() -> None:
                           seed=1)
     smp0 = null_model.update(0.0, Pose3D(0.0, 0.0, z_eq))
     smp1 = null_model.update(0.5, Pose3D(0.0, 0.0, z_eq))
-    check("none/calm model publishes exact zeros and no wave activity",
-          not np.any(smp1.water_velocity) and not np.any(smp1.force)
-          and not np.any(smp1.torque) and not smp1.waves_active
-          and not smp0.waves_active and smp1.state.is_null)
+    # One hull in every run (2026-10-09, S11 resolved): on calm water the
+    # model still carries the catamaran hydrostatics -- zero at the trim
+    # (both hulls share it), restoring away from it -- and no wave forcing.
+    smp_p = null_model.update(0.6, Pose3D(0.0, 0.0, z_eq, pitch=np.radians(-2.0)))
+    check("calm water: no current, no wave forcing, and the catamaran "
+          "hydrostatics still carry the hull (zero at the trim, restoring a "
+          "2 deg bow-up pitch)",
+          not np.any(smp1.water_velocity) and not smp1.waves_active
+          and not smp0.waves_active and smp1.state.is_null
+          and smp1.wrench_active and null_model.hydrostatics == "catamaran"
+          and np.abs(smp1.force).max() < 0.5 and np.abs(smp1.torque).max() < 0.05
+          and smp_p.torque[1] > 5.0,
+          f"trim residual {np.abs(smp1.force).max():.1e} N; bow-up 2 deg -> "
+          f"My {smp_p.torque[1]:+.1f} N.m (positive = bow down)")
+    _legacy_presets = dataclasses.replace(
+        presets, hull={**presets.hull, "hydrostatics": "gazebo_box_when_calm"})
+    _legacy = SeaModel(_legacy_presets, SeaSchedule.constant(resolve_state(presets)),
+                       seed=1)
+    _lg1 = _legacy.update(0.5, Pose3D(0.0, 0.0, z_eq, pitch=0.03))
+    check("hydrostatics 'gazebo_box_when_calm' restores the old calm-water "
+          "no-op exactly (old runs, A/B)",
+          not np.any(_lg1.force) and not np.any(_lg1.torque)
+          and not _lg1.wrench_active)
+    # No hydrostatics switch when the waves start: a calm -> smooth command
+    # ramps the wave forcing in from the calm hull's own wrench.
+    _sw = SeaModel(presets, SeaSchedule.constant(resolve_state(presets)),
+                   depth_m=5.0, seed=3)
+    _pp = Pose3D(1.0, 2.0, z_eq + 0.01, pitch=np.radians(1.0), yaw=0.2)
+    _before = _sw.update(10.0, _pp)
+    _sw.apply_command(json.dumps({"waves": {"preset": "smooth", "from": "E"},
+                                  "ramp_s": 30.0}), 10.0)
+    _after = _sw.update(10.01, _pp)
+    _old_presets = _legacy_presets
+    _osw = SeaModel(_old_presets, SeaSchedule.constant(resolve_state(presets)),
+                    depth_m=5.0, seed=3)
+    _ob = _osw.update(10.0, _pp)
+    _osw.apply_command(json.dumps({"waves": {"preset": "smooth", "from": "E"},
+                                   "ramp_s": 30.0}), 10.0)
+    _oa = _osw.update(10.01, _pp)
+    _jump = float(np.hypot(*(_after.force - _before.force)[[0, 2]]))
+    _ojump = float(np.hypot(*(_oa.force - _ob.force)[[0, 2]]))
+    check("the waves starting does not switch the hull model: the wrench is "
+          "continuous across a calm -> waves command (it stepped before)",
+          _before.wrench_active and _after.wrench_active and _jump < 1.0
+          and _ojump > 10.0 * max(_jump, 0.1),
+          f"step {_jump:.2f} N now vs {_ojump:.1f} N with the box when calm")
     sea = SeaModel(presets, SeaSchedule.constant(st), depth_m=5.0, seed=7)
     fz_fixed, fz_follow, mx = [], [], []
     for i in range(6000):
@@ -3707,11 +5163,16 @@ def main() -> None:
           f"first 0.5 s max {max(ramp_f[:5]):.1f} N, after ramp {max(ramp_f[100:]):.1f} N")
     status = sea_cmd.status_dict(sea_cmd.update(31.0, Pose3D(0.0, 0.0, z_eq)),
                                  "generated_ocean", "blueboat")
-    check("status JSON carries preset, from/toward, Hs/Tp, wrench and schedule",
+    check("status JSON carries preset, from/toward, Hs/Tp, wrench and schedule, "
+          "and (additive) the variation around the mean and the crest/wakes",
           json.loads(json.dumps(status))["current"]["from"] == "E"
           and status["current"]["toward"] == "W"
           and status["waves"]["hs_m"] == 0.35 and status["waves"]["status"] == "active"
-          and "fz" in status["wrench"] and status["schedule"]["keyframes"] == 1)
+          and "fz" in status["wrench"] and status["schedule"]["keyframes"] == 1
+          and status["current"]["variation"] == "natural"
+          and status["current"]["sigma_speed_mps"] > 0.0
+          and status["current"]["spatial_rms_mps"] > 0.0
+          and {"crest", "wakes", "spread_s"} <= set(status["waves"]))
     sched_model = SeaModel(presets, sched, depth_m=5.0, seed=sched.seed)
     st_late = sched_model.update(0.0, None).state
     for tt in np.arange(0.5, 320.0, 0.5):
@@ -3736,21 +5197,53 @@ def main() -> None:
 
     # Launch-side resolution + the generated world's plugin.
     from full_mission_launch import (SEA_ARGS,  # noqa: E402
-                                     world_name_from_sdf)
-    from sea_state_launch import wrench_bridges  # noqa: E402
-    from simple_launch import GazeboBridge as _GB  # noqa: E402
-    GazeboBridge_ros2gz = _GB.ros2gz
+                                     gz_args_for, world_name_from_sdf)
     check("generated world.sdf carries the ApplyLinkWrench system",
           "apply-link-wrench-system" in sdf and "ApplyLinkWrench" in sdf)
     check("launch resolves the world name from the SDF (stock fallback 'ocean')",
           world_name_from_sdf(str(world_dir / "world.sdf")) == "generated_ocean"
           and world_name_from_sdf(str(OUT / "missing.sdf")) == "ocean")
-    wb = wrench_bridges("generated_ocean")
-    check("wrench bridges pin EntityWrench/Entity with explicit gz types",
-          [b.gz_msg for b in wb] == ["gz.msgs.EntityWrench", "gz.msgs.Entity"]
-          and all(b.direction == GazeboBridge_ros2gz for b in wb)
-          and set(SEA_ARGS) == {"sea_current", "sea_current_from_deg", "sea_waves",
-                                "sea_waves_from_deg", "sea_schedule", "sea_seed"})
+    check("headless launches run the Gazebo server only (-s), default keeps the GUI",
+          gz_args_for(True) == "-r -s" and gz_args_for("true") == "-r -s"
+          and gz_args_for(False) == "-r" and gz_args_for("false") == "-r")
+    check("the sea-state launch arguments are the six the launches forward",
+          set(SEA_ARGS) == {"sea_current", "sea_current_from_deg", "sea_waves",
+                            "sea_waves_from_deg", "sea_schedule", "sea_seed"})
+    # The bridge-type pinning is the one check here that genuinely needs ROS
+    # on the path (it builds GazeboBridge objects). Every other launch check
+    # in this suite runs on any interpreter; this one says so when it cannot.
+    try:
+        from sea_state_launch import wrench_bridges  # noqa: E402
+        from simple_launch import GazeboBridge as _GB  # noqa: E402
+    except ImportError as exc:
+        print(f"  SKIP: wrench- and pose-bridge type pinning and the "
+              f"ApplyLinkWrench detection need ROS ({exc}); everything else "
+              f"in [10] ran")
+    else:
+        wb = wrench_bridges("generated_ocean")
+        check("wrench bridges pin EntityWrench/Entity with explicit gz types",
+              [b.gz_msg for b in wb] == ["gz.msgs.EntityWrench", "gz.msgs.Entity"]
+              and all(b.direction == _GB.ros2gz for b in wb))
+        from sea_state_launch import BOAT_POSE_TOPIC, pose_bridge  # noqa: E402
+        pb = pose_bridge("blueboat")
+        check("the stamped 100 Hz pose bridge: gz.msgs.Pose -> "
+              "TransformStamped (stamp + child frame kept), gz -> ROS",
+              pb.gz_msg == "gz.msgs.Pose" and pb.direction == _GB.gz2ros
+              and BOAT_POSE_TOPIC == "/sim/sea_state/boat_pose")
+        # The stock world gets ApplyLinkWrench injected at run time; our own
+        # bridge advertises /wrench and /wrench/clear before the node looks,
+        # so only the system's own /wrench/persistent may prove it is there.
+        from blueboat_sss_sim.ros.sea_state_node import (  # noqa: E402
+            wrench_system_loaded)
+        _bridged = ["/world/ocean/stats", "/world/ocean/wrench",
+                    "/world/ocean/wrench/clear"]
+        check("ApplyLinkWrench is detected by its own /wrench/persistent, never "
+              "by the /wrench topic our bridge advertises (stock-world injection)",
+              not wrench_system_loaded(_bridged, "ocean")
+              and wrench_system_loaded(_bridged + ["/world/ocean/wrench/persistent"],
+                                       "ocean")
+              and not wrench_system_loaded(
+                  ["/world/generated_ocean/wrench/persistent"], "ocean"))
 
     # Renderer pitch coupling: a pitched platform images the ground
     # `altitude * tan(pitch)` along-track from where a level one does, on
@@ -3783,22 +5276,1175 @@ def main() -> None:
           np.array_equal(again.power, ref.power)
           and np.array_equal(again.specular, ref.specular))
 
+    # Sensor pose follows the vehicle (2026-10-08): the lever arm is rotated
+    # by the full attitude, so roll lifts one transducer and dips the other,
+    # pitch swings it along-track; a level pose is bit-identical to the
+    # yaw-only mount of before.
+    r_sp = GeometricRenderer(scene, acq, model)
+    _base = Pose3D(10.0, 5.0, -0.11, yaw=0.4)
+    _my, _dd = model.mount_y_abs_m, model.sensor_depth_m
+    _phi, _th = np.radians(10.0), np.radians(5.0)
+    _lvl = {sd: r_sp.sensor_pose(sd, _base) for sd in Side}
+    _rol = {sd: r_sp.sensor_pose(sd, dataclasses.replace(_base, roll=_phi)) for sd in Side}
+    _pit = r_sp.sensor_pose(Side.PORT, dataclasses.replace(_base, pitch=_th))
+    _c, _s = np.cos(_base.yaw), np.sin(_base.yaw)
+    _old = Pose3D(_base.x - _s * _my, _base.y + _c * _my, _base.z - _dd, yaw=_base.yaw)
+    _fwd = (_pit.x - _lvl[Side.PORT].x) * _c + (_pit.y - _lvl[Side.PORT].y) * _s
+    _dzp = _rol[Side.PORT].z - _lvl[Side.PORT].z
+    _dzs = _rol[Side.STARBOARD].z - _lvl[Side.STARBOARD].z
+    check("roll moves the two transducers vertically in opposite senses "
+          "(m_y sin(roll) + d(1 - cos(roll))); pitch swings them -d sin(pitch) "
+          "along-track; a level pose is the yaw-only mount bit for bit",
+          abs(_dzp - (_my * np.sin(_phi) + _dd * (1 - np.cos(_phi)))) < 1e-12
+          and abs(_dzs - (-_my * np.sin(_phi) + _dd * (1 - np.cos(_phi)))) < 1e-12
+          and abs(_fwd + _dd * np.sin(_th)) < 1e-12
+          and _lvl[Side.PORT] == _old,
+          f"10 deg roll: port {_dzp * 1000:+.1f} mm, stbd {_dzs * 1000:+.1f} mm; "
+          f"5 deg pitch: {_fwd * 1000:+.1f} mm along-track")
+    # The image responds to the platform's attitude as a real side-looking
+    # transducer does (Cobra et al. 1992; Lei et al. 2026): roll steers the
+    # beam pattern (opposite brightness change on the two sides), yaw turns
+    # the fan (opposite along-track shift on the two sides -- pitch, above,
+    # shifts both the same way).
+    _r_img = GeometricRenderer(scene, acq, dataclasses.replace(
+        model, speckle=False, coherent_scatterers=False))
+    _pose0 = Pose3D(px0, py0, 0.0)
+    _db = {}
+    for sd in Side:
+        _r0 = _r_img.render(sd, _pose0, 0.0).ping
+        _r1 = _r_img.render(sd, dataclasses.replace(_pose0, roll=np.radians(8.0)),
+                            0.0).ping
+        _rng = acq.range_start_mm / 1000.0 + (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+        _ok = (_rng > 1.3 * _r0.altitude_m) & (_r0.power > 0) & (_r1.power > 0)
+        _d = 10 * np.log10(_r1.power[_ok] / _r0.power[_ok])
+        _h = _d.size // 2
+        _db[sd] = float(_d[_h:].mean() - _d[:_h].mean())      # far minus near
+    check("8 deg roll tilts the beam pattern: one side brightens toward far "
+          "range, the other toward near range (port/starboard banding)",
+          np.sign(_db[Side.PORT]) == -np.sign(_db[Side.STARBOARD])
+          and min(abs(v) for v in _db.values()) > 0.5,
+          f"far-minus-near change: port {_db[Side.PORT]:+.2f} dB, "
+          f"stbd {_db[Side.STARBOARD]:+.2f} dB")
+    # Yaw turns the fan (look = yaw +- 90 deg): the ground point a ping
+    # images at 15 m moves along-track by 15 sin(dyaw), opposite on the two
+    # sides -- the differential mode (whole-ping correlation on this mixed
+    # scene cannot isolate it; the Gazebo gate measures it on real runs).
+    _yshift = {}
+    for sd in Side:
+        _p0s = _r_img.sensor_pose(sd, _pose0)
+        _p1s = _r_img.sensor_pose(sd, dataclasses.replace(_pose0, yaw=np.radians(3.0)))
+        _l0, _l1 = _p0s.yaw + sd.sign * np.pi / 2, _p1s.yaw + sd.sign * np.pi / 2
+        _g0 = np.array([_p0s.x + 15 * np.cos(_l0), _p0s.y + 15 * np.sin(_l0)])
+        _g1 = np.array([_p1s.x + 15 * np.cos(_l1), _p1s.y + 15 * np.sin(_l1)])
+        _yshift[sd] = float((_g1 - _g0)[0])          # along-track = +x at yaw 0
+    check("3 deg yaw moves the two channels' footprints along-track in "
+          "opposite directions (differential mode, unlike pitch)",
+          np.sign(_yshift[Side.PORT]) == -np.sign(_yshift[Side.STARBOARD])
+          and all(abs(abs(v) - 15 * np.sin(np.radians(3.0))) < 0.05
+                  for v in _yshift.values()),
+          f"port {_yshift[Side.PORT]:+.3f} m, stbd {_yshift[Side.STARBOARD]:+.3f} m "
+          f"(15 sin 3 deg = {15 * np.sin(np.radians(3.0)):.3f} m)")
+
     # ------------------------------------------------------------------
     print("[11] builder schema help: every form row explains itself")
     from blueboat_sss_sim.worldgen.depth.presets import DEPTH_PRESETS as _DP
     from blueboat_sss_sim.worldgen.terrain import (TERRAIN_TEXTURE_SCHEMA as _TTS,
                                                     flatten_texture as _flat_tex)
-    _rows = list(_TTS) + [r for _, _, sch in _DP.values() for r in sch]
+    from blueboat_sss_sim.worldgen.depth.layers import (LAYER_KINDS as _LK11,
+                                                         schema_rows as _lrows)
+    _rows = (list(_TTS) + [r for _, _, sch in _DP.values() for r in sch]
+             + list(_lrows()))
     _bad = [r[0] for r in _rows
             if len(r) < 7 or not str(r[6]).strip() or not str(r[6]).strip().endswith(".")]
-    check("texture and depth-preset rows all carry a one-sentence help",
+    check("texture, depth-preset and layer-kind rows all carry a one-sentence help",
           not _bad and len(_TTS) == 16,
           f"{len(_rows)} rows; missing/unfinished: {_bad[:6]}")
+    check("every layer kind names its family, channels and literature",
+          all(sp.family and sp.channels and sp.reference.strip()
+              for sp in _LK11.values()) and len(_LK11) >= 20,
+          f"{len(_LK11)} kinds")
     check("7-tuple rows still flatten and default like 6-tuples",
           _flat_tex(None)["dunes.wavelength"] == 6.0
           and set(_flat_tex({"dunes": {"enabled": True}})) == {r[0] for r in _TTS})
 
+    # ------------------------------------------------------------------
+    print("[12] seabed layer editor: masks, compositor, landforms, bake")
+    from blueboat_sss_sim.core.geo import GeoAnchor as _GA12
+    from blueboat_sss_sim.core.types import GridSpec as _GS12, Wall as _W12
+    from blueboat_sss_sim.worldgen.depth import (DepthConfig as _DC12,
+                                                 build_height as _bh12,
+                                                 interpolate_to_grid as _itg12,
+                                                 load_geotiff as _lg12)
+    from blueboat_sss_sim.worldgen.depth.bake import (bake_composite as _bc12,
+                                                      write_depth_geotiff as _wt12)
+    from blueboat_sss_sim.worldgen.depth.compose import (compose as _cmp12,
+                                                         paint_layer as _pl12,
+                                                         source_layer as _sl12)
+    from blueboat_sss_sim.worldgen.depth.layers import (LAYER_KINDS as _LK12,
+                                                         normalize_layers as _nl12)
+    from blueboat_sss_sim.worldgen.depth.masks import build_mask as _bm12
+    from blueboat_sss_sim.worldgen.depth.masks import normalize_mask as _nm12
+    from blueboat_sss_sim.worldgen.depth.presets import DEPTH_PRESETS as _DP12
+    from blueboat_sss_sim.worldgen.materials import MaterialLibrary as _ML12
+    from blueboat_sss_sim.worldgen.terrain import (TerrainConfig as _TC12,
+                                                   synthesize_terrain as _st12)
+
+    g12 = _GS12(-20.0, -15.0, 0.5, 81, 61)
+    a12 = _GA12(34.4, 133.5)
+    xx12 = g12.origin_x + np.arange(g12.nx) * g12.resolution
+    yy12 = g12.origin_y + np.arange(g12.ny) * g12.resolution
+    X12, Y12 = np.meshgrid(xx12, yy12)
+
+    def _rng12():
+        return np.random.default_rng([3, 0])
+
+    same = []
+    for _name in _DP12:
+        _a = _bh12(g12, _DC12(mode="preset", preset=_name), [], a12, _rng12())
+        _c = _cmp12(g12, [_sl12(preset=_name)], [], a12, _rng12(), 3).height
+        same.append(np.array_equal(_a, _c))
+    check("a bare [source] stack compiles bit-identically to every preset",
+          all(same), f"{sum(same)}/{len(same)} presets")
+    strokes12 = [{"points": [[0.0, 0.0], [5.0, 2.0]], "radius_m": 3.0,
+                  "value": 6.0, "erase": False}]
+    _a = _bh12(g12, _DC12(mode="preset", preset="flat", paint=strokes12), [],
+               a12, _rng12())
+    _c = _cmp12(g12, [_sl12(preset="flat"), _pl12(strokes12)], [], a12,
+                _rng12(), 3).height
+    check("[source, paint] equals the legacy depth brush bit-for-bit",
+          np.array_equal(_a, _c))
+
+    poly12 = [[-5.0, -5.0], [5.0, -5.0], [5.0, 5.0], [-5.0, 5.0]]
+    msgs = {}
+    for tag, bad in (
+            ("layer", {"kind": "basin", "opacty": 1.0,
+                       "geometry": {"type": "polygon", "points": poly12}}),
+            ("params", {"kind": "basin", "params": {"floor_depht": 3.0},
+                        "geometry": {"type": "polygon", "points": poly12}}),
+            ("geometry", {"kind": "basin",
+                          "geometry": {"type": "polygon", "points": poly12,
+                                       "pts": 1}}),
+            ("mask", {"kind": "basin",
+                      "geometry": {"type": "polygon", "points": poly12},
+                      "mask": {"kind": "rect", "x_min": 0, "y_min": 0,
+                               "x_max": 1, "y_max": 1, "feather": 2}})):
+        try:
+            _nl12([_sl12(preset="flat"), bad])
+            msgs[tag] = ""
+        except (KeyError, ValueError) as exc:
+            msgs[tag] = str(exc)
+    check("unknown keys are named at the layer, params, geometry and mask level",
+          "depth.layers[1]" in msgs["layer"] and "opacty" in msgs["layer"]
+          and "depth.layers[1].params" in msgs["params"]
+          and "floor_depht" in msgs["params"]
+          and "depth.layers[1].geometry" in msgs["geometry"]
+          and "depth.layers[1].mask[0]" in msgs["mask"] and "feather" in msgs["mask"],
+          str({k: v[:60] for k, v in msgs.items()}))
+    try:
+        _cmp12(g12, [{"kind": "basin", "geometry": {"type": "polygon",
+                                                    "points": poly12}}],
+               [], a12, _rng12(), 3)
+        first_msg = ""
+    except ValueError as exc:
+        first_msg = str(exc)
+    try:
+        _nl12([{"kind": "source", "params": {"mode": "preset", "preset": "flat",
+                                              "paint": strokes12}}])
+        paint_msg = ""
+    except KeyError as exc:
+        paint_msg = str(exc)
+    check("the stack must start with a source, and a source takes no paint",
+          "first layer must be a 'source'" in first_msg
+          and "paint layer" in paint_msg)
+
+    # Blend modes on a flat 4 m bed: an absolute field (constant 6 m depth)
+    # and a delta field (1 m deeper), each under a hard rectangle mask.
+    rect12 = {"kind": "rect", "x_min": -10, "y_min": -10, "x_max": 0, "y_max": 0}
+    inside12 = (X12 >= -10) & (X12 <= 0) & (Y12 >= -10) & (Y12 <= 0)
+    grad12 = {"kind": "gradient", "geometry": {"type": "axis", "a": [-20, 0],
+                                                "b": [20, 0]},
+              "params": {"profile": "linear", "depth_start": 6.0,
+                         "depth_end": 6.0, "length_m": 40.0}, "mask": rect12}
+    offs12 = {"kind": "adjust", "params": {"op": "offset", "offset_m": 1.0},
+              "mask": rect12}
+    expect = {("abs", "normal"): -6.0, ("abs", "add"): -10.0,
+              ("abs", "deepen"): -6.0, ("abs", "shoal"): -4.0,
+              ("delta", "normal"): -5.0, ("delta", "add"): -5.0,
+              ("delta", "deepen"): -5.0, ("delta", "shoal"): -4.0}
+    got_ok = True
+    detail12 = []
+    for (kind, mode), want in expect.items():
+        L = dict(grad12 if kind == "abs" else offs12, blend=mode, id="b")
+        h = _cmp12(g12, [_sl12(preset="flat", params={"depth": 4.0}), L], [],
+                   a12, _rng12(), 3).height
+        ok = (np.allclose(h[inside12], want) and np.allclose(h[~inside12], -4.0))
+        got_ok &= ok
+        if not ok:
+            detail12.append(f"{kind}/{mode}: {h[inside12].mean():.2f}")
+    check("blend modes normal / add / deepen / shoal give their closed-form values",
+          got_ok, "; ".join(detail12))
+
+    fine12 = _GS12(-10.0, -10.0, 0.1, 201, 201)
+    w_f = _bm12(fine12, _nm12({"kind": "polygon", "points": poly12,
+                               "feather_m": 3.0}), [])
+    d2 = np.diff(w_f, n=2, axis=1)
+    check("a feathered mask is C1: bounded second difference on a 0.1 m grid, "
+          "1 inside, 0 beyond the feather",
+          float(np.abs(d2).max()) < 0.02 and w_f[100, 100] == 1.0
+          and w_f[100, 195] == 0.0 and 0.0 < w_f[100, 165] < 1.0,
+          f"max |d2| {np.abs(d2).max():.4f}")
+    wall12 = _W12(name="quay", x0=6.0, y0=-10.0, x1=6.0, y1=10.0)
+    w_w = _bm12(fine12, _nm12({"kind": "polygon", "points": poly12,
+                               "feather_m": 4.0}), [wall12])
+    w_nw = _bm12(fine12, _nm12({"kind": "polygon", "points": poly12,
+                                "feather_m": 4.0}), [])
+    check("a mask feather never crosses a wall",
+          float(w_w[100, 170:200].max()) == 0.0 and float(w_nw[100, 170]) > 0.0,
+          f"beyond the wall with {w_w[100,170:200].max():.3f}, without {w_nw[100,170]:.3f}")
+
+    # Channel along an S-shaped centreline: the thalweg hugs the outer bank.
+    xs_c = np.linspace(-18.0, 18.0, 37)
+    line12 = [[float(x), float(6.0 * np.sin(2 * np.pi * x / 36.0))] for x in xs_c]
+    ch12 = {"kind": "channel", "geometry": {"type": "polyline", "points": line12},
+            "params": {"template": "asymmetric", "width_m": 10.0,
+                       "depth_m": 5.0, "bank_depth_m": 0.5, "thalweg_frac": 0.7,
+                       "curvature_lag_m": 1.0,
+                       "pool_amplitude_m": 0.0, "feather_m": 1.0}}
+    h_ch = _cmp12(g12, [_sl12(preset="flat", params={"depth": 1.0}), ch12], [],
+                  a12, _rng12(), 3).height
+    col_crest = int(np.argmin(np.abs(xx12 - 9.0)))       # y = +6, right turn
+    col_trough = int(np.argmin(np.abs(xx12 + 9.0)))      # y = -6, left turn
+    y_deep_crest = yy12[int(np.argmin(h_ch[:, col_crest]))]
+    y_deep_trough = yy12[int(np.argmin(h_ch[:, col_trough]))]
+    col_mid = int(np.argmin(np.abs(xx12 - 0.0)))
+    check("channel template: the thalweg sits on the outer bank of each bend",
+          y_deep_crest > 6.5 and y_deep_trough < -6.5
+          and float(h_ch[:, col_mid].min()) < -4.5,
+          f"deepest y at the crest {y_deep_crest:.1f} (bank at 6), at the trough "
+          f"{y_deep_trough:.1f} (bank at -6)")
+
+    # Dean gradient from a straight shoreline == the beach_profile preset.
+    shore12 = {"kind": "gradient",
+               "geometry": {"type": "polyline",
+                            "points": [[-20.0, -15.0], [-20.0, 15.0]]},
+               "params": {"profile": "dean", "depth_start": 0.4,
+                          "depth_end": 100.0, "dean_A": 0.10, "side": "both"}}
+    h_dean = _cmp12(g12, [_sl12(preset="flat"), shore12], [], a12, _rng12(),
+                    3).height
+    h_beach = _bh12(g12, _DC12(mode="preset", preset="beach_profile",
+                               params={"deepening_direction_deg": 0.0,
+                                       "dean_A": 0.10, "min_depth": 0.4}),
+                    [], a12, _rng12())
+    check("a Dean gradient from a drawn shoreline equals the beach_profile preset",
+          float(np.abs(h_dean - h_beach).max()) < 1e-9,
+          f"max |dz| {np.abs(h_dean - h_beach).max():.2e} m")
+
+    # A positioned source above a preset: the preset shows beyond its reach.
+    e_s = np.linspace(-18.0, -8.0, 21)
+    n_s = np.linspace(-13.0, -3.0, 21)
+    E_s, N_s = np.meshgrid(e_s, n_s)
+    lat_s, lon_s = a12.to_latlon(E_s.ravel(), N_s.ravel())
+    csv12 = OUT / "layer_patch.csv"
+    with open(csv12, "w", encoding="utf-8") as f:
+        f.write("lat,lon,depth\n")
+        for la, lo in zip(lat_s, lon_s):
+            f.write(f"{la:.9f},{lo:.9f},7.5\n")
+    over12 = _sl12(mode="file", file=str(csv12))
+    over12["id"] = "survey"
+    h_ov = _cmp12(g12, [_sl12(preset="flat", params={"depth": 3.0}), over12],
+                  [], a12, _rng12(), 3).height
+    far = (X12 >= 19.0) & (Y12 >= 13.5)        # > 2 x reach from every sounding
+    on = (X12 > -17.0) & (X12 < -9.0) & (Y12 > -12.0) & (Y12 < -4.0)
+    check("a depth file laid over a preset keeps the preset beyond its reach and "
+          "the soundings where it measured",
+          np.allclose(h_ov[far], -3.0) and np.allclose(h_ov[on], -7.5, atol=1e-6),
+          f"far {h_ov[far].mean():.2f}, on the patch {h_ov[on].mean():.2f}")
+
+    flat12 = _sl12(preset="flat", params={"depth": 4.0})
+    dunes12 = {"kind": "dunes", "seed": 11, "params": {"wavelength_m": 8.0}}
+    rough12 = {"kind": "roughness", "seed": 12, "params": {"amplitude_m": 0.2}}
+    h_a = _cmp12(g12, [flat12, rough12], [], a12, _rng12(), 3).height
+    h_d = _cmp12(g12, [flat12, dunes12], [], a12, _rng12(), 3).height
+    h_b = _cmp12(g12, [flat12, dunes12, rough12], [], a12, _rng12(), 3).height
+    h_b2 = _cmp12(g12, [flat12, dict(dunes12, params={"wavelength_m": 5.0}),
+                        rough12], [], a12, _rng12(), 3).height
+    h_d2 = _cmp12(g12, [flat12, dict(dunes12, params={"wavelength_m": 5.0})],
+                  [], a12, _rng12(), 3).height
+    check("relief layers draw from their own streams: editing one leaves the "
+          "other's texture bit-identical",
+          np.allclose(h_b - h_d, h_a + 4.0, atol=1e-12)
+          and np.allclose(h_b2 - h_d2, h_a + 4.0, atol=1e-12)
+          and float(np.std(h_a)) > 0.01)
+
+    feat12 = dict(rect12, feather_m=4.0)
+    reg_h = {"kind": "material_region", "mask": feat12,
+             "params": {"material": "mud", "edge": "hard"}}
+    reg_d = {"kind": "material_region", "mask": feat12,
+             "params": {"material": "mud", "edge": "dithered"}}
+    c_h = _cmp12(g12, [flat12, reg_h], [], a12, _rng12(), 3)
+    c_d = _cmp12(g12, [flat12, reg_d], [], a12, _rng12(), 3)
+    c_d2 = _cmp12(g12, [flat12, reg_d], [], a12, _rng12(), 3)
+    # Hard edge: stamped where the feathered weight is >= 0.5, i.e. up to
+    # half the feather (2 m) beyond the rectangle; dithered: patchy across
+    # the whole feather and identical on a second run.
+    near = (X12 > 0.5) & (X12 < 1.5) & (Y12 > -8) & (Y12 < -2)
+    beyond = (X12 > 2.5) & (X12 < 3.5) & (Y12 > -8) & (Y12 < -2)
+    band = (X12 > 0.5) & (X12 < 3.5) & (Y12 > -8) & (Y12 < -2)
+    check("material_region: a hard edge stamps by threshold, a dithered edge is "
+          "patchy and seeded",
+          c_h.material_names == ["mud"] and (c_h.material_id[inside12] == 0).all()
+          and (c_h.material_id[near] == 0).all()
+          and (c_h.material_id[beyond] == -1).all()
+          and 0 < int((c_d.material_id[band] == 0).sum()) < int(band.sum())
+          and np.array_equal(c_d.material_id, c_d2.material_id))
+
+    gain12 = {"kind": "reflectivity_gain", "mask": rect12,
+              "params": {"gain_db": -6.0}}
+    c_g = _cmp12(g12, [flat12, gain12], [], a12, _rng12(), 3)
+    tcfg12 = _TC12.from_dict({"dunes": {"enabled": False},
+                              "roughness": {"amplitude": 0.0},
+                              "materials": {"layout": "uniform",
+                                            "uniform": "sand"}})
+    t_g = _st12(g12, tcfg12, _ML12(), _rng12(), base_height=c_g.height,
+                reflectivity_gain=c_g.gain)
+    t_0 = _st12(g12, tcfg12, _ML12(), _rng12(), base_height=c_g.height)
+    ratio = t_g.reflectivity[inside12] / t_0.reflectivity[inside12]
+    check("a -6 dB reflectivity gain quarters the rendered reflectivity under its "
+          "mask and leaves the rest untouched",
+          np.allclose(ratio, 10 ** -0.6, rtol=1e-6)
+          and np.array_equal(t_g.reflectivity[~inside12],
+                             t_0.reflectivity[~inside12]))
+    t_m = _st12(g12, tcfg12, _ML12(), _rng12(), base_height=c_h.height,
+                material_overlay=c_h.material_overlay)
+    stamped = c_h.material_id == 0
+    check("a material overlay stamps its ids over the base layout by name",
+          t_m.material_names == ["sand", "mud"]
+          and (t_m.material_id[stamped] == 1).all()
+          and (t_m.material_id[~stamped] == 0).all() and stamped.any())
+
+    # Bake: the composite through a GeoTIFF and back, losslessly (float32).
+    stack12 = [flat12, ch12, dict(reg_d, id="mud"), dict(gain12, id="gain")]
+    comp12 = _cmp12(g12, stack12, [], a12, _rng12(), 3)
+    tif12 = _wt12(comp12.height, g12, a12, OUT / "layers_baked.tif")
+    s_al = _lg12(tif12, a12, "depth", grid=g12)
+    h_al = _itg12(s_al, g12, [])
+    g_off = _GS12(-20.3, -15.2, 0.5, 81, 61)
+    s_un = _lg12(tif12, a12, "depth", grid=g_off)
+    h_un = _itg12(s_un, g_off, [])
+    check("a baked GeoTIFF reloads aligned and stamps losslessly; on another grid "
+          "it still interpolates",
+          s_al.aligned and float(np.abs(h_al - comp12.height).max()) < 1e-5
+          and not s_un.aligned and np.isfinite(h_un).all()
+          and float(np.abs(h_un[10:-10, 10:-10] - comp12.height[10:-10, 10:-10]).max()) < 0.6,
+          f"aligned err {np.abs(h_al - comp12.height).max():.2e} m")
+
+    # World folder: a layered state bakes, builds twice bit-identically,
+    # regenerates headlessly from its snapshot, and re-bases its geometry.
+    from blueboat_sss_sim.builder.state import (BuilderState as _BS12,
+                                                DepthState as _DS12,
+                                                ObjectsState as _OS12,
+                                                PathState as _PS12)
+    from blueboat_sss_sim.worldgen.depth.bake import bake_composite as _bc12b
+    from blueboat_sss_sim.worldgen.generate import generate_world as _gw12
+    from blueboat_sss_sim.worldgen.scene import SceneModel as _SM12
+    from blueboat_sss_sim.worldgen.world_folder import (
+        build_grid as _bg12, build_world_folder as _bwf12,
+        depth_section as _dsec12, world_block as _wb12)
+    path12 = _PS12(name="layer_path", file="",
+                   geo_anchor={"lat0": 34.4, "lon0": 133.5},
+                   points=[[0.0, 200.0, 100.0, 0.0], [10.0, 230.0, 100.0, 0.0]])
+    basin_poly = [[205.0, 105.0], [225.0, 105.0], [225.0, 125.0], [205.0, 125.0]]
+    layers12 = [
+        {"id": "L1", "kind": "basin", "seed": 1,
+         "geometry": {"type": "polygon", "points": basin_poly},
+         "params": {"floor_depth": 6.0, "overdredge_m": 0.0, "relief_m": 0.0}},
+        {"id": "L2", "kind": "material_gradient", "seed": 2,
+         "geometry": {"type": "axis", "a": [192.0, 115.0], "b": [248.0, 115.0]},
+         "params": {"material_from": "sand", "material_to": "mud",
+                    "length_m": 56.0}},
+        {"id": "L3", "kind": "reflectivity_gain", "seed": 3,
+         "mask": {"kind": "rect", "x_min": 230.0, "y_min": 95.0,
+                  "x_max": 245.0, "y_max": 105.0},
+         "params": {"gain_db": -3.0}},
+    ]
+    st12 = _BS12(path=path12,
+                 limits_rect={"x_min": 190.0, "y_min": 90.0, "x_max": 250.0,
+                              "y_max": 140.0},
+                 walls=[],
+                 depth=_DS12(mode="preset", preset="flat", params={"depth": 3.0},
+                             layers=layers12),
+                 objects=_OS12(seed=5, classes={}),
+                 world_name="layered")
+    wroot12 = OUT / "worlds12"
+    f1 = _bwf12(st12, worlds_root=wroot12)
+    f2 = _bwf12(st12, worlds_root=wroot12)
+    d1 = np.load(f1 / "depth.npz")["height"]
+    d2_ = np.load(f2 / "depth.npz")["height"]
+    sc1 = _SM12.load(f1)
+    sc2 = _SM12.load(f2)
+    check("a layered world builds twice bit-identically, with its baked files",
+          np.array_equal(d1, d2_) and np.array_equal(sc1.height, sc2.height)
+          and np.array_equal(sc1.material_id, sc2.material_id)
+          and np.array_equal(sc1.reflectivity, sc2.reflectivity)
+          and (f1 / "depth_baked.tif").exists()
+          and (f1 / "material_map.npz").exists(),
+          f"{f1.name}, {f2.name}")
+    snap12 = sc1.config_snapshot
+    check("a layered world's config snapshot is a plain file-mode world plus "
+          "terrain.materials.map",
+          snap12["depth"]["mode"] == "file"
+          and snap12["depth"]["file_kind"] == "geotiff"
+          and snap12["depth"]["file_values"] == "depth"
+          and "layers" not in snap12["depth"]
+          and snap12["terrain"]["materials"]["map"].endswith("material_map.npz"))
+    import yaml as _yaml12
+    yml12 = OUT / "layered_snapshot.yaml"
+    with open(yml12, "w", encoding="utf-8") as f:
+        _yaml12.safe_dump(snap12, f, sort_keys=False)
+    sc_h = _gw12(yml12, OUT / "layered_headless")
+    check("generate_world on the snapshot reproduces the layered scene bit-for-bit",
+          np.array_equal(sc_h.height, sc1.height)
+          and np.array_equal(sc_h.material_id, sc1.material_id)
+          and np.array_equal(sc_h.reflectivity, sc1.reflectivity))
+    g_b = _bg12(st12)
+    _, _, _, ox12, oy12 = _wb12(st12)
+    comp_b = _bc12b(st12.depth, g_b, [], st12.world_anchor(), 5,
+                    offset=(ox12, oy12))
+    h_b = _itg12(_lg12(f1 / "depth_baked.tif", st12.world_anchor(), "depth",
+                       grid=g_b), g_b, [])
+    check("the baked GeoTIFF equals the in-memory composite (the preview's "
+          "path) to float32 rounding",
+          float(np.abs(h_b - comp_b.height).max()) < 1e-5,
+          f"max |dz| {np.abs(h_b - comp_b.height).max():.2e} m")
+    gx, gy = g_b.world_to_grid(np.array([15.0, -5.0]), np.array([15.0, -5.0]))
+    ix, jy = np.round(gx).astype(int), np.round(gy).astype(int)
+    check("layer geometry re-bases by the spawn origin like walls and strokes "
+          "(a basin drawn at design (215, 115) lands at world (15, 15))",
+          (ox12, oy12) == (200.0, 100.0)
+          and abs(float(d1[jy[0], ix[0]]) + 6.0) < 0.05
+          and abs(float(d1[jy[1], ix[1]]) + 3.0) < 0.05,
+          f"origin ({ox12}, {oy12}); basin cell {d1[jy[0], ix[0]]:.2f}, "
+          f"outside {d1[jy[1], ix[1]]:.2f}")
+    st12b = _BS12.load(f1 / "builder_state.yaml")
+    check("builder_state.yaml round-trips the layer stack",
+          st12b.depth.layers == layers12 and st12b.depth.mode == "preset")
+    from blueboat_sss_sim.worldgen.depth.recipes import (
+        instantiate_recipe as _inst12, load_recipes as _lr12)
+    recipes12 = _lr12()
+    rect12 = {"x_min": 0.0, "y_min": 0.0, "x_max": 60.0, "y_max": 50.0}
+    g_r = _GS12(0.0, 0.0, 1.5, 41, 34)
+    rec_ok, rec_detail = True, []
+    for rname, rec in recipes12.items():
+        try:
+            lay = _inst12(rec, rect12)
+            comp = _cmp12(g_r, [_sl12(preset="flat", params={"depth": 3.0})]
+                          + lay, [], a12, _rng12(), 1)
+            ok = (len(lay) >= 2 and np.isfinite(comp.height).all()
+                  and bool(rec.get("reference")) and bool(rec.get("consequence")))
+        except Exception as exc:                     # noqa: BLE001
+            ok, rec_detail = False, rec_detail + [f"{rname}: {exc}"]
+        rec_ok &= ok
+    check("every seabed recipe instantiates over a rectangle, composes, and "
+          "names its literature",
+          rec_ok and len(recipes12) >= 6, "; ".join(rec_detail) or f"{len(recipes12)} recipes")
+    # Every recipe ships a bedform. The 2026-09-19 sim-vs-real comparison
+    # found the simulated seabed featureless where the real one shows sand
+    # waves; the machinery was there and simply never switched on -- five of
+    # the seven recipes carried no relief at all.
+    _bed12 = ("ripples", "dunes", "furrows", "bar")
+    _nobed = sorted(r for r, rec in recipes12.items()
+                    if not any(l.get("kind") in _bed12
+                               for l in (rec.get("layers") or [])))
+    check("every seabed recipe carries a bedform (the real seabed is not "
+          "featureless, and authoring one must not be opt-in)",
+          not _nobed,
+          f"{len(recipes12)} recipes, all with relief" if not _nobed
+          else "without: " + ", ".join(_nobed))
+
+    # The sonar-look overlay: cos(incidence) against a grazing ray, the
+    # quantity the renderer shades with. A 0.5 m / 0.04 m ripple field is
+    # 4 cm of relief against metres of bathymetry, so a depth stretch cannot
+    # show it and this must -- otherwise bedforms are authored blind, which
+    # is why they were never switched on.
+    from blueboat_sss_sim.builder.imaging import sonar_shading as _shade12
+    _xs12 = np.arange(200) * 0.1
+    _rip12 = np.repeat((-3.0 + 0.02 * np.sin(2 * np.pi * _xs12 / 0.5))[None, :],
+                       200, axis=0)
+    _flat12 = np.full((200, 200), -3.0)
+    _vr12 = _shade12(_rip12, 0.1)
+    _vf12 = _shade12(_flat12, 0.1)
+    _c12 = float(np.percentile(_vr12, 98) - np.percentile(_vr12, 2))
+    check("the sonar-look overlay separates a ripple field from a flat floor "
+          "(a depth stretch cannot: 4 cm of relief against metres of depth)",
+          _c12 > 0.05
+          and float(np.percentile(_vf12, 98) - np.percentile(_vf12, 2)) < 1e-9
+          and abs(float(_vf12.mean()) - math.sin(math.radians(20.0))) < 1e-9,
+          f"ripples p2-p98 {_c12:.3f}, flat exactly 0 at sin 20 deg "
+          f"({_vf12.mean():.4f})")
+    st_leg = _BS12(path=path12, limits_rect=st12.limits_rect,
+                   depth=_DS12(mode="preset", preset="canal",
+                               params={"channel_depth": 2.5},
+                               paint=strokes12),
+                   objects=_OS12(seed=5, classes={}))
+    check("a legacy state (no layers) keeps its depth section byte-identical",
+          _dsec12(st_leg) == {"mode": "preset", "preset": "canal",
+                              "params": {"channel_depth": 2.5},
+                              "paint": [strokes12[0]]}
+          and list(_dsec12(st_leg)) == ["mode", "preset", "params", "paint"])
+
+    # ---- dry land: the tool for a world that is not water everywhere -----
+    # A drawn polygon is a handful of clicked vertices; a shoreline is not.
+    # `round_region` opens then closes the outline with a disc, so nothing
+    # along the water's edge turns sharper than that disc (a morphological
+    # radius filter -- Serra 1982 par. 2), and `land` carries the area up
+    # over the waterline with a C1 shore face.
+    from blueboat_sss_sim.worldgen.depth import geometry as _geo12
+    from blueboat_sss_sim.worldgen.objects import DRY_HEIGHT_M as _DRY12
+    sq12 = np.zeros((81, 81), dtype=bool)
+    sq12[20:61, 20:61] = True                       # a 20 m square at 0.5 m
+    spike12 = sq12.copy()
+    spike12[10:20, 38:42] = True                    # a 2 m spike, 5 m long
+    rnd12 = _geo12.round_region(spike12, 0.5, 3.0)
+    again12 = _geo12.round_region(rnd12, 0.5, 3.0)
+    corner12 = bool(rnd12[20, 20])                  # the drawn 90 deg corner
+    area12 = float(rnd12.sum()) / float(sq12.sum())
+    check("round_region rounds what is sharper than its disc and is stable "
+          "under a second pass: a clicked corner opens, a thin spike goes, "
+          "the body of the area stays",
+          not corner12 and not rnd12[12, 40] and rnd12[40, 40]
+          and 0.93 < area12 < 1.02
+          and float((rnd12 != again12).mean()) < 0.005,
+          f"area x{area12:.3f}, idempotent to "
+          f"{100 * float((rnd12 != again12).mean()):.2f} % of cells")
+
+    g_l12 = _GS12(-20.0, -20.0, 0.5, 81, 81)
+    poly_l12 = [[-14.0, -14.0], [14.0, -14.0], [14.0, 0.0], [-14.0, 0.0]]
+    land12 = {"kind": "land", "geometry": {"type": "polygon",
+                                           "points": poly_l12},
+              "params": {"height_m": 0.4, "round_m": 2.0, "shore_m": 6.0,
+                         "material_enabled": True, "material": "gravel"}}
+    c_l12 = _cmp12(g_l12, [_sl12(preset="flat", params={"depth": 3.0}),
+                           land12], [], a12, _rng12(), 7)
+    xl12 = g_l12.origin_x + np.arange(g_l12.nx) * g_l12.resolution
+    yl12 = g_l12.origin_y + np.arange(g_l12.ny) * g_l12.resolution
+    XL12, YL12 = np.meshgrid(xl12, yl12)
+    dry12 = (YL12 < -4.0) & (YL12 > -12.0) & (np.abs(XL12) < 8.0)
+    sea12 = YL12 > 10.0
+    row12 = c_l12.height[:, int(round((0.0 - g_l12.origin_x)
+                                      / g_l12.resolution))]
+    face12 = (yl12 > 0.0) & (yl12 < 6.0)
+    mats12 = c_l12.material_overlay
+    mid12 = int(round((0.0 - g_l12.origin_x) / g_l12.resolution))
+    check("a land layer lifts its area above the waterline (no acoustic "
+          "return from it, NC #13), leaves the water beyond its shore "
+          "untouched, and the face between the two is monotone",
+          float(c_l12.height[dry12].min()) > _DRY12
+          and abs(float(c_l12.height[dry12].mean()) - 0.4) < 1e-6
+          and abs(float(c_l12.height[sea12].mean()) + 3.0) < 1e-6
+          and bool((np.diff(row12[face12]) <= 1e-9).all())
+          and mats12 is not None
+          and mats12[1] == ["gravel"]
+          and int(mats12[0][int(round((-8.0 - g_l12.origin_y)
+                                      / g_l12.resolution)), mid12]) == 0,
+          f"land {float(c_l12.height[dry12].mean()):+.2f} m, sea "
+          f"{float(c_l12.height[sea12].mean()):+.2f} m, shore "
+          f"{int(face12.sum())} cells")
+
+    # The dredged basin reaches above the waterline too, so the older tool
+    # can carve a dry area as well (the user's 2026-09-18 fallback).
+    dry_basin12 = {"kind": "basin", "geometry": {"type": "polygon",
+                                                 "points": poly_l12},
+                   "params": {"floor_depth": -0.5, "overdredge_m": 0.0,
+                              "relief_m": 0.0}}
+    c_b12 = _cmp12(g_l12, [_sl12(preset="flat", params={"depth": 3.0}),
+                           dry_basin12], [], a12, _rng12(), 7)
+    wet_basin12 = {"kind": "basin", "geometry": {"type": "polygon",
+                                                 "points": poly_l12},
+                   "params": {"floor_depth": 4.0, "overdredge_m": 0.0,
+                              "relief_m": 0.0}}
+    c_w12 = _cmp12(g_l12, [_sl12(preset="flat", params={"depth": 3.0}),
+                           wet_basin12], [], a12, _rng12(), 7)
+    check("a dredged basin accepts a negative floor depth, so it can lift "
+          "an area out of the water as well, and an ordinary one still only "
+          "deepens",
+          float(c_b12.height[dry12].max()) > _DRY12
+          and abs(float(c_b12.height[sea12].mean()) + 3.0) < 1e-6
+          and abs(float(c_w12.height[dry12].mean()) + 4.0) < 1e-6,
+          f"dry basin {float(c_b12.height[dry12].mean()):+.2f} m, wet basin "
+          f"{float(c_w12.height[dry12].mean()):+.2f} m")
+
+    # ----------------------------------------------------------------- [13]
+    # A landform is evaluated only within its reach and is NaN beyond it;
+    # the compositor must read that NaN as "no change", never as NaN*0.
+    from blueboat_sss_sim.worldgen.depth.compose import compose as _cmp12n
+    from blueboat_sss_sim.worldgen.depth.compose import source_layer as _src12n
+    _g12n = GridSpec(-10.0, -10.0, 0.5, 111, 91)
+    _stack12n = [_src12n(mode="preset", preset="flat", params={"depth": 3.0}),
+                 {"kind": "basin", "opacity": 0.5, "blend": "normal",
+                  "mask": {"kind": "rect", "x_min": 0.0, "y_min": 0.0,
+                           "x_max": 30.0, "y_max": 30.0},
+                  "geometry": {"type": "polygon",
+                               "points": [[5.0, 5.0], [25.0, 5.0],
+                                          [25.0, 20.0], [5.0, 20.0]]}}]
+    _c12n = _cmp12n(_g12n, _stack12n, [], anchor, np.random.default_rng(0), 5)
+    _far12n = _c12n.height[0, 0]           # far outside the basin's reach
+    check("a landform's NaN beyond its reach never enters the composite "
+          "(the cells it says nothing about keep the source)",
+          np.isfinite(_c12n.height).all() and abs(_far12n + 3.0) < 1e-9
+          and float(_c12n.height.min()) < -3.0,
+          f"nan cells {int(np.isnan(_c12n.height).sum())}, "
+          f"far cell {_far12n:.3f} m")
+
+    print("[13] hand placement: pinning the scatter, stamping by click")
+    import dataclasses as _dc13
+    import tempfile as _tf13
+
+    import yaml as _yaml13
+
+    def _raises(fn, exc_type) -> bool:
+        try:
+            fn()
+        except exc_type:
+            return True
+        except Exception:                                      # noqa: BLE001
+            return False
+        return False
+
+    from blueboat_sss_sim.builder.state import (BuilderState as _BS13,
+                                                DepthState as _DS13,
+                                                ObjectsState as _OS13,
+                                                PathState as _PS13,
+                                                scatter_signature)
+    from blueboat_sss_sim.worldgen.objects import (CATALOG as _CAT13,
+                                                   make_explicit_instances,
+                                                   placed_to_explicit)
+    from blueboat_sss_sim.worldgen.world_folder import (
+        _generate_with_base as _gwb13, build_config as _bc13,
+        build_world_folder as _bwf13, engine_explicit,
+        state_to_world_config as _swc13)
+
+    path13 = _PS13(name="p13", file="p13.yaml",
+                   geo_anchor={"lat0": 33.66, "lon0": 130.65},
+                   points=[[0.0, 200.0, 100.0, 0.0], [10.0, 240.0, 130.0, 0.0]])
+
+    def _state13(**objects):
+        return _BS13(
+            path=path13,
+            limits_rect={"x_min": 185.0, "y_min": 85.0,
+                         "x_max": 245.0, "y_max": 135.0},
+            walls=[{"name": "quay", "x0": 185.0, "y0": 134.0, "x1": 245.0,
+                    "y1": 134.0, "top_z": 1.0, "reflectivity": 0.65}],
+            depth=_DS13(mode="preset", preset="harbour_basin",
+                        params={"basin_depth": 3.0}),
+            objects=_OS13(**objects), world_name="hand13")
+
+    def _run13(state):
+        tmp = Path(_tf13.mkdtemp(dir=OUT))
+        raw, _ = _bc13(state, tmp)
+        out13: list = []
+        scene, pre = _gwb13(WorldConfig.from_dict(raw), raw, placed_out=out13)
+        return scene, pre, out13
+
+    classes13 = {
+        "drum_200l": {"amount": {"kind": "count", "value": 4},
+                      "orientation": {"mode": "random", "heading_deg": 0.0,
+                                      "jitter_deg": 0.0,
+                                      "rest": {"enabled": True,
+                                               "randomness": 1.0}}},
+        "mesh_crate": {"amount": {"kind": "count", "value": 3}},
+        "rope": {"amount": {"kind": "count", "value": 2}}}
+    st13 = _state13(seed=7, classes=classes13)
+    scene13, _pre13, placed13 = _run13(st13)
+    ox13, oy13 = st13.spawn_origin()
+
+    # (a) ``placed_out`` is the *pre-settle* pose: rasterising banks a
+    # rested object onto the seabed slope in place, and pinning the banked
+    # pose would bank it a second time on the next build.
+    rested13 = [(a, b) for a, b in zip(placed13, scene13.objects) if b.rested]
+    check("placed_out reports the pre-settle pose the pin needs",
+          len(rested13) >= 3
+          and any(a.roll != b.roll or a.pitch != b.pitch
+                  for a, b in rested13)
+          and all(a.x == b.x and a.y == b.y and a.yaw == b.yaw
+                  for a, b in zip(placed13, scene13.objects)),
+          f"{len(rested13)} rested objects banked by the rasteriser")
+
+    # (b) a pinned field rebuilds the objects the scatter produced.
+    def _pin13(o):
+        item = placed_to_explicit(o)
+        item["x"] += ox13                   # world frame -> design frame
+        item["y"] += oy13
+        return item
+
+    pinned13 = [_pin13(o) for o in placed13]
+    st13p = _dc13.replace(st13, objects=_OS13(
+        seed=7, classes=dict(classes13), placed=pinned13,
+        placed_signature=scatter_signature(7, classes13)))
+    scene13p, _pre13p, _ = _run13(st13p)
+    exact13 = ("type", "yaw", "length", "width", "proud_height", "burial",
+               "fill_fraction", "reflectivity", "material", "rest",
+               "object_id")
+    same13 = (len(scene13.objects) == len(scene13p.objects)
+              and all(getattr(a, f) == getattr(b, f)
+                      for a, b in zip(scene13.objects, scene13p.objects)
+                      for f in exact13))
+    dxy13 = max(max(abs(a.x - b.x), abs(a.y - b.y))
+                for a, b in zip(scene13.objects, scene13p.objects))
+    drp13 = max(max(abs(a.roll - b.roll), abs(a.pitch - b.pitch))
+                for a, b in zip(scene13.objects, scene13p.objects))
+    check("pinning the scatter rebuilds the same objects",
+          same13 and dxy13 < 1e-9 and drp13 < 1e-9,
+          f"{len(scene13p.objects)} objects, max |dxy| {dxy13:.1e} m, "
+          f"max |d roll/pitch| {drp13:.1e} rad")
+    # The residual is the design/world frame round trip (x + ox) - ox at
+    # double precision -- femtometres against a 0.10 m grid.
+    dh13 = np.abs(scene13.height - scene13p.height).max()
+    check("the pinned world's rasters match the scattered one to float noise",
+          dh13 < 1e-9, f"max |dh| {dh13:.1e} m")
+
+    # (c) and a pinned state rebuilds *itself* bit-identically (NC #10).
+    scene13p2, _, _ = _run13(st13p)
+    check("a pinned state rebuilds bit-identically",
+          np.array_equal(scene13p.height, scene13p2.height)
+          and np.array_equal(scene13p.reflectivity, scene13p2.reflectivity))
+
+    # (d) the classes stop generating once pinned -- else the field doubles.
+    raw13p = _swc13(st13p)
+    check("a pinned scatter empties the classes and carries every instance",
+          raw13p["objects"]["classes"] == {}
+          and len(raw13p["objects"]["explicit"]) == len(pinned13)
+          and _swc13(st13)["objects"]["classes"] == classes13,
+          f"{len(raw13p['objects']['explicit'])} explicit entries")
+    check("engine_explicit is the pinned field then the hand-placed ones",
+          engine_explicit(st13) == []
+          and [i["type"] for i in engine_explicit(_dc13.replace(
+              st13p, objects=_OS13(seed=7, placed=pinned13,
+                                   explicit=[{"type": "anchor", "x": 1.0,
+                                              "y": 2.0}])))]
+          == [i["type"] for i in pinned13] + ["anchor"])
+
+    # (e) both lists re-base by the spawn origin, exactly like the walls.
+    st13r = _state13(seed=7, placed=[{"type": "drum_200l", "x": 210.0,
+                                      "y": 110.0, "yaw": 0.0}],
+                     explicit=[{"type": "anchor", "x": 220.0, "y": 120.0}])
+    ex13r = _swc13(st13r)["objects"]["explicit"]
+    check("pinned and hand-placed alike re-base into the world frame",
+          (ex13r[0]["x"], ex13r[0]["y"]) == (10.0, 10.0)
+          and (ex13r[1]["x"], ex13r[1]["y"]) == (20.0, 20.0),
+          f"spawn origin {(ox13, oy13)}")
+
+    # (f) metadata counts both lists as authored, not just ``explicit``.
+    wdir13 = _bwf13(st13r, worlds_root=OUT / "worlds_hand")
+    meta13 = _yaml13.safe_load((wdir13 / "metadata.yaml").read_text())
+    check("metadata reports every authored instance as a fixed heading",
+          len(meta13["objects"]) == 2
+          and all(o["orientation"] == {"mode": "fixed", "heading_deg": 0.0,
+                                       "jitter_deg": 0.0}
+                  for o in meta13["objects"]))
+    snap13 = _yaml13.safe_load(
+        (wdir13 / "builder_state.yaml").read_text())
+    check("builder_state.yaml round-trips the pinned field (and the pinned "
+          "flag that keeps the classes silent once every pinned object is "
+          "deleted)",
+          sorted(snap13["objects"]) == ["classes", "explicit", "pinned",
+                                        "placed", "placed_signature", "seed"]
+          and _BS13.from_dict(snap13).objects.placed == st13r.objects.placed
+          and _BS13.from_dict(snap13).objects.pinned == st13r.objects.pinned)
+    # A field pinned and then emptied must not resurrect the scatter.
+    st13_empty = dataclasses.replace(
+        st13r, objects=_OS13(seed=7, classes=classes13, placed=[],
+                             placed_signature="", pinned=True))
+    check("deleting every pinned object leaves the classes silent (no "
+          "resurrected scatter) while an unpinned state still scatters",
+          _swc13(st13_empty)["objects"]["classes"] == {}
+          and _swc13(dataclasses.replace(
+              st13r, objects=_OS13(seed=7, classes=classes13)))["objects"]["classes"]
+          == classes13)
+
+    # (g) a state that never pinned is byte-identical to before the screen.
+    st13_legacy = _state13(seed=7, classes=classes13,
+                           explicit=[{"type": "tire_car", "x": 210.0,
+                                      "y": 110.0}])
+    check("a state that never pinned builds exactly as before",
+          _swc13(st13_legacy)["objects"]
+          == {"classes": classes13,
+              "explicit": [{"type": "tire_car", "x": 10.0, "y": 10.0}]})
+
+    # (h) the click stamp: count, spread, pinned values, determinism.
+    rng13 = np.random.default_rng(11)
+    one13 = make_explicit_instances("traffic_cone", 5.0, 7.0, rng13)
+    check("one click places one object exactly on the point",
+          len(one13) == 1 and (one13[0]["x"], one13[0]["y"]) == (5.0, 7.0)
+          and one13[0]["type"] == "traffic_cone")
+    clus13 = make_explicit_instances("drum_200l", 5.0, 7.0,
+                                     np.random.default_rng(11),
+                                     count=8, sigma_m=2.0)
+    off13 = [float(np.hypot(i["x"] - 5.0, i["y"] - 7.0)) for i in clus13]
+    check("a cluster click centres on the point and spreads by sigma",
+          len(clus13) == 8 and off13[0] == 0.0
+          and max(off13) < 8.0 and sorted(off13)[4] > 0.3,
+          f"offsets up to {max(off13):.2f} m")
+    check("a cluster click is deterministic per generator",
+          clus13 == make_explicit_instances("drum_200l", 5.0, 7.0,
+                                            np.random.default_rng(11),
+                                            count=8, sigma_m=2.0))
+    pinned_keys13 = {"length", "width", "proud_height", "burial",
+                     "fill_fraction", "reflectivity"}
+    check("every stamped value is pinned, so the entry is stream-independent",
+          all(pinned_keys13 <= set(i) and "material" in i for i in clus13))
+    heading13 = make_explicit_instances(
+        "pipe_pvc", 0.0, 0.0, np.random.default_rng(3), count=3,
+        orientation={"mode": "fixed", "heading_deg": 30.0, "jitter_deg": 0.0})
+    check("a fixed heading is honoured by every object of the click",
+          all(abs(np.degrees(i["yaw"]) - 30.0) < 1e-9 for i in heading13))
+    rested13b = make_explicit_instances(
+        "drum_200l", 0.0, 0.0, np.random.default_rng(4), count=6,
+        orientation={"mode": "random", "heading_deg": 0.0, "jitter_deg": 0.0,
+                     "rest": {"enabled": True, "randomness": 1.0}})
+    flat13 = make_explicit_instances("drum_200l", 0.0, 0.0,
+                                     np.random.default_rng(4), count=6)
+    check("3-D rest writes a tilt; without it the entry stays flat",
+          all("roll_deg" in i and "rest" in i for i in rested13b)
+          and not any("roll_deg" in i or "rest" in i for i in flat13),
+          "writing a tilt is what sends an instance down the solid path")
+    check("a size distribution scales the class's regular size",
+          all(0.55 * _CAT13["polytank"].length_range[0]
+              <= i["length"]
+              <= 1.45 * _CAT13["polytank"].length_range[1]
+              for i in make_explicit_instances(
+                  "polytank", 0.0, 0.0, np.random.default_rng(5), count=6,
+                  size={"kind": "uniform", "lo": 0.6, "hi": 1.4})))
+    check("an unknown class is refused by name",
+          _raises(lambda: make_explicit_instances(
+              "not_a_class", 0.0, 0.0, np.random.default_rng(0)), KeyError))
+    check("path_relative without a path is refused with an actionable message",
+          _raises(lambda: make_explicit_instances(
+              "pipe_pvc", 0.0, 0.0, np.random.default_rng(0),
+              orientation={"mode": "path_relative", "heading_deg": 90.0,
+                           "jitter_deg": 0.0}), ValueError))
+    stamped13 = make_explicit_instances(
+        "mesh_crate", 0.0, 0.0, np.random.default_rng(6), count=2,
+        params={"fill_fraction": 0.42}, material="tinplate")
+    check("class params and the material override reach the entry",
+          all(i["fill_fraction"] == 0.42 and i["material"] == "tinplate"
+              for i in stamped13))
+
+    _section_object_physics()
+
     print("\nALL CHECKS PASSED")
+
+
+def _section_object_physics() -> None:
+    """[14] object physics (NC #17, 2026-09-28).
+
+    Smooth solid objects scatter from their exact geometry (Kirchhoff
+    patches + the incoherent residual, sonar/facets.py) and only OCCLUDE in
+    the raster. Nothing in it is fitted to an object, so the gates are of
+    two kinds: textbook closed forms the engine must reproduce, and the
+    field box (object_boiteVsDistance, measured 2026-09-28 on the two
+    passes where it shows) the whole chain must reproduce at the field's
+    own geometry, WHATEVER its heading -- which the field did not survey.
+    """
+    import math
+    import time as _time
+    from blueboat_sss_sim.sonar.config import (AcquisitionParams,
+                                               SonarConfig as _SC14,
+                                               find_default_sonar_yaml)
+    from blueboat_sss_sim.sonar.facets import FacetLayer, po_amplitude
+    from blueboat_sss_sim.worldgen.materials import (MaterialLibrary,
+                                                     acoustic_reflection)
+    from blueboat_sss_sim.worldgen.objects import (
+        CATALOG as _CAT14, is_facet_object, placed_to_explicit,
+        place_objects as _place14, ObjectFieldConfig as _OFC14)
+    from blueboat_sss_sim.worldgen.scene import stamp_objects
+    from blueboat_sss_sim.worldgen.solids import Solid, _rect, tessellate
+
+    print("[14] object physics: Kirchhoff facets, see-through shells, the "
+          "field box (NC #17)")
+    model = _SC14.from_yaml(find_default_sonar_yaml()).model
+    k14 = 2.0 * math.pi * model.sonar_frequency_hz / 1500.0
+    lam14 = 2.0 * math.pi / k14
+
+    def _sig(p, s):
+        a, _r, _c = po_amplitude(p, np.asarray(s, dtype=np.float64), k14)
+        return 4.0 * math.pi * abs(a.sum()) ** 2
+
+    def _db(x):
+        return 10.0 * math.log10(max(float(x), 1e-300))
+
+    # ---- the engine against closed forms (far field, no beam) -----------
+    e3 = np.eye(3)
+    plate = _rect(np.zeros(3), -e3[1], e3[0], e3[2], 0.10, 0.06, 0.01)
+    s0 = _sig(plate, [0.0, -150.0, 0.0])
+    th0 = 4.0 * math.pi * (0.10 * 0.06) ** 2 / lam14 ** 2
+    asp = []
+    for deg in (0.5, 1.5, 2.5):
+        a = math.radians(deg)
+        got = _sig(plate, [150.0 * math.sin(a), -150.0 * math.cos(a), 0.0])
+        exp = th0 * math.cos(a) ** 2 * np.sinc(
+            k14 * 0.10 * math.sin(a) / math.pi) ** 2
+        asp.append(_db(got) - _db(exp))
+    check("a flat plate at normal incidence returns 4 pi A^2 / lambda^2, and "
+          "its aspect falls off as sinc^2(k a sin theta) (Urick)",
+          abs(_db(s0) - _db(th0)) < 0.2 and max(map(abs, asp)) < 0.5,
+          f"{_db(s0):.2f} vs {_db(th0):.2f} dBsm; aspect residuals "
+          + " / ".join(f"{v:+.2f}" for v in asp) + " dB at 0.5/1.5/2.5 deg")
+    cyl = tessellate(Solid("cylinder", 0.1, 0.3, axis=0), 0.01, k14)
+    sph = tessellate(Solid("capsule", 0.1, 0.2, axis=0), 0.01, k14)
+    s_c = _sig(cyl, [0.0, -400.0, 0.0])
+    s_s = _sig(sph, [0.0, -400.0, 0.0])
+    check("a lying cylinder at broadside returns k a L^2 and a sphere pi a^2 "
+          "-- the curvature phase is resolved (patches refined on curves)",
+          abs(_db(s_c) - _db(k14 * 0.1 * 0.09)) < 0.5
+          and abs(_db(s_s) - _db(math.pi * 0.01)) < 0.5,
+          f"cylinder {_db(s_c):.2f} vs {_db(k14 * 0.1 * 0.09):.2f}, sphere "
+          f"{_db(s_s):.2f} vs {_db(math.pi * 0.01):.2f} dBsm")
+
+    # ---- materials: reflection from impedance, never judged --------------
+    lib14 = MaterialLibrary()
+    pp = lib14.get("pp_shell")
+    r_pp2 = 20.0 * math.log10(acoustic_reflection(pp))
+    r_pp3 = 20.0 * math.log10(max(acoustic_reflection(pp, wall_m=3.0e-3),
+                                  1e-9))
+    r_st = 20.0 * math.log10(acoustic_reflection(lib14.get("metal")))
+    r_air = acoustic_reflection(pp, backing="air")
+    check("reflection comes from the material's impedance: a 2 mm flooded PP "
+          "wall -8 dB, transparent at half a wavelength (3 mm), steel -0.6 dB, "
+          "an air-backed wall total",
+          abs(r_pp2 + 7.9) < 0.3 and r_pp3 < -25.0 and abs(r_st + 0.6) < 0.2
+          and abs(r_air - 1.0) < 1e-12,
+          f"PP 2 mm {r_pp2:+.1f} dB, 3 mm {r_pp3:+.1f} dB, steel {r_st:+.1f} "
+          f"dB, air-backed |R| {r_air:.2f}")
+
+    # ---- which objects the rule sends to the facet layer -----------------
+    def _inst(t, **kw):
+        spec = _CAT14[t]
+        mat = lib14.get(kw.pop("material", spec.material))
+        o = PlacedObject(0, t, 0.0, 0.0, 0.0, spec.length_range[0],
+                         spec.width_range[0], spec.height_range[0],
+                         kw.pop("burial", 0.0), mat.reflectivity, mat.name,
+                         transmission=mat.transmission,
+                         roughness_m=mat.roughness_m or mat.micro_roughness_m,
+                         fill_fraction=kw.pop("fill_fraction", 1.0))
+        return o
+    # The line is COHERENT_ROUGHNESS_LIMIT_M (1.6 mm), past which no
+    # mirror share survives even at normal incidence. A fired brick (1 mm)
+    # is on the smooth side of it: rough at normal incidence, but half its
+    # echo is still coherent 80 deg off its normal -- the physics decides.
+    facet_yes = ["plastic_box", "drum_200l", "can", "bottle_plastic",
+                 "crate_plastic", "traffic_cone", "fire_extinguisher",
+                 "brick"]
+    facet_no = ["tire_car", "concrete_block", "tent_weight", "mesh_crate",
+                "bicycle", "rope", "chain", "anchor", "debris", "net_ball"]
+    wrong = ([t for t in facet_yes if not is_facet_object(_inst(t))]
+             + [t for t in facet_no if is_facet_object(_inst(t))])
+    check("the rule is material physics: smooth solids go to the facet layer; "
+          "rough materials (tread, concrete) and aggregates (lattices, rope, "
+          "chain, debris) stay on the raster's Lambert path, as does a fully "
+          "buried object",
+          not wrong and not is_facet_object(_inst("drum_200l", burial=1.0)),
+          f"misclassified: {wrong or 'none'}")
+
+    # ---- the field box at the field's own geometry -----------------------
+    # object_boiteVsDistance, GCS seabed images 22 and 33 (1200 bins over
+    # 19.711 m, transducer 1.35 m over the seabed at the box), linear means
+    # against the same range in rows away from the box:
+    #   6.1 m slant (12.8 deg): near-edge 0.4 m +1.1 dB, footprint ~-5,
+    #                           shadow -8.2 dB
+    #  10.1 m slant ( 7.7 deg): near-edge +0.2 dB, footprint ~-6.5,
+    #                           shadow -7.4 dB
+    # The pre-2026-09-28 GUI worlds rendered it +16 to +25 dB near-edge.
+    acq14 = AcquisitionParams(range_length_mm=19711, num_results=1200,
+                              gain_index=4, pulse_len_percent=0.00125)
+    depth14 = 1.50
+    alt14 = depth14 - model.sensor_depth_m
+    bm14 = acq14.bin_size_m
+
+    def _scene14(objs):
+        g = GridSpec(origin_x=0.0, origin_y=-12.0, resolution=0.05,
+                     nx=401, ny=481)
+        h = np.full((481, 401), -depth14)
+        r = np.full((481, 401), 0.55)
+        ras = stamp_objects(objs, g, h, r)
+        return SceneModel(grid=g, height=h, reflectivity=r,
+                          **ras.scene_kwargs(),
+                          material_id=np.zeros((481, 401), dtype=np.uint8),
+                          material_names=["sand"], objects=objs, walls=[],
+                          seed=0, config_snapshot={})
+
+    def _avg14(sc, mdl=model, n=24, step=0.02):
+        rr = GeometricRenderer(sc, acq14, mdl)
+        rg = np.random.default_rng(5)
+        acc = 0.0
+        for j in range(n):
+            u = (j - 0.5 * (n - 1)) * step
+            pg = rr.render(Side.PORT, Pose3D(10.0 + u, 0.0, 0.0), 0.0).ping
+            wc = (np.arange(acq14.num_results) + 0.5) * bm14 < pg.altitude_m
+            acc = acc + apply_ping_noise(np.array(pg.power), wc, 1.0, mdl, rg,
+                                         specular=pg.specular,
+                                         texture=pg.texture,
+                                         unoccluded=pg.unoccluded,
+                                         ambient=pg.ambient)
+        return acc / n
+
+    def _box14(slant, yaw_deg, mdl=model, material="pp_shell", params=None):
+        yaw = math.radians(yaw_deg)
+        half = 0.5 * (0.716 * abs(math.sin(yaw)) + 0.425 * abs(math.cos(yaw)))
+        mat = lib14.get(material)
+        o = PlacedObject(0, "plastic_box", 10.0,
+                         math.sqrt(slant ** 2 - alt14 ** 2)
+                         + model.mount_y_abs_m + half, yaw, 0.716, 0.425,
+                         0.323, 0.0, mat.reflectivity, material,
+                         transmission=mat.transmission,
+                         roughness_m=mat.roughness_m, params=params or {})
+        return o, half
+
+    _ref14: dict = {}
+
+    def _measure14(slant, yaw_deg, mdl=model, **kw):
+        o, half = _box14(slant, yaw_deg, mdl, **kw)
+        sc = _scene14([o])
+        p = _avg14(sc, mdl)
+        if (slant, id(mdl)) not in _ref14:
+            _ref14[(slant, id(mdl))] = _avg14(_scene14([]), mdl)
+        pr = _ref14[(slant, id(mdl))]
+        kk = lambda r: int(round(r / bm14))   # noqa: E731
+        ext = 2.0 * half
+        L = 0.323 * (math.sqrt(slant ** 2 - alt14 ** 2) + ext) / (alt14 - 0.323)
+        rel = lambda a, b: 10.0 * math.log10(   # noqa: E731
+            p[kk(a):kk(b)].mean() / pr[kk(a):kk(b)].mean())
+        run = [rel(slant + 0.05 * j, slant + 0.05 * (j + 1))
+               for j in range(int((ext + L) / 0.05))]
+        return dict(near=rel(slant - 0.35, slant + 0.05),
+                    foot=rel(slant + 0.05, slant + ext),
+                    shadow=rel(slant + ext + 0.1, slant + ext + L - 0.1),
+                    seam=min(run), scene=sc)
+
+    real14 = {6.1: (1.1, -5.0, -8.2), 10.1: (0.2, -6.5, -7.4)}
+    # Uniform over the quadrant (a box has two specular aspects, 0 and 90
+    # deg): the fraction below is the probability for a box whose heading
+    # nobody surveyed -- which is the field's case.
+    yaws14 = tuple(float(v) for v in np.arange(2.5, 90.0, 5.0))
+    t0 = _time.perf_counter()
+    rows14 = {s: [_measure14(s, y) for y in yaws14] for s in real14}
+    t_sweep = _time.perf_counter() - t0
+    near_ok = sum(abs(m["near"] - real14[s][0]) <= 2.0
+                  for s in real14 for m in rows14[s])
+    n_all = sum(len(v) for v in rows14.values())
+    for s in real14:
+        print(f"  [----] field box {s} m, headings 2.5-87.5 deg by 5: "
+              "near-edge " + " ".join(f"{m['near']:+.1f}" for m in rows14[s])
+              + f" dB  [real {real14[s][0]:+.1f}]")
+    check("the field box is a faint target at almost every heading: near-edge "
+          "within 2 dB of the field (+1.1 at 6.1 m, +0.2 at 10.1 m) for >= 90 % "
+          "of headings (uniform; only the skirts of the two glints miss)",
+          near_ok >= 0.9 * n_all,
+          f"{near_ok}/{n_all} headings (the pre-2026-09-28 GUI worlds: +16 "
+          f"to +25 dB)")
+    shadow_mean = {s: float(np.mean([m["shadow"] for m in rows14[s]]))
+                   for s in real14}
+    foot_mean = {s: float(np.mean([m["foot"] for m in rows14[s]]))
+                 for s in real14}
+    check("its shadow and footprint sit where the field's do: shadow within "
+          "1.5 dB of -8.2 / -7.4, footprint within 3 dB of ~-5 / -6.5 "
+          "(averaged over headings: the field's is unknown)",
+          all(abs(shadow_mean[s] - real14[s][2]) < 1.5
+              and abs(foot_mean[s] - real14[s][1]) < 3.0 for s in real14),
+          " | ".join(f"{s} m: shadow {shadow_mean[s]:+.1f}, footprint "
+                     f"{foot_mean[s]:+.1f}" for s in real14))
+    seam14 = min(m["seam"] for s in real14 for m in rows14[s])
+    check("no seam: nothing between the box and the end of its shadow falls "
+          "below the transmitted level (the old single-surface box left a "
+          "-20 to -30 dB band behind its lid)",
+          seam14 > -15.0, f"worst 5 cm {seam14:+.1f} dB")
+    al0 = _measure14(10.1, 0.0)
+    check("aligned with the track, the same box glints -- the aspect "
+          "dependence the thesis rests on emerges from the geometry",
+          al0["near"] > 10.0, f"heading 0 deg: near-edge {al0['near']:+.1f} dB")
+    gt14 = GeometricRenderer(al0["scene"], acq14, model).render(
+        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).contacts
+    gt14 = [c for c in gt14 if c.object_type == "plastic_box"]
+    check("ground truth still labels the shell visible, with its shadow "
+          "(read on the occluder surface, NC #15)",
+          len(gt14) == 1 and gt14[0].visible and gt14[0].shadow_bins > 0,
+          f"{[(c.visible, round(c.shadow_bins, 1)) for c in gt14]}")
+    off = dataclasses.replace(model, object_facets=False)
+    al_off = _measure14(10.1, 0.0, mdl=off)
+    check("object_facets: false keeps the occlusion and drops the scattering "
+          "(a diagnostic: the shadow alone)",
+          al_off["near"] < 0.5 and al_off["shadow"] < -6.0,
+          f"near-edge {al_off['near']:+.1f} dB, shadow {al_off['shadow']:+.1f}")
+
+    # ---- the construction knobs travel with the object -------------------
+    sealed, _h = _box14(6.1, 20.0, params={"flooded": False, "wall_mm": 2.0})
+    sealed.transmission = 0.0
+    lay14 = FacetLayer(_scene14([sealed]), acq14, model)
+    ent = placed_to_explicit(sealed)
+    cfg14 = _OFC14.from_dict({"classes": {}, "explicit": [ent]})
+    rebuilt = _place14(GridSpec(0.0, -12.0, 0.05, 401, 481), cfg14,
+                       MaterialLibrary(), np.random.default_rng(0))
+    check("an air-filled box (flooded: false) is a total reflector and "
+          "opaque, and the knob survives pinning into objects.explicit",
+          abs(float(lay14._R[0]) - 1.0) < 1e-12
+          and ent.get("params", {}).get("flooded") is False
+          and rebuilt and rebuilt[0].transmission == 0.0,
+          f"|R| {float(lay14._R[0]):.2f}, pinned params {ent.get('params')}, "
+          f"rebuilt T {rebuilt[0].transmission if rebuilt else None}")
+
+    # ---- the raster path is untouched ------------------------------------
+    rough = PlacedObject(0, "concrete_block", 10.0, 6.0, 0.4, 0.6, 0.4, 0.35,
+                         0.0, 0.8, "concrete")
+    sc_r = _scene14([rough])
+    p_on = GeometricRenderer(sc_r, acq14, model).render(
+        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+    p_off = GeometricRenderer(sc_r, acq14, off).render(
+        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+    check("a rough object stays on the raster path, bit-identically with the "
+          "facet layer on or off, and stamps no facet_bump",
+          sc_r.facet_bump is None
+          and np.array_equal(p_on.power, p_off.power)
+          and np.array_equal(p_on.specular, p_off.specular))
+    stale = SceneModel(grid=sc_r.grid, height=sc_r.height,
+                       reflectivity=sc_r.reflectivity,
+                       material_id=sc_r.material_id,
+                       material_names=["sand"],
+                       objects=[_box14(6.1, 20.0)[0]])
+    check("a world whose facet objects have no facet_bump raster is reported "
+          "stale (built before the model), never silently re-rendered",
+          stale.stale_rasters() == ["facet_bump"],
+          f"{stale.stale_rasters()}")
+
+    # ---- cost -------------------------------------------------------------
+    field = []
+    for j in range(10):
+        o, _h = _box14(4.0 + 1.2 * j, 15.0 + 7.0 * j)
+        o.x = 10.0 + (j % 3 - 1) * 0.05
+        o.object_id = j
+        field.append(o)
+    sc10 = _scene14(field)
+    sc0 = _scene14([])
+
+    def _ms(sc, mdl):
+        rr = GeometricRenderer(sc, acq14, mdl)
+        rr.render(Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)     # warm caches
+        t1 = _time.perf_counter()
+        for j in range(6):
+            rr.render(Side.PORT, Pose3D(10.0 + 0.01 * j, 0.0, 0.0), 0.0)
+        return (_time.perf_counter() - t1) / 6.0 * 1e3
+    ms0, ms10 = _ms(sc0, model), _ms(sc10, model)
+    print(f"  [----] facet layer cost: {ms0:.1f} ms per ping-side without "
+          f"objects, {ms10:.1f} ms with 10 smooth boxes in the beam "
+          f"({100.0 * (ms10 / ms0 - 1.0):+.0f} %); field sweep {t_sweep:.1f} s")
+    # Real time is 20 pings/s on both sides, i.e. 25 ms per ping-side on
+    # one core. Ten smooth objects in ONE beam at once is far past any
+    # survey (the beam is centimetres wide along-track); ~1.2 ms per object
+    # in view is the measured cost (2026-09-28: 5.8 ms bare, 17.5 ms with
+    # ten). Relative to the bare ping, so a slower machine is judged on the
+    # same terms.
+    check("the facet layer keeps real time: ten smooth objects in the beam "
+          "at once cost <= 4x a bare ping-side (25 ms, the 20 Hz two-side "
+          "budget, at this machine's bare cost)",
+          ms10 < 4.0 * ms0, f"{ms10:.1f} vs {ms0:.1f} ms")
 
 
 if __name__ == "__main__":

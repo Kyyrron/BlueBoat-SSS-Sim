@@ -17,6 +17,7 @@ Persistence: ``scene.npz`` (rasters) + ``scene_manifest.yaml``
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -29,8 +30,13 @@ from ..core.geometry import bilinear_sample
 from ..core.types import GridSpec, PlacedObject, Wall
 from .depth import DepthConfig, build_height
 from .materials import MaterialLibrary
-from .objects import ObjectFieldConfig, place_objects, rasterize_objects
+from .objects import (ObjectFieldConfig, facet_bump_raster,
+                      needs_facet_raster, needs_roughness_raster,
+                      place_objects, rasterize_objects, roughness_raster,
+                      transmission_raster)
 from .terrain import TerrainConfig, TerrainRasters, synthesize_terrain
+
+_log = logging.getLogger(__name__)
 
 MANIFEST_VERSION = 1
 
@@ -135,6 +141,27 @@ class SceneModel:
     seed: int = 0
     config_snapshot: dict[str, Any] = dataclasses.field(default_factory=dict)
     geo_anchor: GeoAnchor | None = None               # GPS of world (0, 0)
+    #: Two-way transmission of whatever stands on a cell (0 everywhere but
+    #: under a thin-shelled object). ``None`` when nothing in the world
+    #: transmits, which is every world built before 2026-09-18 -- the
+    #: array is then absent from ``scene.npz`` and the file is byte-identical.
+    transmission: np.ndarray | None = None
+    #: RMS surface height [m] of whatever stands on a cell, where that is
+    #: smooth enough at 450 kHz for the coherent/incoherent split to matter
+    #: (0 = "nothing smooth here", take the rough default). ``None`` when no
+    #: object in the world is smooth on that scale, which is every world
+    #: built before 2026-09-19 -- the array is then absent from
+    #: ``scene.npz`` and the file is byte-identical.
+    roughness: np.ndarray | None = None
+    #: The part of ``height`` that belongs to **facet objects** (NC #17):
+    #: smooth solid objects the renderer scatters analytically from their
+    #: geometry (``sonar/facets.py``). There, ``height - facet_bump`` is the
+    #: seabed the beam meets, and the object only occludes it -- by its own
+    #: two-way transmission, 0 for an opaque one. Additive (overlapping
+    #: objects sum, like the height). ``None`` when the scene has no facet
+    #: object -- every scene built before 2026-09-28 -- and the array is then
+    #: absent from ``scene.npz``.
+    facet_bump: np.ndarray | None = None
 
     # ---- queries used by the sonar renderer -------------------------------
     def sample_height(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -145,15 +172,69 @@ class SceneModel:
     def sample_reflectivity(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         return bilinear_sample(self.reflectivity, self.grid, x, y, fill=0.2)
 
+    def sample_transmission(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """How much of the beam passes through what stands here (0 = opaque).
+
+        A scene with no transmitting object answers exactly zero, so the
+        renderer's shadow is bit-identical to the pre-2026-09-18 one.
+        """
+        if self.transmission is None:
+            return np.zeros(np.shape(x), dtype=np.float64)
+        return bilinear_sample(self.transmission, self.grid, x, y, fill=0.0)
+
+    def sample_roughness(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """RMS surface height [m] of what stands here; 0 = the rough default.
+
+        Every seabed material is far past ``COHERENT_ROUGHNESS_LIMIT_M`` at
+        450 kHz (the smoothest, mud, has 2 k sigma = 15), so the seabed needs
+        no raster: only a smooth manufactured object can answer non-zero, and
+        a scene without one answers exactly zero everywhere.
+        """
+        if self.roughness is None:
+            return np.zeros(np.shape(x), dtype=np.float64)
+        return bilinear_sample(self.roughness, self.grid, x, y, fill=0.0)
+
+    def sample_facet_bump(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Height of facet-object occluders over the seabed at (x, y); 0
+        where there is none (NC #17)."""
+        if self.facet_bump is None:
+            return np.zeros(np.shape(x), dtype=np.float64)
+        return bilinear_sample(self.facet_bump, self.grid, x, y, fill=0.0)
+
+    def stale_rasters(self) -> list[str]:
+        """Object rasters the current model derives from this scene's
+        objects but the scene does not carry.
+
+        Empty for a scene built by current code. Non-empty for a world built
+        before the model that needs the raster existed -- or by the World
+        Builder between 2026-09-19 and 2026-09-28, whose build path dropped
+        the roughness raster, so every smooth object in it rendered with
+        sand's specular lobe (the field box: +20-25 dB where the model gives
+        +5). Worlds are immutable (NC #10): the cure is to rebuild the world
+        (World Builder, Edit), never to patch the folder.
+        """
+        missing: list[str] = []
+        if self.roughness is None and needs_roughness_raster(self.objects):
+            missing.append("roughness")
+        if self.facet_bump is None and needs_facet_raster(self.objects):
+            missing.append("facet_bump")
+        return missing
+
     # ---- persistence -------------------------------------------------------
     def save(self, directory: str | Path) -> tuple[Path, Path]:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         npz = directory / "scene.npz"
         manifest = directory / "scene_manifest.yaml"
-        np.savez_compressed(
-            npz, height=self.height,
-            reflectivity=self.reflectivity, material_id=self.material_id)
+        arrays = {"height": self.height, "reflectivity": self.reflectivity,
+                  "material_id": self.material_id}
+        if self.transmission is not None and float(self.transmission.max()) > 0.0:
+            arrays["transmission"] = self.transmission
+        if self.roughness is not None and float(self.roughness.max()) > 0.0:
+            arrays["roughness"] = self.roughness
+        if self.facet_bump is not None and float(self.facet_bump.max()) > 0.0:
+            arrays["facet_bump"] = self.facet_bump
+        np.savez_compressed(npz, **arrays)
         doc = {
             "version": MANIFEST_VERSION,
             "seed": self.seed,
@@ -181,7 +262,7 @@ class SceneModel:
         if doc.get("version") != MANIFEST_VERSION:
             raise ValueError(f"Unsupported scene manifest version {doc.get('version')}")
         data = np.load(directory / "scene.npz")
-        return cls(
+        scene = cls(
             grid=GridSpec(**doc["grid"]),
             height=data["height"],
             reflectivity=data["reflectivity"],
@@ -198,7 +279,62 @@ class SceneModel:
             config_snapshot=dict(doc.get("config", {})),
             geo_anchor=GeoAnchor.from_dict(
                 (doc.get("geo") or {}).get("anchor")),
+            transmission=(data["transmission"]
+                          if "transmission" in data.files else None),
+            roughness=(data["roughness"]
+                       if "roughness" in data.files else None),
+            facet_bump=(data["facet_bump"]
+                        if "facet_bump" in data.files else None),
         )
+        stale = scene.stale_rasters()
+        if stale:
+            # Every loader goes through here (the sonar node, the analysis
+            # CLIs, export_scene_maps), so the notice cannot be bypassed.
+            _log.warning(
+                "world %s predates the current object model: it lacks the %s "
+                "raster(s), so its objects render as they did before. Rebuild "
+                "it (World Builder -> Edit World -> save) to render it with "
+                "the current model; the folder itself is never patched "
+                "(NC #10).", directory, ", ".join(stale))
+        return scene
+
+
+@dataclass
+class ObjectRasters:
+    """The per-object rasters one stamping pass produces. Each is ``None``
+    when no object in the scene needs it, which keeps the array out of
+    ``scene.npz`` and every scene without such an object byte-identical."""
+
+    transmission: np.ndarray | None
+    roughness: np.ndarray | None
+    facet_bump: np.ndarray | None
+
+    def scene_kwargs(self) -> dict[str, np.ndarray | None]:
+        """The rasters as ``SceneModel`` keyword arguments."""
+        return {f.name: getattr(self, f.name)
+                for f in dataclasses.fields(self)}
+
+
+def stamp_objects(objects: list[PlacedObject], grid: GridSpec,
+                  height: np.ndarray,
+                  reflectivity: np.ndarray) -> ObjectRasters:
+    """Stamp placed objects into the terrain rasters *in place* and return
+    the object rasters.
+
+    The one place objects are stamped. Two builders used to do it apart --
+    ``generate_scene`` and the World Builder's
+    ``world_folder._generate_with_base`` -- and the second never built the
+    roughness raster, so from 2026-09-19 to 2026-09-28 every world saved
+    from the GUI rendered its smooth objects with sand's specular lobe (the
+    field box: +20-25 dB near-edge where the model gives +5).
+    """
+    trans = transmission_raster(objects, grid)
+    rough = roughness_raster(objects, grid)
+    facet = facet_bump_raster(objects, grid)
+    rasterize_objects(objects, grid, height, reflectivity, trans, rough,
+                      facet)
+    return ObjectRasters(transmission=trans, roughness=rough,
+                         facet_bump=facet)
 
 
 def generate_scene(cfg: WorldConfig,
@@ -228,12 +364,14 @@ def generate_scene(cfg: WorldConfig,
         grid, cfg.terrain, materials, rng_terrain, base_height=base)
     objects = place_objects(grid, cfg.objects, materials, rng_objects,
                             height=terrain.height)
-    rasterize_objects(objects, grid, terrain.height, terrain.reflectivity)
+    rasters = stamp_objects(objects, grid, terrain.height,
+                            terrain.reflectivity)
 
     return SceneModel(
         grid=grid,
         height=terrain.height,
         reflectivity=terrain.reflectivity,
+        **rasters.scene_kwargs(),
         material_id=terrain.material_id,
         material_names=terrain.material_names,
         objects=objects,

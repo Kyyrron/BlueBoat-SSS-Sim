@@ -192,6 +192,70 @@ def crossing_mask(wall: Wall, origin: Pose3D, px: np.ndarray, py: np.ndarray,
     return opposite & inside_segment & within & on_face
 
 
+def reflection_point(wall: Wall, origin: Pose3D, px: np.ndarray,
+                     py: np.ndarray, pz: np.ndarray
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Where the folded path meets the face, per sample.
+
+    The unfolded segment from the mirror ``origin`` to a sample crosses the
+    wall plane exactly at the reflection point of the true path, so the two
+    *real* legs are ``transducer -> here`` and ``here -> sample``. Samples
+    that do not cross (``crossing_mask`` false) get the sample itself, which
+    makes both legs degenerate and blocks nothing.
+    """
+    nx, ny = wall.normal
+    d_m = (origin.x - wall.x0) * nx + (origin.y - wall.y0) * ny
+    d_p = (px - wall.x0) * nx + (py - wall.y0) * ny
+    denom = d_m - d_p
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = np.where(np.abs(denom) > 1e-12, d_m / denom, 0.0)
+    t = np.clip(t, 0.0, 1.0)
+    return (origin.x + t * (px - origin.x),
+            origin.y + t * (py - origin.y),
+            origin.z + t * (pz - origin.z))
+
+
+def segment_blocked(walls: list[Wall], ax, ay, az, bx, by, bz,
+                    skip: Wall | None = None) -> np.ndarray:
+    """Which segments ``a -> b`` a wall stands in the way of.
+
+    The same rule the direct path uses, written for an arbitrary segment so
+    a folded path can be occluded too: the segment must cross the wall's
+    plane between its ends, inside the chord's plan extent, at a height
+    within the face's own band (a quay's band reaches the seabed, a
+    pontoon's stops at its draft and the ray passes under it).
+
+    Any argument may be a scalar or an array; the result broadcasts. Without
+    this a ghost and the single-bounce corner band are painted straight
+    through whatever stands between -- the 2026-09-18 review's wall census
+    found the band on the far side of a nearer quay in 97 % of the pings
+    that saw two walls.
+    """
+    ax, ay, az, bx, by, bz = np.broadcast_arrays(
+        *(np.asarray(v, dtype=np.float64) for v in (ax, ay, az, bx, by, bz)))
+    blocked = np.zeros(np.shape(ax), dtype=bool)
+    for w in walls:
+        if skip is not None and w is skip:
+            continue
+        nx, ny = w.normal
+        ux, uy = w.unit
+        d_a = (ax - w.x0) * nx + (ay - w.y0) * ny
+        d_b = (bx - w.x0) * nx + (by - w.y0) * ny
+        denom = d_a - d_b
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = np.where(np.abs(denom) > 1e-12, d_a / denom, -1.0)
+        crosses = (d_a * d_b < 0.0) & (t > 0.0) & (t < 1.0)
+        if not crosses.any():
+            continue
+        cx = ax + t * (bx - ax)
+        cy = ay + t * (by - ay)
+        cz = az + t * (bz - az)
+        s = (cx - w.x0) * ux + (cy - w.y0) * uy
+        blocked |= (crosses & (s >= 0.0) & (s <= w.length)
+                    & (cz <= w.top_z) & (cz >= w.z_bottom))
+    return blocked
+
+
 def bounce_weight(wall: Wall, origin: Pose3D, px: np.ndarray, py: np.ndarray,
                   pz: np.ndarray, diffuse_fraction: float) -> np.ndarray:
     """Energy fraction of **one** bounce surviving the face's roughness.

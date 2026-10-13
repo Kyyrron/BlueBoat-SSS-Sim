@@ -39,21 +39,28 @@ quiet             unused here; accepted for symmetry with the siblings
 subscribes gz ``/ocean_current`` unconditionally.
 """
 
-from simple_launch import GazeboBridge, SimpleLauncher
+# ROS is needed to *launch*, not to import this module (see the same guard in
+# sss_sim_launch.py). `wrench_bridges` below does need it -- it returns
+# GazeboBridge objects -- and says so rather than failing obscurely.
+try:
+    from simple_launch import GazeboBridge, SimpleLauncher
+except ImportError:                       # no ROS on this interpreter
+    GazeboBridge = SimpleLauncher = None
 
-sl = SimpleLauncher(use_sim_time=True)
+sl = SimpleLauncher(use_sim_time=True) if SimpleLauncher is not None else None
 
-sl.declare_arg("sea_current", default_value="none")
-sl.declare_arg("sea_current_from_deg", default_value=0.0)
-sl.declare_arg("sea_waves", default_value="calm")
-sl.declare_arg("sea_waves_from_deg", default_value=0.0)
-sl.declare_arg("sea_schedule", default_value="")
-sl.declare_arg("sea_seed", default_value=0)
-sl.declare_arg("world_name", default_value="ocean")
-sl.declare_arg("world_dir", default_value="")
-sl.declare_arg("with_current_bridge", default_value=False)
-sl.declare_arg("rate_hz", default_value=100.0)
-sl.declare_arg("quiet", default_value=True)
+if sl is not None:
+    sl.declare_arg("sea_current", default_value="none")
+    sl.declare_arg("sea_current_from_deg", default_value=0.0)
+    sl.declare_arg("sea_waves", default_value="calm")
+    sl.declare_arg("sea_waves_from_deg", default_value=0.0)
+    sl.declare_arg("sea_schedule", default_value="")
+    sl.declare_arg("sea_seed", default_value=0)
+    sl.declare_arg("world_name", default_value="ocean")
+    sl.declare_arg("world_dir", default_value="")
+    sl.declare_arg("with_current_bridge", default_value=False)
+    sl.declare_arg("rate_hz", default_value=100.0)
+    sl.declare_arg("quiet", default_value=True)
 
 
 def wrench_bridges(world_name: str) -> list:
@@ -61,7 +68,12 @@ def wrench_bridges(world_name: str) -> list:
     launch-free (a list of ``GazeboBridge``) so the smoke test can pin the
     message pairs -- ``EntityWrench`` is not in simple_launch's ``msg_map``
     and needs the explicit ``gz_msg``; without it the bridge object is
-    silently broken."""
+    silently broken. This one *does* need ROS on the path (it builds
+    GazeboBridge objects); it says so rather than failing on a None."""
+    if GazeboBridge is None:
+        raise RuntimeError(
+            "wrench_bridges() needs simple_launch (ROS) on this interpreter; "
+            "the rest of this module imports without it")
     return [
         GazeboBridge(f"/world/{world_name}/wrench", f"/world/{world_name}/wrench",
                      "ros_gz_interfaces/EntityWrench", GazeboBridge.ros2gz,
@@ -73,11 +85,30 @@ def wrench_bridges(world_name: str) -> list:
     ]
 
 
+#: The boat's 100 Hz Gazebo pose, stamped (2026-10-09): what the hull
+#: wrench and the sonar use instead of the 20 Hz odometry. Simulation-only,
+#: additive; the source is blueboat_description's own PosePublisher.
+BOAT_POSE_TOPIC = "/sim/sea_state/boat_pose"
+
+
+def pose_bridge(model: str = "blueboat"):
+    """gz ``/model/<model>/pose`` (``gz.msgs.Pose``, every physics step) ->
+    ROS ``BOAT_POSE_TOPIC`` as ``geometry_msgs/TransformStamped``, which
+    keeps the sim-time stamp and the child frame (the hull is told apart
+    from any nested model). Needs ROS on the path, like wrench_bridges."""
+    if GazeboBridge is None:
+        raise RuntimeError("pose_bridge() needs simple_launch (ROS) on this interpreter")
+    return GazeboBridge(f"/model/{model}/pose", BOAT_POSE_TOPIC,
+                        "geometry_msgs/TransformStamped", GazeboBridge.gz2ros,
+                        gz_msg="gz.msgs.Pose")
+
+
 def launch_setup():
     world_name = str(sl.arg("world_name"))
     bridges = []
     if world_name:
         bridges += wrench_bridges(world_name)
+        bridges.append(pose_bridge("blueboat"))
     if sl.arg("with_current_bridge"):
         bridges.append(GazeboBridge("/ocean_current", "/current",
                                     "geometry_msgs/Vector3", GazeboBridge.ros2gz))
@@ -99,4 +130,6 @@ def launch_setup():
     return sl.launch_description()
 
 
-generate_launch_description = sl.launch_description(opaque_function=launch_setup)
+generate_launch_description = (
+    sl.launch_description(opaque_function=launch_setup)
+    if sl is not None else None)

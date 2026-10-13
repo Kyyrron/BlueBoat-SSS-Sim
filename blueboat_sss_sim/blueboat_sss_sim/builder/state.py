@@ -13,7 +13,11 @@ from is later renamed or deleted.
 
 from __future__ import annotations
 
+import os
+
 import dataclasses
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -104,15 +108,47 @@ class DepthState:
     paint: list = field(default_factory=list)
     #: Material brush strokes, same frame and shape, value = material name.
     material_paint: list = field(default_factory=list)
+    #: The authored layer stack *above* the source (``worldgen.depth.layers``
+    #: dicts, design frame). Empty = the legacy state, serialised exactly as
+    #: before; non-empty = the build bakes ``source + paint + layers`` into
+    #: a GeoTIFF and a material map (``worldgen.depth.bake``).
+    layers: list = field(default_factory=list)
+
+
+def scatter_signature(seed: int, classes: Mapping[str, Any]) -> str:
+    """Stable fingerprint of what Screen 4 configured.
+
+    Screen 5 records it next to a pinned field so a later change to the
+    scatter (a count, a distribution, the seed) is detectable: the pinned
+    objects no longer correspond to the classes that produced them.
+    """
+    blob = json.dumps({"seed": int(seed), "classes": classes or {}},
+                      sort_keys=True, default=float)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
 class ObjectsState:
-    """Screen 4: per-class placement configuration."""
+    """Screens 4 and 5: the scatter configuration and the placed objects."""
 
     seed: int = 1
     classes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Hand-placed instances (Screen 5), design frame, engine-verbatim
+    #: (``worldgen.objects`` ``objects.explicit`` entries).
     explicit: list = field(default_factory=list)
+    #: The ``classes`` random field **pinned** into verbatim instances, so
+    #: every scattered object can be moved and edited on Screen 5. Empty =
+    #: the scatter is still live and ``classes`` generates it at build
+    #: time, exactly as before this screen existed.
+    placed: list = field(default_factory=list)
+    #: :func:`scatter_signature` of the seed/classes that produced
+    #: ``placed``; a mismatch means Screen 4 has changed since.
+    placed_signature: str = ""
+    #: The random field was pinned on Screen 5. Kept separately from
+    #: ``placed`` so that deleting every pinned object leaves the classes
+    #: silent instead of resurrecting the scatter (2026-09-16). False on
+    #: every older state, which then behaves exactly as before.
+    pinned: bool = False
 
 
 def _copy_wall(w: Mapping[str, Any]) -> dict:
@@ -122,6 +158,35 @@ def _copy_wall(w: Mapping[str, Any]) -> dict:
     if out.get("ctrl") is not None:
         out["ctrl"] = [float(out["ctrl"][0]), float(out["ctrl"][1])]
     return out
+
+
+#: Where :meth:`BuilderState.autosave` writes. Under the cache directory,
+#: not under ``~/worlds``: it is a crash net, never a world.
+AUTOSAVE_NAME = "builder_autosave.yaml"
+
+
+def autosave_path() -> Path:
+    root = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
+    return Path(root) / "blueboat_sss_sim" / AUTOSAVE_NAME
+
+
+def load_autosave() -> "BuilderState | None":
+    """The autosaved state, or ``None`` when there is none or it is
+    unreadable (a stale file must never block the builder from starting)."""
+    try:
+        p = autosave_path()
+        if not p.exists():
+            return None
+        return BuilderState.load(p)
+    except Exception:
+        return None
+
+
+def clear_autosave() -> None:
+    try:
+        autosave_path().unlink()
+    except OSError:
+        pass
 
 
 @dataclass
@@ -175,6 +240,30 @@ class BuilderState:
     def load(cls, path: str | Path) -> "BuilderState":
         with open(path, "r", encoding="utf-8") as f:
             return cls.from_dict(yaml.safe_load(f) or {})
+
+    # ------------------------------------------------------- autosave
+    def autosave(self, path: str | Path | None = None) -> Path | None:
+        """Write the wizard state to the autosave file, atomically.
+
+        A world's ``builder_state.yaml`` is only written when the build
+        succeeds, so until then everything the operator has drawn -- the
+        limits, the walls, a whole seabed layer stack, hand-placed objects
+        -- lives in memory alone. A process death loses all of it, and the
+        World Builder *has* been killed outright by the OOM killer while
+        previewing a large recording (2026-09-18). This costs a few
+        milliseconds per page change and makes that survivable.
+
+        Never raises: an autosave that fails must not take the session
+        down with it."""
+        try:
+            p = Path(path) if path else autosave_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            self.save(tmp)
+            tmp.replace(p)
+            return p
+        except Exception:
+            return None
 
     # ----------------------------------------------------- world framing
     def spawn_origin(self) -> tuple[float, float]:
@@ -239,6 +328,10 @@ class BuilderState:
         if self.depth.mode in ("file", "svlog") and not self.depth.file:
             raise ValueError(f"depth mode is '{self.depth.mode}' but no "
                              "file was chosen (Screen 3)")
+        if self.depth.layers:
+            from ..worldgen.depth.compose import stack_from_depth
+            from ..worldgen.depth.layers import normalize_layers
+            normalize_layers(stack_from_depth(self.depth))
         from ..core.geometry import merge_endpoints
         kept = merge_endpoints(self.walls)
         if len(kept) != len(self.walls):

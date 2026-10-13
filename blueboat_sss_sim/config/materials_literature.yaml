@@ -1,0 +1,37 @@
+# Literature-anchored seabed table -- Jackson & Richardson 2007 par. 12.1
+# contrasts at 450 kHz, as an opt-in override of the shipped judgement values.
+#
+# Why it exists. The shipped table (worldgen/materials.py) compresses the
+# seabed into 5.9 dB between seagrass and rock, where the literature spans
+# about 15 dB: J&R's Lambert fits below 60 deg grazing give mud -19.7, sand
+# -20.2, gravel -11.7 and rock -5.6 dB, and their frequency slopes (mud +3,
+# sand +6-8, gravel +3, rock 0 dB/decade) put sand ~5 dB over mud at 450 kHz,
+# gravel ~3 dB over sand and rock ~5-8 dB over sand. Within-class spread is
+# +-5-8 dB, which is why a *survey* of the site (the `reflectivity_survey`
+# layer, which measures the real thing from a recording) beats any table.
+#
+# How to use it. Paste the block below into a world config's `materials:`
+# section, or pass it as the material overrides. TWO consequences, both
+# deliberate:
+#
+#   1. The table is anchored on sand = 0.20 rather than 0.55, because rock at
+#      +6.5 dB over sand would otherwise exceed the renderer's [0, 1]
+#      reflectivity. That is a 4.4 dB drop in absolute level, so a world using
+#      this table wants `calibration_db_offset: 85.5` (81.1 + 4.4) to stay on
+#      the corpus level -- change both together or neither.
+#   2. Every existing world keeps the shipped table and is bit-identical: this
+#      file is an override, never a default.
+#
+# Object materials are unchanged: their values are judgement everywhere except
+# `pp_shell`, which is derived (see worldgen/materials.py).
+materials:
+  mud:
+    reflectivity: 0.063       # -5.0 dB vs sand at 450 kHz
+  sand:
+    reflectivity: 0.200       # the anchor
+  gravel:
+    reflectivity: 0.399       # +3.0 dB
+  rocks:
+    reflectivity: 0.893       # +6.5 dB
+  seagrass:
+    reflectivity: 0.032       # -8.0 dB (judgement: J&R fit no seagrass)

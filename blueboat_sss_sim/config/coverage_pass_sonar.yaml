@@ -1,39 +1,36 @@
 # Coverage-pass sonar profile -- project_synthesis.md 8.5 reserved setting.
 #
-# `config/default_sonar.yaml` with `range_length_mm: 30000` (30 m per side) and
-# NOTHING else changed, mirroring how `shallow_water_world.yaml` differs from
-# `default_world.yaml` by one knob. 8.5 reserves 30 m for coverage passes and
-# 15 m for revisit passes; the default profile is the 15 m revisit setting and
-# is also the power-calibration anchor (NC #6), so the coverage setting lives
-# here rather than moving the default off its anchor.
+# `config/default_sonar.yaml` with `range_length_mm: 30000` (30 m per side)
+# and nothing else changed. 8.5 reserves 30 m for coverage passes and 15 m for
+# revisit passes; the default profile runs 20 m (the beach day's setting and
+# the real driver's default).
 #
-# Bind it from a mission with `sonar_profile: config/coverage_pass_sonar.yaml`;
-# the bundle then freezes it and `sss_sim_launch.py` passes it to the node.
+# Bind it per run with `sonar_config:=config/coverage_pass_sonar.yaml`.
 #
-# Note the wider swath halves cross-track resolution at 600 bins (50 mm bins
-# against the default's 25 mm) and slows the free-run ping period to 42 ms;
-# 8.5 covers the trade (range setting does not change resolution at a given
-# ground range, but it does change ping rate and along-track sampling).
+# At 1200 bins the 30 m swath samples 25 mm across track (the default's
+# 16.7 mm) and the pulse leaves the 44.3 us floor (0.00125 x 2R/c = 50 us,
+# 38 mm); the free-run period stays at the 50 ms cap (20 pings/s up to 30 m).
 acquisition:
   range_start_mm: 0
   range_length_mm: 30000    # 30 m coverage pass (project_synthesis 8.5)
-  msec_per_ping: 0          # 0 = free run (device-native)
-  gain_index: 4             # calibration anchor. -1 = device auto-gain, as on
-                            # the real node; the simulator has no AGC, so it
-                            # resolves to 4 and reports 4 (the profile's
+  msec_per_ping: 0          # 0 = free run (device-native: 20 pings/s to 30 m)
+  gain_index: -1            # device auto-gain, the real sss_node.py default.
+                            # The simulator has no AGC: -1 resolves to the
+                            # calibrated index 4 and reports 4 (the profile's
                             # gain_index is uint16 and cannot carry -1).
-                            # Ladder covers 0-7 (4-7 measured); else rejected.
-  num_results: 600          # 1/600 of range (50 mm bins at 30 m). The device
-                            # supports up to 1/1200: set 1200 for
-                            # high-res runs (12.5 mm bins); the renderer,
-                            # encoder and raw framing scale automatically.
-  pulse_len_percent: 0.002
+                            # 0-7 are accepted (4-7 measured); else rejected.
+  num_results: 1200         # the device maximum (1/1200 of range)
+  pulse_len_percent: 0.00125  # pulse = max(44.3 us, this x 2R/c), the
+                            # measured device law; 0.00125 is SonarView's own
+                            # 1.5 / num_results. Up to ~27 m it sits on the
+                            # 44.3 us floor, the device's shortest pulse
+                            # (33 mm true range resolution)
 
 model:
   # Mounting (vehicle frame) -- Omniscan 450 SS beam geometry
   sensor_depth_m: 0.15
   mount_x_m: 0.0
-  mount_y_abs_m: 0.20
+  mount_y_abs_m: 0.285
   beam_tilt_deg: 20.0
   vertical_aperture_deg: 50.0   # spec: 50 deg beam height
   horizontal_aperture_deg: 0.5  # spec: 0.5 deg along-track beam
@@ -46,18 +43,36 @@ model:
   max_ping_rate_hz: 20.0
 
   # Acoustics
-  # Range law, fitted against the Shiraishi-jima corpus. Only the product
-  # spreading_exponent * (1 - tvg_compensation) is determined; the split is
-  # fixed by taking spreading at its physical two-way-intensity value, which
-  # makes tvg_compensation 0 -- the profile the device reports is pre-TVG.
-  lambert_exponent: 1.0       # not separated from site geometry by the corpus
+  # Range law, RE-FITTED 2026-09-18 on two altitudes at once -- the lever the
+  # single-altitude fit never had: bath3 (beach, 1.40 m altitude, 12371 pings)
+  # and reflectionEvidenceFullharbour (harbour, 7.33 m, 1445 pings). The
+  # seabed's absolute dB-vs-slant curve comes back to 0.9 dB rms at BOTH with
+  # lambert_exponent 1.0, tvg_compensation 0.30 and calibration_db_offset 81.1;
+  # the former (1.0, 0.0, 97.2) matched the harbour and ran ~18 dB hot at the
+  # beach. The device does compensate part of the range loss; only the pair
+  # (spreading_exponent, tvg_compensation) is determined, so spreading stays at
+  # its physical two-way value and the TVG carries the fitted part.
+  lambert_exponent: 1.0       # measured over the two altitudes together (2026-09-18)
   absorption_db_per_m: 0.10   # ~450 kHz seawater; not separated from spreading
-  spreading_exponent: 4.0     # two-way intensity spreading, r^-4
-  tvg_compensation: 0.0
+  spreading_exponent: 4.0     # two-way intensity spreading, r^-4 (incoherent)
+  tvg_compensation: 0.30
+  # The coherent (specular) component is the field of an IMAGE SOURCE and
+  # spreads once over the folded path, not twice like the diffuse field. With
+  # r^-2 the reported peak level follows altitude as the corpus measures it
+  # (66.6 - 11.3 log10 alt dB over 19 gain-4 files, rms 1.6; simulator
+  # 72.1 - 11.5), where sharing r^-4 gave -20 to -27 dB per decade.
+  specular_spreading_exponent: 2.0
   # Near-nadir first-bottom-return realism (FBR / bottom tracking locks on
   # this -- see docs/sonar_model.md section 3):
+  # Along-track floor on the footprint (an array of length D cannot
+  # resolve finer than D). MEASURED 0: the corpus's own along-track
+  # texture correlation says the device's footprint follows r*theta to
+  # at least 10 m, so it focuses its near field; 0.35 m would put that
+  # correlation at 0.76 against the measured 0.36-0.66. Undetermined
+  # inside ~3 m -- a point target at 3 and 12 m would settle it.
+  array_length_m: 0.0
   beam_sidelobe_floor: 0.004    # pattern floor (~-24 dB), real sidelobes
-  specular_strength: 30.0       # near-normal-incidence lobe amplitude,
+  specular_strength: 12.0       # near-normal-incidence lobe amplitude,
                                 # sized so the FBR clears a +8 dB detector
                                 # threshold even over dark mud/seagrass
   specular_width_deg: 8.0       # angular width of the specular lobe
@@ -65,14 +80,15 @@ model:
                                 # CV ~0.2 -- the nadir echo is Rician/high-K,
                                 # far steadier than diffuse speckle, which is
                                 # what lets bottom tracking lock ping-to-ping
-  pulse_smearing: true          # convolve pings with the c*tau/2 range
-                                # resolution like the real matched-filter
-                                # output; the pulse follows the device law
-                                # (1.2-1.5 sample periods, 44 us floor)
-  range_filter_bins: 3          # receive-chain envelope floor on that
-                                # kernel (corpus lag-1 range correlation
-                                # 0.30-0.68; a 3-bin boxcar on the complex
-                                # field gives ~0.35)
+  pulse_smearing: true          # convolve pings with the range envelope
+                                # the acquisition implies, like the real
+                                # matched-filter output; the pulse follows
+                                # the device law max(44.3 us, p x 2R/c)
+  filter_duration_percent: 0.0015  # receive filter, as the real driver pins
+                                # it: envelope = pulse/Ts + this x N + 1 bins
+                                # (3 at 600 / 0.002, 5 at 1200 / 0.00125 and
+                                # 20 m); texture lag-1 range correlation
+                                # 0.30 / 0.50 against the corpus's 0.29 / 0.46
   # Along-track 0.5 deg beam: ground lines integrated across the azimuth
   # footprint (odd number; 1 = legacy infinitesimal-beam behaviour)
   alongtrack_beam_lines: 5
@@ -80,7 +96,7 @@ model:
   # [min_pwr_db, max_pwr_db] exactly as the device does, so the array carries
   # no absolute level and `calibration_db_offset` is the only level constant.
   # `max_span_db` is the device's own clamp on that dB axis.
-  calibration_db_offset: 97.2
+  calibration_db_offset: 81.1
   max_span_db: 90.0
 
   # Shallow-water multipath (enclosed-basin regime): dim ghost seabed
@@ -128,8 +144,8 @@ model:
   # are `10**((level - calibration_db_offset)/10)`. The former single fitted
   # value (6.79e-7, 38.5 dB) never reached the real floor and hid the range
   # law beyond ~20 m.
-  noise_floor: 8.3e-11
-  watercolumn_noise: 1.15e-07   # 40 dB under the FBR peak
+  noise_floor: 3.39e-09
+  watercolumn_noise: 4.68e-06   # 40 dB under the FBR peak
   # Radiometric/link degradations are deferred to the downstream
   # augmentation stage per the tuning request -- OFF in the base model
   # (set >0 to re-enable here):

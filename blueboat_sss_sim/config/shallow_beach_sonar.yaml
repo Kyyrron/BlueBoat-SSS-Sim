@@ -1,0 +1,207 @@
+# Shallow-beach sonar profile -- the 2026-09-07 field regime (1.0-1.5 m
+# altitude over sand, 20 m per side), for reproducing that day's recordings
+# and for the shallow leg of the sim-to-real comparison.
+#
+# `config/default_sonar.yaml` with the shallow-water return paths turned ON and
+# nothing else changed. At a metre of altitude the seabed, the surface and
+# the hull are all within a pulse length of each other, so the paths the
+# default profile leaves off are exactly the ones that fill a shadow there:
+#
+#   * `multipath_enabled` -- the bottom-surface-bottom ghost, displaced by one
+#     altitude in slant range. At 1.2 m that lands a dim copy of the seabed
+#     0.8-1.5 m behind every feature, which is *inside* the shadow of a
+#     0.3 m object rather than beyond the swath as it would be at 8 m.
+#   * `surface_mirror_enabled` -- the mirror image in z = 0. The path leaves
+#     the transducer upward, so only the vertical pattern's sidelobe floor
+#     passes it; that floor is what reaches the near seabed at this altitude.
+#
+# The 2026-09-18 review measured the simulator's shadows 30 dB deeper than the
+# device's in this regime. The reverberation floor (`reverberation_db`, in the
+# base model since that review) closes most of that; these two paths are the
+# geometry-specific remainder, and they are profile-scoped because at survey
+# altitudes they are neither measurable nor cheap.
+#
+# Measured against the field (2026-09-28, the NAFCO box of
+# object_boiteVsDistance.svlog, heading-averaged): the DEFAULT profile
+# reproduces the box's shadow (-8.0 / -8.3 dB at 6.1 / 10.1 m against the
+# device's -8.2 / -7.4); this profile lightens it to -6.0 / -6.4. Use the
+# default for sim-vs-real comparison; this profile is for studying the two
+# return paths.
+#
+# Bind it per run with `sonar_config:=config/shallow_beach_sonar.yaml`.
+
+acquisition:
+  range_start_mm: 0
+  range_length_mm: 20000    # what the beach day ran (bath1-3, object_*)
+  msec_per_ping: 0          # 0 = free run (device-native: 20 pings/s to 30 m)
+  gain_index: -1            # device auto-gain, the real sss_node.py default.
+                            # The simulator has no AGC: -1 resolves to the
+                            # calibrated index 4 and reports 4 (the profile's
+                            # gain_index is uint16 and cannot carry -1).
+                            # 0-7 are accepted (4-7 measured); else rejected.
+  num_results: 1200         # the device maximum (1/1200 of range)
+  pulse_len_percent: 0.00125  # pulse = max(44.3 us, this x 2R/c), the
+                            # measured device law; 0.00125 is SonarView's own
+                            # 1.5 / num_results. Up to ~27 m it sits on the
+                            # 44.3 us floor, the device's shortest pulse
+                            # (33 mm true range resolution)
+
+model:
+  # Mounting (vehicle frame) -- Omniscan 450 SS beam geometry
+  sensor_depth_m: 0.15
+  mount_x_m: 0.0
+  mount_y_abs_m: 0.285
+  beam_tilt_deg: 20.0
+  vertical_aperture_deg: 50.0   # spec: 50 deg beam height
+  horizontal_aperture_deg: 0.5  # spec: 0.5 deg along-track beam
+
+  # Timing -- the device law, MEASURED on all seven corpus recordings:
+  # period = max(50 ms, 2R/c + 3 ms). 20 pings/s up to 30 m (18.4 m and
+  # 20 m files sit at exactly 50 ms), range-limited beyond (54 ms at 38 m,
+  # 131 ms at 95.6 m, 170 ms at 125.6 m), as the spec sheet states. This
+  # is the 20 Hz cap; 0 disables it (experiment knob only).
+  max_ping_rate_hz: 20.0
+
+  # Acoustics
+  # Range law, RE-FITTED 2026-09-18 on two altitudes at once -- the lever the
+  # single-altitude fit never had: bath3 (beach, 1.40 m altitude, 12371 pings)
+  # and reflectionEvidenceFullharbour (harbour, 7.33 m, 1445 pings). The
+  # seabed's absolute dB-vs-slant curve comes back to 0.9 dB rms at BOTH with
+  # lambert_exponent 1.0, tvg_compensation 0.30 and calibration_db_offset 81.1;
+  # the former (1.0, 0.0, 97.2) matched the harbour and ran ~18 dB hot at the
+  # beach. The device does compensate part of the range loss; only the pair
+  # (spreading_exponent, tvg_compensation) is determined, so spreading stays at
+  # its physical two-way value and the TVG carries the fitted part.
+  lambert_exponent: 1.0       # measured over the two altitudes together (2026-09-18)
+  absorption_db_per_m: 0.10   # ~450 kHz seawater; not separated from spreading
+  spreading_exponent: 4.0     # two-way intensity spreading, r^-4 (incoherent)
+  tvg_compensation: 0.30
+  # The coherent (specular) component is the field of an IMAGE SOURCE and
+  # spreads once over the folded path, not twice like the diffuse field. With
+  # r^-2 the reported peak level follows altitude as the corpus measures it
+  # (66.6 - 11.3 log10 alt dB over 19 gain-4 files, rms 1.6; simulator
+  # 72.1 - 11.5), where sharing r^-4 gave -20 to -27 dB per decade.
+  specular_spreading_exponent: 2.0
+  # Near-nadir first-bottom-return realism (FBR / bottom tracking locks on
+  # this -- see docs/sonar_model.md section 3):
+  # Along-track floor on the footprint (an array of length D cannot
+  # resolve finer than D). MEASURED 0: the corpus's own along-track
+  # texture correlation says the device's footprint follows r*theta to
+  # at least 10 m, so it focuses its near field; 0.35 m would put that
+  # correlation at 0.76 against the measured 0.36-0.66. Undetermined
+  # inside ~3 m -- a point target at 3 and 12 m would settle it.
+  array_length_m: 0.0
+  beam_sidelobe_floor: 0.004    # pattern floor (~-24 dB), real sidelobes
+  specular_strength: 12.0       # near-normal-incidence lobe amplitude,
+                                # sized so the FBR clears a +8 dB detector
+                                # threshold even over dark mud/seagrass
+  specular_width_deg: 8.0       # angular width of the specular lobe
+  specular_looks: 25            # coherent-return fluctuation: Gamma(L,1/L),
+                                # CV ~0.2 -- the nadir echo is Rician/high-K,
+                                # far steadier than diffuse speckle, which is
+                                # what lets bottom tracking lock ping-to-ping
+  pulse_smearing: true          # convolve pings with the range envelope
+                                # the acquisition implies, like the real
+                                # matched-filter output; the pulse follows
+                                # the device law max(44.3 us, p x 2R/c)
+  filter_duration_percent: 0.0015  # receive filter, as the real driver pins
+                                # it: envelope = pulse/Ts + this x N + 1 bins
+                                # (3 at 600 / 0.002, 5 at 1200 / 0.00125 and
+                                # 20 m); texture lag-1 range correlation
+                                # 0.30 / 0.50 against the corpus's 0.29 / 0.46
+  # Transmit-pulse ringing (MEASURED on diffDepthCompensation.svlog):
+  # every real ping leaves the transducer at ~55 dB — brighter than any
+  # seabed return — decaying to ~33 dB by 1 m. Lives inside the water
+  # column at survey altitudes; joined to the coherent (low-CV) channel.
+  # Set ringing_level_db: 0 to disable.
+  ringing_level_db: 55.0
+  ringing_decay_db_per_m: 22.0
+  # Along-track 0.5 deg beam: ground lines integrated across the azimuth
+  # footprint (odd number; 1 = legacy infinitesimal-beam behaviour)
+  alongtrack_beam_lines: 5
+  # Power encoding. `pwr_results` is normalised per ping onto
+  # [min_pwr_db, max_pwr_db] exactly as the device does, so the array carries
+  # no absolute level and `calibration_db_offset` is the only level constant.
+  # `max_span_db` is the device's own clamp on that dB axis.
+  calibration_db_offset: 81.1
+  max_span_db: 90.0
+
+  # Shallow-water multipath (enclosed-basin regime): dim ghost seabed
+  # displaced +altitude in slant range (bottom-surface-bottom path).
+  # First-order model, OFF by default.
+  multipath_enabled: true
+  multipath_gain: 0.12
+
+  # Wall / surface multipath: mirror-source ghosts off the basin boundaries
+  # the *world* config declares under `walls:` (the world says which walls
+  # exist and how reflective each is; these knobs say whether the path is
+  # modelled and how strongly). A ghost lands at its true folded path length
+  # and carries its own ground-truth contact. ON by default (2026-09-01):
+  # a strict no-op in any world without walls, so no wall-less result moves;
+  # walled worlds get their physical reflections without a special profile.
+  wall_multipath_enabled: true
+  wall_multipath_gain: 1.0      # global scale on every ghost, on top of each
+                                # wall's own reflectivity
+  surface_mirror_enabled: true # also mirror across z=0. The air/water
+                                # interface reflects almost perfectly, but the
+                                # path leaves the transducer upward, so the
+                                # vertical pattern sees it at -depression and
+                                # only the sidelobe floor passes
+  surface_reflectivity: 0.9     # pressure-release interface
+  # Direct wall echo (closes the former assumption A9): a quay's wet face
+  # returns a bright coherent line at its own slant range and occludes the
+  # seabed behind it, as every real harbour log shows. Strict no-op without
+  # walls. The strength is not corpus-determined (no wall geometry ground
+  # truth exists for the corpus); the obliquity law is cos^2 with a floor.
+  wall_echo_enabled: true
+  wall_echo_strength: 30.0
+  wall_echo_obliquity_floor: 0.1
+  # Wall face + multipath fidelity (2026-09-03, anchored on the
+  # fullHarbourCleanExample quay: face +21 dB over the seabed before it,
+  # 1.5-4 m beyond ~-12 dB, 6-12 m beyond ~-23 dB -- docs/sonar_model.md
+  # section 11). Ghosts carry reflectivity^2 (two bounces) times the
+  # Rayleigh roughness law; the single-bounce band folds the seabed in
+  # front of a quay into the strip just beyond its face.
+  wall_face_diffuse: 0.5
+  wall_pontoon_specular: 0.15
+  wall_corner_gain: 1.0
+  wall_diffuse_fraction: 0.04
+  ghost_beam_lines: 1           # azimuth lines per ghost render (1 =
+                                # infinitesimal beam). The cost lever: ghosts
+                                # are dim and already smeared by the bounce
+
+  # Noise
+  speckle: true
+  speckle_looks: 1            # 1 = fully-developed (Rayleigh-amplitude)
+                              # speckle; >1 = smoother multi-look Gamma
+  # Single-look speckle comes from a ground-fixed scatterer field (a random
+  # phasor per ground cell, summed coherently per bin, pulse convolved on the
+  # complex field): the bin statistic is Exp(1) as before, but the texture is
+  # correlated along range (pulse) and along track (footprint overlap) as the
+  # corpus measures (lag-1 0.3-0.7 both ways). false = legacy per-bin draw.
+  coherent_scatterers: true
+  scatterer_cell_m: 0.01      # seed-class parameter: changing it changes
+                              # every image
+  scatterer_seed: 0
+  # Fitted as one number with the range law: puts the water column 26 dB below
+  # the bottom return, as the corpus does across three range settings.
+  # MEASURED separately on the corpus at gain 4 (2026-09-02). The receiver
+  # floor is the far decile of the 72-126 m recordings, -6.1 dB reported
+  # (mean of dB; -3.6 dB as the linear mean this constant is); the water
+  # column is the 1-3 m band, 25.3 dB reported (27.8 dB linear mean). Both
+  # are `10**((level - calibration_db_offset)/10)`. The former single fitted
+  # value (6.79e-7, 38.5 dB) never reached the real floor and hid the range
+  # law beyond ~20 m.
+  noise_floor: 3.39e-09
+  watercolumn_noise: 4.68e-06   # 40 dB under the FBR peak
+  # Radiometric/link degradations are deferred to the downstream
+  # augmentation stage per the tuning request -- OFF in the base model
+  # (set >0 to re-enable here):
+  gain_drift_amp: 0.0
+  gain_drift_period_s: 45.0
+  dropped_ping_prob: 0.0
+
+  # Sampling: coarse upper bound only -- the renderer automatically
+  # refines the ground step to ~half the slant-bin size so every range
+  # bin is populated at any num_results.
+  sample_step_m: 0.05

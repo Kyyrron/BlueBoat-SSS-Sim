@@ -30,6 +30,7 @@ from .paint import (apply_depth_paint, normalize_strokes,
                     paint_material_ids, stroke_mask, strokes_to_samples)
 from .presets import DEPTH_PRESETS
 from .smooth import interpolate_smooth_to_grid
+from .sources import base_height, check_coverage
 from .svlog import SVLOG_KEYS, load_svlog, normalize_svlog_options
 
 __all__ = ["DepthConfig", "build_height", "build_height_with_info",
@@ -40,7 +41,7 @@ __all__ = ["DepthConfig", "build_height", "build_height_with_info",
            "apply_depth_paint", "strokes_to_samples", "stroke_mask",
            "normalize_strokes", "paint_material_ids",
            "sample_coverage", "coverage_warning",
-           "no_overlap_message"]
+           "no_overlap_message", "base_height", "check_coverage"]
 
 _MODES = ("preset", "file", "svlog")
 _KEYS = {"mode", "preset", "params", "file", "file_kind", "file_values",
@@ -116,56 +117,16 @@ def build_height_with_info(grid: GridSpec, cfg: DepthConfig,
     """:func:`build_height` plus a source-dependent info dict -- the
     survey quality summary (and raw soundings) for ``svlog`` mode, empty
     for the others."""
-    base, info = _base_height(grid, cfg, walls, anchor, rng)
+    base, info, _ = base_height(grid, cfg, walls, anchor, rng)
     return apply_depth_paint(base, grid, cfg.paint, walls), info
 
 
 def _base_height(grid: GridSpec, cfg: DepthConfig, walls: list[Wall],
                  anchor: GeoAnchor | None,
                  rng: np.random.Generator) -> tuple[np.ndarray, dict[str, Any]]:
-    if cfg.mode == "preset":
-        fn, _, _ = DEPTH_PRESETS[cfg.preset]
-        return fn(grid, cfg.params, rng), {}
-    if anchor is None:
-        raise ValueError(
-            f"depth.mode '{cfg.mode}' needs a geo anchor (the soundings' "
-            "lat/lon must land somewhere): give the world a geo: section")
-    kind = cfg.resolved_kind()
-    if cfg.mode == "svlog" or kind == "svlog":
-        if cfg.mode != "svlog":
-            raise ValueError("a .svlog depth source needs depth.mode 'svlog'")
-        samples, info = load_svlog(cfg.file, anchor, cfg.svlog)
-        _check_coverage(samples, grid, anchor, cfg.file, "recording", info,
-                        reach_m=cfg.svlog["trend_length_m"])
-        o = cfg.svlog
-        height = interpolate_smooth_to_grid(
-            samples.east, samples.north, samples.depth, grid, walls,
-            smoothing=o["smoothing"], trend_length_m=o["trend_length_m"],
-            texture_gain=o["texture_gain"], rng=rng)
-        return height, info
-    if kind == "geotiff":
-        samples = load_geotiff(cfg.file, anchor, cfg.file_values)
-    elif kind == "csv":
-        samples = load_csv(cfg.file, anchor, cfg.file_values)
-    else:
-        raise ValueError(f"depth.file_kind '{kind}' unknown (csv | geotiff)")
-    info = {}
-    _check_coverage(samples, grid, anchor, cfg.file, "file", info)
-    return interpolate_to_grid(samples, grid, walls), info
+    """Historical name: the source's height and info (see ``sources``)."""
+    h, info, _ = base_height(grid, cfg, walls, anchor, rng)
+    return h, info
 
 
-def _check_coverage(samples, grid: GridSpec, anchor: GeoAnchor | None,
-                    file: str, kind: str, info: dict[str, Any],
-                    reach_m: float = DEFAULT_REACH_M) -> None:
-    """Refuse a source that never reaches the world, and record how much
-    of the world it did reach. The fitters raise on an empty overlap too;
-    this runs first so the message can name the two places."""
-    cov = sample_coverage(samples.east, samples.north, grid,
-                          reach_m=reach_m)
-    if not cov["inside"]:
-        raise ValueError(no_overlap_message(cov, anchor, Path(file).name,
-                                            kind))
-    info["coverage"] = cov
-    warn = coverage_warning(cov, kind)
-    if warn:
-        info["warning"] = warn
+_check_coverage = check_coverage

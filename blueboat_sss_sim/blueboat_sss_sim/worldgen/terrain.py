@@ -25,7 +25,7 @@ import numpy as np
 
 from ..core.types import GridSpec
 from .depth.paint import normalize_strokes, paint_material_ids
-from .materials import MaterialLibrary
+from .materials import REFLECTIVITY_MAX, MaterialLibrary
 from .noise import fbm, value_noise
 
 MATERIAL_LAYOUTS = ("uniform", "patches", "painted")
@@ -36,7 +36,8 @@ _SUB_KEYS = {
     "dunes": {"enabled", "wavelength", "amplitude", "direction_deg",
               "irregularity"},
     "roughness": {"amplitude", "octaves", "cells"},
-    "materials": {"layout", "uniform", "patch_cells", "composition", "paint"},
+    "materials": {"layout", "uniform", "patch_cells", "composition", "paint",
+                  "map"},
 }
 _DEFAULT_COMPOSITION = {"sand": 0.5, "mud": 0.2, "gravel": 0.15,
                         "rocks": 0.1, "seagrass": 0.05}
@@ -72,6 +73,9 @@ class TerrainConfig:
     #: Material brush strokes (``worldgen.depth.paint``): stamped over the
     #: base layout in order; empty = no paint (bit-identical to before).
     material_paint: list = field(default_factory=list)
+    #: Baked material overlay + reflectivity gain of a layered world
+    #: (``material_map.npz``, see ``worldgen.material_map``); "" = none.
+    material_map: str = ""
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "TerrainConfig":
@@ -106,6 +110,7 @@ class TerrainConfig:
             material_composition=dict(mats.get("composition",
                                                _DEFAULT_COMPOSITION)),
             material_paint=normalize_strokes(mats.get("paint"), "material"),
+            material_map=str(mats.get("map", "") or ""),
         )
 
 
@@ -226,9 +231,31 @@ def _world_coords(grid: GridSpec) -> tuple[np.ndarray, np.ndarray]:
     return np.meshgrid(xs, ys)
 
 
+def apply_material_overlay(mat_id: np.ndarray, names: list[str],
+                           ids: np.ndarray, onames: list[str],
+                           known=None) -> tuple[np.ndarray, list[str]]:
+    """Stamp a baked overlay (``-1`` = untouched) over the base layout,
+    appending unseen material names exactly as material paint does."""
+    names = list(names)
+    out = mat_id.copy()
+    for k, nm in enumerate(onames):
+        sel = ids == k
+        if not sel.any():
+            continue
+        if known is not None:
+            known(nm)                      # unknown material raises by name
+        if nm not in names:
+            if len(names) >= 255:
+                raise ValueError("too many materials in one scene")
+            names.append(nm)
+        out[sel] = names.index(nm)
+    return out.astype(np.uint8), names
+
+
 def _material_map(grid: GridSpec, cfg: TerrainConfig,
                   rng: np.random.Generator,
-                  materials: MaterialLibrary | None = None
+                  materials: MaterialLibrary | None = None,
+                  overlay: tuple[np.ndarray, list[str]] | None = None
                   ) -> tuple[np.ndarray, list[str]]:
     names = [n for n, w in cfg.material_composition.items() if w > 0.0]
     if cfg.material_layout == "painted":
@@ -254,22 +281,40 @@ def _material_map(grid: GridSpec, cfg: TerrainConfig,
         mat_id, names = paint_material_ids(
             mat_id, names, grid, cfg.material_paint,
             known=materials.get if materials is not None else None)
+    if overlay is not None:
+        mat_id, names = apply_material_overlay(
+            mat_id, names, overlay[0], list(overlay[1]),
+            known=materials.get if materials is not None else None)
     return mat_id, names
 
 
 def synthesize_terrain(grid: GridSpec, cfg: TerrainConfig,
                        materials: MaterialLibrary,
                        rng: np.random.Generator,
-                       base_height: np.ndarray | None = None) -> TerrainRasters:
+                       base_height: np.ndarray | None = None,
+                       material_overlay: tuple[np.ndarray, list[str]] | None = None,
+                       reflectivity_gain: np.ndarray | None = None
+                       ) -> TerrainRasters:
     """Build the terrain rasters. See module docstring.
 
     When ``base_height`` is given (authored bathymetry: a depth preset or
     an ingested depth file), it replaces the constant ``base_depth`` plane
     and the global slope, and this function contributes only the texture
     layers on top (dunes, broadband roughness, per-material micro-relief).
+
+    ``material_overlay`` (``(ids, names)``, -1 = untouched) is stamped
+    over the material layout after the material paint, and
+    ``reflectivity_gain`` multiplies the reflectivity before its clip;
+    both default to the baked ``materials.map`` file when the config
+    names one, and to nothing otherwise (not one extra operation, and the
+    RNG draw order is unchanged).
     """
     xx, yy = _world_coords(grid)
     shape = (grid.ny, grid.nx)
+    if material_overlay is None and reflectivity_gain is None and cfg.material_map:
+        from .material_map import load_material_map
+        ids, onames, gain = load_material_map(cfg.material_map, grid)
+        material_overlay, reflectivity_gain = (ids, onames), gain
 
     if base_height is not None:
         if base_height.shape != shape:
@@ -299,7 +344,8 @@ def synthesize_terrain(grid: GridSpec, cfg: TerrainConfig,
             shape, cfg.roughness_cells, cfg.roughness_octaves, rng)
 
     # Materials + per-material micro-relief and reflectivity texture.
-    mat_id, names = _material_map(grid, cfg, rng, materials)
+    mat_id, names = _material_map(grid, cfg, rng, materials,
+                                  overlay=material_overlay)
     reflectivity = np.zeros(shape, dtype=np.float64)
     for idx, name in enumerate(names):
         m = materials.get(name)
@@ -307,8 +353,15 @@ def synthesize_terrain(grid: GridSpec, cfg: TerrainConfig,
         if not mask.any():
             continue
         tex = fbm(shape, max(m.texture_cells, 8), 3, rng)
-        reflectivity[mask] = np.clip(
-            m.reflectivity * (1.0 + m.texture_amp * tex[mask]), 0.02, 1.0)
+        val = m.reflectivity * (1.0 + m.texture_amp * tex[mask])
+        # The ceiling opens only under a gain map (a measured survey can
+        # put rock several dB above sand); a world without one clips at
+        # 1.0 exactly as before, so it renders bit-identically.
+        hi = 1.0
+        if reflectivity_gain is not None:
+            val = val * np.asarray(reflectivity_gain, dtype=np.float64)[mask]
+            hi = REFLECTIVITY_MAX
+        reflectivity[mask] = np.clip(val, 0.02, hi)
         if m.micro_roughness_m > 0:
             micro = fbm(shape, 200, 2, rng)
             height[mask] += m.micro_roughness_m * micro[mask]

@@ -25,7 +25,8 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from ..core.types import GridSpec, PlacedObject
-from .materials import MaterialLibrary
+from .materials import (COHERENT_ROUGHNESS_LIMIT_M, MaterialLibrary,
+                        surface_roughness_m)
 from .solids import (Solid, rotation_rpy, rpy_from_rotation, settle,
                      stable_poses)
 
@@ -234,6 +235,49 @@ CATALOG: dict[str, ObjectSpec] = {
                                   (0.30, 0.40), (0.18, 0.25), "plastic",
                                   (0.0, 0.3), False, "box",
                                   label="fish crate (PP)"),
+    # The 2026-09-07 beach target itself: a 68 L NAFCO storage box (NA
+    # Container Clear #75), 716 x 425 x 323 mm outer, lid on, flooded. Its
+    # three dimensions are class knobs rather than a size range, because
+    # the point of the class is to reproduce a *known* object: set them and
+    # every instance is that box. `wall_mm` and `flooded` describe the
+    # shell the facet layer reads (NC #17): the wall thickness sets its
+    # reflection coefficient (the fluid-layer formula, `pp_shell` in
+    # worldgen/materials), and an air-filled box is a near-total reflector
+    # that casts a full shadow. It sat on the sand, so it is drawn unburied
+    # by default (2026-09-28; the draw still consumes its RNG value, so no
+    # other object moves).
+    "plastic_box":     ObjectSpec("plastic_box", _mask_box, (0.70, 0.73),
+                                  (0.41, 0.44), (0.31, 0.33), "pp_shell",
+                                  (0.0, 0.0), False, "box",
+                                  label="storage box, PP shell (68 L)",
+                                  params_schema=(
+                                      ("length_m", "Length [m]", "float",
+                                       0.716, 0.05, 3.0,
+                                       "Outer length of the box. The "
+                                       "default is the 68 L NAFCO box used "
+                                       "on the beach on 2026-09-07."),
+                                      ("width_m", "Width [m]", "float",
+                                       0.425, 0.05, 3.0,
+                                       "Outer width of the box."),
+                                      ("height_m", "Height [m]", "float",
+                                       0.323, 0.02, 2.0,
+                                       "Outer height, i.e. how proud of "
+                                       "the seabed it stands unburied."),
+                                      ("wall_mm", "Wall thickness [mm]",
+                                       "float", 2.0, 0.2, 20.0,
+                                       "Thickness of the shell. At 450 kHz "
+                                       "a polypropylene wall reflects most "
+                                       "strongly near a quarter wavelength "
+                                       "(1.5 mm) and is transparent at a "
+                                       "half (3.0 mm) -- see the pp_shell "
+                                       "material."),
+                                      ("flooded", "Flooded (water inside)",
+                                       "bool", True, 0, 0,
+                                       "A flooded shell lets sound through "
+                                       "and returns its far wall too; an "
+                                       "air-filled one is an near-total "
+                                       "reflector and casts a full "
+                                       "shadow."))),
     "tin_18l":         ObjectSpec("tin_18l", _mask_box, (0.22, 0.25),
                                   (0.22, 0.25), (0.32, 0.36), "tinplate",
                                   (0.0, 0.3), False, "box",
@@ -242,6 +286,28 @@ CATALOG: dict[str, ObjectSpec] = {
                                   (0.22, 0.26), (0.42, 0.48), "plastic",
                                   (0.0, 0.3), False, "box",
                                   label="20 L polytank"),
+    # Harbour furniture rather than litter: a mooring pile is what a
+    # pontoon is actually held by, and what stands beside it in every
+    # marina (2026-09-18 review P6-6). Modelled as what it is -- an
+    # upright cylinder driven into the bed, standing proud of it -- so a
+    # pontoon line can be furnished by hand on the placement screen
+    # instead of the wall model inventing a signature it has no field
+    # anchor for.
+    "mooring_pile":    ObjectSpec("mooring_pile", _mask_cylinder_upright,
+                                  (0.30, 0.60), (0.30, 0.60), (1.20, 3.00),
+                                  "concrete", (0.0, 0.0), True,
+                                  "cylinder_upright",
+                                  label="mooring pile (driven)",
+                                  params_schema=(
+                                      ("diameter_m", "Diameter [m]", "float",
+                                       0.4, 0.1, 1.5,
+                                       "Outer diameter of the pile."),
+                                      ("height_m", "Height above the bed [m]",
+                                       "float", 2.0, 0.2, 6.0,
+                                       "How far it stands proud of the "
+                                       "seabed. A pile that breaks the "
+                                       "surface is dry above it and returns "
+                                       "nothing there (NC #13)."))),
     # F2 large upright cylinder -- the aspect-independence control.
     "drum_200l":       ObjectSpec("drum_200l", _mask_cylinder_upright,
                                   (0.56, 0.60), (0.56, 0.60), (0.85, 0.92),
@@ -637,8 +703,16 @@ def _make_instance(spec: ObjectSpec, object_id: int, x: float, y: float,
                    size_dist: Mapping[str, Any] | None = None,
                    burial_dist: Mapping[str, Any] | None = None,
                    material_override: str | None = None,
-                   fill_override: float | None = None) -> PlacedObject:
-    """One instance from a spec: sizes, burial, fill, reflectivity."""
+                   fill_override: float | None = None,
+                   params: Mapping[str, Any] | None = None) -> PlacedObject:
+    """One instance from a spec: sizes, burial, fill, reflectivity.
+
+    ``params`` are the class's own knobs (``ObjectSpec.params_schema``).
+    A class that pins its dimensions (``length_m`` / ``width_m`` /
+    ``height_m``, as ``plastic_box`` does for a known field object)
+    overrides the drawn sizes *after* the draw, so the random stream is
+    untouched and no other object moves.
+    """
     if size_dist is not None:
         s = max(_draw_dist(size_dist, rng), 0.05)
         length = _mid(spec.length_range) * s
@@ -660,6 +734,22 @@ def _make_instance(spec: ObjectSpec, object_id: int, x: float, y: float,
         fill = _sample_range(rng, spec.fill_fraction_range)
     else:
         fill = 1.0
+    extra = {k: v for k, v in dict(params or {}).items()
+             if k != "fill_fraction"}
+    if extra.get("diameter_m") is not None and float(extra["diameter_m"]) > 0.0:
+        # A round footprint has one size, not two (mooring_pile).
+        length = width = float(extra["diameter_m"])
+    for key, val in (("length_m", "length"), ("width_m", "width"),
+                     ("height_m", "height")):
+        if extra.get(key) is not None and float(extra[key]) > 0.0:
+            if val == "length":
+                length = float(extra[key])
+                if spec.round_footprint:
+                    width = length
+            elif val == "width":
+                width = float(extra[key])
+            else:
+                height = float(extra[key])
     mat = materials.get(material_override or spec.material)
     refl = float(np.clip(
         mat.reflectivity * (1.0 + rng.uniform(-1, 1) * cfg.reflectivity_jitter),
@@ -668,7 +758,20 @@ def _make_instance(spec: ObjectSpec, object_id: int, x: float, y: float,
         object_id=object_id, type=spec.type, x=float(x), y=float(y),
         yaw=float(yaw), length=length, width=width, proud_height=height,
         burial=burial, reflectivity=refl, material=mat.name,
-        fill_fraction=fill)
+        fill_fraction=fill, params=extra,
+        transmission=_instance_transmission(mat.transmission, extra),
+        roughness_m=float(max(surface_roughness_m(mat), 0.0)))
+
+
+def _instance_transmission(material_t: float,
+                           params: Mapping[str, Any] | None) -> float:
+    """The material's two-way transmission, unless the instance's own
+    construction says otherwise: an air-filled shell (``flooded: false``,
+    the ``plastic_box`` knob) is a near-total reflector and lets nothing
+    through."""
+    if (params or {}).get("flooded") is False:
+        return 0.0
+    return float(np.clip(material_t, 0.0, 1.0))
 
 
 def _is_dry(grid: GridSpec, height: np.ndarray, x: float, y: float) -> bool:
@@ -774,7 +877,8 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
                 yaw, cfg, materials, rng,
                 size_dist=c.get("size"), burial_dist=c.get("burial"),
                 material_override=c.get("material"),
-                fill_override=float(fill_p) if fill_p is not None else None)
+                fill_override=float(fill_p) if fill_p is not None else None,
+                params=c.get("params"))
             if orient["rest"]["enabled"]:
                 # Own per-object stream: the shared placement stream is
                 # untouched, so the other classes stay where they are.
@@ -796,8 +900,19 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
                     "fill_fraction", "reflectivity"):
             if key in item:
                 setattr(inst, key, float(item[key]))
+        if isinstance(item.get("params"), Mapping):
+            # The class knobs describe the instance's construction (the
+            # plastic_box's wall and whether it is flooded), which the facet
+            # layer reads (NC #17): they travel with the pinned entry.
+            inst.params = {k: v for k, v in item["params"].items()
+                           if k != "fill_fraction"}
         if "material" in item:
             inst.material = str(item["material"])
+        # The shell follows the material (a pinned entry that names one gets
+        # that material's transmission, not the class default) and the
+        # instance's construction.
+        inst.transmission = _instance_transmission(
+            materials.get(inst.material).transmission, inst.params)
         if spec.round_footprint and "length" in item and "width" not in item:
             inst.width = inst.length
         # Verbatim 3-D rest: roll/pitch in degrees of the canonical frame.
@@ -880,7 +995,10 @@ def place_objects(grid: GridSpec, cfg: ObjectFieldConfig,
 
 
 def _rasterize_solid(o: PlacedObject, spec: ObjectSpec, grid: GridSpec,
-                     height: np.ndarray, reflectivity: np.ndarray) -> None:
+                     height: np.ndarray, reflectivity: np.ndarray,
+                     transmission: np.ndarray | None = None,
+                     roughness: np.ndarray | None = None,
+                     facet_bump: np.ndarray | None = None) -> None:
     """Stamp a rested (rotated) solid: z-buffer from above, settled on
     the local seabed plane (``worldgen/solids.py``). Lattice classes keep
     their skeleton: the solid's height is multiplied by the yaw-frame
@@ -922,26 +1040,188 @@ def _rasterize_solid(o: PlacedObject, spec: ObjectSpec, grid: GridSpec,
     if bump.max() <= 0.0:
         return
     height[j0:j1, i0:i1] += bump
-    w = np.clip(prof, 0.0, 1.0) * (1.0 - 0.8 * o.burial)
-    reflectivity[j0:j1, i0:i1] = (
-        (1.0 - w) * reflectivity[j0:j1, i0:i1] + w * o.reflectivity)
+    _stamp_surface(o, (slice(j0, j1), slice(i0, i1)), bump, prof,
+                   reflectivity, transmission, roughness, facet_bump)
     o.rest_z = float(centre_z)
     o.roll, o.pitch, _ = rpy_from_rotation(R_world)   # includes the bank tilt
 
 
+def _grow1(mask: np.ndarray) -> np.ndarray:
+    """``mask`` grown by one cell (8-connected), within its own window."""
+    g = mask.copy()
+    g[1:, :] |= mask[:-1, :]
+    g[:-1, :] |= mask[1:, :]
+    g2 = g.copy()
+    g2[:, 1:] |= g[:, :-1]
+    g2[:, :-1] |= g[:, 1:]
+    return g2
+
+
+def _stamp_surface(o: PlacedObject, win: tuple, bump: np.ndarray,
+                   prof: np.ndarray, reflectivity: np.ndarray,
+                   transmission: np.ndarray | None,
+                   roughness: np.ndarray | None,
+                   facet_bump: np.ndarray | None) -> None:
+    """Everything but the height: what the object's footprint carries.
+
+    A **facet object** (NC #17, :func:`is_facet_object`) scatters from its
+    exact geometry in the renderer's facet layer, so the raster keeps only
+    what occludes: its bump goes into ``facet_bump`` as well as the height,
+    the seabed beneath keeps its own reflectivity (it is what a shell lets
+    the beam see), and no roughness is stamped (there is no raster surface
+    of the object left to be smooth). A shell's transmission is stamped over
+    the footprint grown by one cell: the bilinear up-ramp in front of the
+    wall sets the horizon too, and left at 0 it made a dark seam there.
+    Every other object is stamped exactly as it always was.
+    """
+    facet = facet_bump is not None and is_facet_object(o)
+    if facet:
+        facet_bump[win] += bump
+    else:
+        w = np.clip(prof, 0.0, 1.0) * (1.0 - 0.8 * o.burial)
+        reflectivity[win] = (1.0 - w) * reflectivity[win] + w * o.reflectivity
+    if transmission is not None and o.transmission > 0.0:
+        t = o.transmission * (1.0 - o.burial)
+        foot = prof > 0.0
+        if facet:
+            foot = _grow1(foot)
+        np.maximum(transmission[win], np.where(foot, t, 0.0),
+                   out=transmission[win])
+    # A buried shell is covered by sediment, which is rough: only what is
+    # still proud keeps the smooth surface that makes the echo coherent.
+    _rq = object_roughness_m(o)
+    if (not facet and roughness is not None and o.burial < 1.0
+            and 0.0 < _rq < COHERENT_ROUGHNESS_LIMIT_M):
+        np.maximum(roughness[win], np.where(prof > 0.0, _rq, 0.0),
+                   out=roughness[win])
+
+
+def transmission_raster(objects: list[PlacedObject],
+                        grid: GridSpec) -> np.ndarray | None:
+    """A zero raster to stamp transmissions into, or ``None`` when nothing
+    in this scene transmits -- which keeps the array out of ``scene.npz``
+    and every existing world byte-identical."""
+    if not any(getattr(o, "transmission", 0.0) > 0.0 for o in objects):
+        return None
+    return np.zeros((grid.ny, grid.nx), dtype=np.float64)
+
+
+#: Default material library, for objects that carry a material name but no
+#: resolved surface roughness -- a hand-built ``PlacedObject``, or one loaded
+#: from a manifest written before ``roughness_m`` existed.
+_DEFAULT_MATERIALS = MaterialLibrary()
+
+
+def object_roughness_m(o: PlacedObject) -> float:
+    """This object's RMS surface height [m].
+
+    Its own resolved value when it has one, else its material's. Resolving
+    it here rather than only at placement means a manifest written before
+    ``roughness_m`` existed, and an instance built by hand in a test, both
+    behave like the material they name instead of silently falling back to
+    "rough".
+    """
+    r = float(getattr(o, "roughness_m", 0.0))
+    if r > 0.0:
+        return r
+    try:
+        return surface_roughness_m(_DEFAULT_MATERIALS.get(o.material))
+    except Exception:
+        return 0.0
+
+
+#: The solid primitives the facet layer tessellates (``solids.tessellate``).
+FACET_SOLID_KINDS = frozenset({"box", "cylinder", "capsule", "cone",
+                               "annulus"})
+
+
+def is_facet_object(o: PlacedObject) -> bool:
+    """True when the renderer's facet layer scatters this object (NC #17).
+
+    The rule, from material physics and never from the object's name: a
+    **smooth** material (RMS surface height under
+    ``COHERENT_ROUGHNESS_LIMIT_M`` -- a mirror at 450 kHz, where Lambert's
+    law does not hold) on a **solid primitive** the layer can tessellate,
+    proud of the seabed. Everything else -- rough materials (concrete,
+    brick, rope, tyre tread), aggregates of many small members (the lattice
+    classes, rope, chain, anchor, debris, coils) and fully buried objects --
+    stays on the raster's Lambert path, which is the right physics for a
+    wavelength-rough scatterer.
+    """
+    spec = CATALOG.get(o.type)
+    if spec is None or spec.fill_fraction_range is not None:
+        return False
+    if not o.rested and o.effective_height <= 0.005:
+        return False
+    rq = object_roughness_m(o)
+    if not 0.0 < rq < COHERENT_ROUGHNESS_LIMIT_M:
+        return False
+    sol = spec.solid(o)
+    return sol is not None and sol.kind in FACET_SOLID_KINDS
+
+
+def needs_facet_raster(objects: list[PlacedObject]) -> bool:
+    """True when some object is rendered by the facet layer, i.e. the scene
+    needs a ``facet_bump`` raster to know where its occluders stand."""
+    return any(is_facet_object(o) for o in objects)
+
+
+def facet_bump_raster(objects: list[PlacedObject],
+                      grid: GridSpec) -> np.ndarray | None:
+    """A zero raster to stamp facet objects' bumps into, or ``None`` when
+    the scene has none (the array then stays out of ``scene.npz``)."""
+    if not needs_facet_raster(objects):
+        return None
+    return np.zeros((grid.ny, grid.nx), dtype=np.float64)
+
+
+def needs_roughness_raster(objects: list[PlacedObject]) -> bool:
+    """True when some object is smooth at 450 kHz *and* stays on the raster
+    path, i.e. the scene needs a roughness raster for the renderer's
+    coherent split. Facet objects scatter from their own geometry."""
+    return any(0.0 < object_roughness_m(o) < COHERENT_ROUGHNESS_LIMIT_M
+               and not is_facet_object(o) for o in objects)
+
+
+def roughness_raster(objects: list[PlacedObject],
+                     grid: GridSpec) -> np.ndarray | None:
+    """A zero raster to stamp object surface roughnesses into, or ``None``
+    when every object in the scene is acoustically rough at 450 kHz.
+
+    0 means "nothing smooth here", so the renderer falls back to the scene's
+    rough default and the coherent split is exactly a no-op -- which keeps
+    the array out of ``scene.npz`` and every pre-2026-09-19 world
+    byte-identical."""
+    if not needs_roughness_raster(objects):
+        return None
+    return np.zeros((grid.ny, grid.nx), dtype=np.float64)
+
+
 def rasterize_objects(objects: list[PlacedObject], grid: GridSpec,
-                      height: np.ndarray, reflectivity: np.ndarray) -> None:
+                      height: np.ndarray, reflectivity: np.ndarray,
+                      transmission: np.ndarray | None = None,
+                      roughness: np.ndarray | None = None,
+                      facet_bump: np.ndarray | None = None) -> None:
     """Stamp each object into the acoustic rasters *in place*.
 
     ``height`` gains a bump of ``effective_height * profile`` and
     ``reflectivity`` is blended toward the object reflectivity inside the
     footprint. Buried objects contribute a residual low bump plus a weak
-    reflectivity contrast (sediment-covered target)."""
+    reflectivity contrast (sediment-covered target).
+
+    ``transmission``, when given, receives each object's own two-way
+    transmission over its footprint -- what the renderer lets through into
+    the shadow behind it. It is a separate raster because it is a property
+    of the *occluder*, read where the horizon cull finds the crest, not of
+    the ground it hides. Buried objects transmit nothing: what occludes is
+    then the sediment mound, not the shell.
+    """
     res = grid.resolution
     for o in objects:
         spec = CATALOG[o.type]
         if o.rested and spec.solid(o) is not None:
-            _rasterize_solid(o, spec, grid, height, reflectivity)
+            _rasterize_solid(o, spec, grid, height, reflectivity,
+                             transmission, roughness, facet_bump)
             continue
         pad = o.footprint_radius + 2 * res
         cx0, cy0 = grid.world_to_grid(o.x - pad, o.y - pad)
@@ -960,8 +1240,115 @@ def rasterize_objects(objects: list[PlacedObject], grid: GridSpec,
         if prof.max() <= 0:
             continue
         h_eff = o.effective_height
-        height[j0:j1, i0:i1] += h_eff * prof
-        # Reflectivity blend, weakened with burial.
-        w = np.clip(prof, 0.0, 1.0) * (1.0 - 0.8 * o.burial)
-        reflectivity[j0:j1, i0:i1] = (
-            (1.0 - w) * reflectivity[j0:j1, i0:i1] + w * o.reflectivity)
+        bump = h_eff * prof
+        height[j0:j1, i0:i1] += bump
+        # Reflectivity blend (weakened with burial), transmission, roughness
+        # -- or, for a facet object, only its occluder (``_stamp_surface``).
+        _stamp_surface(o, (slice(j0, j1), slice(i0, i1)), bump, prof,
+                       reflectivity, transmission, roughness, facet_bump)
+
+
+# --------------------------------------------------------------------------
+# Hand placement (the world builder's Screen 5)
+# --------------------------------------------------------------------------
+#: Every field ``_make_instance`` draws from the shared RNG stream. An
+#: explicit entry that pins all of them rebuilds its instance exactly,
+#: wherever it later sits in the list.
+PINNED_FIELDS = ("length", "width", "proud_height", "burial",
+                 "fill_fraction", "reflectivity")
+
+#: Class knobs that describe how an instance is BUILT and that the renderer
+#: reads (NC #17), so a pinned entry carries them. The size knobs
+#: (``length_m`` ...) are already pinned as the sizes they produced.
+_CONSTRUCTION_PARAMS = ("wall_mm", "flooded")
+
+
+def placed_to_explicit(o: PlacedObject) -> dict[str, Any]:
+    """A placed instance as an ``objects.explicit`` entry that rebuilds it.
+
+    Used to **pin** a random field: every value the engine would otherwise
+    re-draw is written out, so the entry no longer depends on its position
+    in the RNG stream and a world rebuilt from the pinned list is
+    object-for-object identical to the scattered one. ``object_id`` is
+    positional and ``rest_z`` is recomputed by the rasteriser from the
+    terrain, so neither is stored.
+
+    ``roll_deg`` / ``pitch_deg`` are written **only** for an object that
+    actually rested: writing them at all sends the instance down the 3-D
+    solid path (``place_objects_v2`` sets ``rest`` away from
+    ``canonical``), which would change the imagery of an object that was
+    stamped flat.
+    """
+    item: dict[str, Any] = {"type": str(o.type), "x": float(o.x),
+                            "y": float(o.y), "yaw": float(o.yaw)}
+    for key in PINNED_FIELDS:
+        item[key] = float(getattr(o, key))
+    item["material"] = str(o.material)
+    knobs = {k: v for k, v in dict(getattr(o, "params", None) or {}).items()
+             if k in _CONSTRUCTION_PARAMS}
+    if knobs:
+        item["params"] = knobs
+    if o.rested:
+        item["roll_deg"] = float(np.degrees(o.roll))
+        item["pitch_deg"] = float(np.degrees(o.pitch))
+        item["rest"] = str(o.rest)
+    return item
+
+
+def make_explicit_instances(type_name: str, x: float, y: float,
+                            rng: np.random.Generator, *,
+                            count: int = 1, sigma_m: float = 0.0,
+                            size: Mapping[str, Any] | None = None,
+                            burial: Mapping[str, Any] | None = None,
+                            orientation: Mapping[str, Any] | None = None,
+                            material: str | None = None,
+                            params: Mapping[str, Any] | None = None,
+                            materials: MaterialLibrary | None = None,
+                            path_xy=None) -> list[dict[str, Any]]:
+    """``count`` hand-placed instances of ``type_name`` about ``(x, y)``.
+
+    The knobs are the scatter screen's, with one substitution: the click
+    *is* the cluster centre, so ``count`` instances are drawn from a
+    Gaussian of width ``sigma_m`` about it (``sigma_m = 0`` stacks them on
+    the point). ``size`` and ``burial`` are the same distribution specs,
+    ``orientation`` the same block (``random`` | ``fixed`` |
+    ``path_relative``, plus the 3-D ``rest`` sub-block), ``params`` carries
+    the class extras (``fill_fraction`` for the open-frame classes).
+
+    Every drawn value is pinned in the returned entries
+    (:func:`placed_to_explicit`), so what the operator previewed at the
+    click is exactly what the world will contain.
+    """
+    if type_name not in CATALOG:
+        raise KeyError(f"Unknown object class '{type_name}' "
+                       f"(available: {sorted(CATALOG)})")
+    spec = CATALOG[type_name]
+    materials = materials if materials is not None else MaterialLibrary()
+    cfg = ObjectFieldConfig()
+    orient = normalise_orientation(orientation)
+    pts = (np.asarray(path_xy, dtype=np.float64).reshape(-1, 2)
+           if path_xy is not None and len(path_xy) else None)
+    if orient["mode"] == "path_relative" and pts is None:
+        raise ValueError(f"class '{type_name}': orientation mode "
+                         "path_relative needs the survey path")
+    fill_p = (params or {}).get("fill_fraction")
+
+    out: list[dict[str, Any]] = []
+    for k in range(max(0, int(count))):
+        if k == 0 or sigma_m <= 0.0:
+            px, py = float(x), float(y)
+        else:
+            px, py = (float(x) + float(rng.normal(0.0, sigma_m)),
+                      float(y) + float(rng.normal(0.0, sigma_m)))
+        track = (nearest_segment_heading(pts, px, py)
+                 if orient["mode"] == "path_relative" else None)
+        yaw = _draw_yaw(orient, rng, track)
+        inst = _make_instance(
+            spec, k, px, py, yaw, cfg, materials, rng,
+            size_dist=size, burial_dist=burial, material_override=material,
+            fill_override=float(fill_p) if fill_p is not None else None,
+            params=params)
+        if orient["rest"]["enabled"]:
+            draw_rest(spec, inst, orient["rest"]["randomness"])
+        out.append(placed_to_explicit(inst))
+    return out

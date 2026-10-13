@@ -91,6 +91,18 @@ class Ping:
     # pulse and along track by footprint overlap). `power` stays the noiseless
     # mean; the noise stage multiplies by this instead of drawing Exp(1) per
     # bin. None -> the noise stage draws its own (legacy, uncorrelated).
+    unoccluded: np.ndarray | None = None
+    # The diffuse field with the horizon cull left out: what the seabed at
+    # each range would return if nothing hid it. The noise stage puts the
+    # reverberation floor of a shadow at a fixed number of dB below it -- a
+    # shadow is dark, not empty. None -> the legacy white receiver floor.
+    ambient: np.ndarray | None = None
+    # The same level on a *flat* bottom at this ping's own altitude, with the
+    # scene's median reflectivity: smooth, defined at every range past the
+    # bottom return, and -- unlike `unoccluded` -- never collapsing where the
+    # local incidence clipped to zero. The noise stage floors a shadow on the
+    # larger of the two, which is what keeps an object's back flank from
+    # going black. None -> `unoccluded` alone (the pre-2026-09-19 floor).
 
 
 @dataclass
@@ -260,6 +272,19 @@ class PlacedObject:
     pitch: float = 0.0
     rest: str = "canonical"
     rest_z: float = 0.0
+    # Two-way intensity fraction that passes *through* this object (its
+    # material's, resolved at placement): 0 = opaque, the behaviour of
+    # every object before 2026-09-18 and of every material but the thin
+    # flooded shell ``pp_shell``. Additive default: old manifests load
+    # unchanged and render identically.
+    transmission: float = 0.0
+    # RMS surface height of this object's own material [m], resolved at
+    # placement. Decides the coherent (mirror) fraction of its echo through
+    # the Rayleigh law: a smooth manufactured shell sends most of its
+    # near-normal return away from the transducer instead of back at it.
+    # 0 = "use the rough default", which is what every object did before
+    # 2026-09-19 and what every additive-default manifest still loads as.
+    roughness_m: float = 0.0
 
     @property
     def effective_height(self) -> float:

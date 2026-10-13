@@ -3,12 +3,14 @@
 ``QStackedWidget`` page switching (the GCS pattern -- no ``QWizard``
 anywhere in this project), with Back/Next owned by the shell and each
 page implementing ``enter(state)`` / ``commit(state)``. Create mode runs
-Screen 1..5; Edit mode loads a saved world's ``builder_state.yaml`` and
+Screen 1..6; Edit mode loads a saved world's ``builder_state.yaml`` and
 starts at Screen 2 with everything pre-filled. Saving always creates a
 new folder (silent ``_i`` dedupe) -- editing never mutates a world.
 """
 
 from __future__ import annotations
+
+import time
 
 from pathlib import Path
 
@@ -17,18 +19,21 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QListWidget,
                                QPushButton, QStackedWidget, QVBoxLayout,
                                QWidget)
 
+from .layout import DEFAULT_WINDOW, PageScroll, fit_to_screen
+
 from .pages.depth_page import DepthPage
 from .pages.layout_page import LayoutPage
 from .pages.objects_page import ObjectsPage
 from .pages.path_page import PathPage
+from .pages.place_page import PlacePage
 from .pages.preview_page import PreviewPage
-from .state import BuilderState
+from .state import BuilderState, autosave_path, clear_autosave, load_autosave
 
 
 class StartDialog(QDialog):
     """Create Gazebo World / Edit World."""
 
-    CREATE, EDIT = 1, 2
+    CREATE, EDIT, RESUME = 1, 2, 3
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -49,6 +54,25 @@ class StartDialog(QDialog):
         col.addLayout(row)
         b_create.clicked.connect(lambda: self._pick(self.CREATE))
         b_edit.clicked.connect(lambda: self._pick(self.EDIT))
+        # A session that never reached a save left an autosave behind
+        # (the wizard writes one on every page change). Offer it rather
+        # than making the operator redraw everything.
+        self._resume = load_autosave()
+        if self._resume is not None:
+            when = ""
+            try:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(
+                    autosave_path().stat().st_mtime))
+            except OSError:
+                pass
+            b_res = QPushButton("Resume unsaved session"
+                                + (f"  ({when})" if when else ""))
+            b_res.setToolTip(
+                "The World Builder did not finish saving last time. This "
+                "reopens the wizard exactly where it was left, from "
+                f"{autosave_path()}.")
+            col.addWidget(b_res)
+            b_res.clicked.connect(lambda: self._pick(self.RESUME))
 
     def _pick(self, choice: int) -> None:
         self.choice = choice
@@ -134,7 +158,11 @@ class WorldBuilderWindow(QMainWindow):
                  edit_mode: bool = False, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("BlueBoat World Builder")
-        self.resize(1100, 760)
+        # The window adapts to the screen: never wider or taller than the
+        # available area, and never held open by a page's layout minimum
+        # (every page rides in a scroll area below).
+        self.setMinimumSize(640, 420)
+        fit_to_screen(self, *DEFAULT_WINDOW)
         self.state = state or BuilderState()
         self.edit_mode = edit_mode
 
@@ -142,10 +170,10 @@ class WorldBuilderWindow(QMainWindow):
         self.pages: list = []
         if not edit_mode:
             self.pages.append(PathPage())          # Screen 1 (Create only)
-        self.pages += [LayoutPage(), DepthPage(), ObjectsPage(),
+        self.pages += [LayoutPage(), DepthPage(), ObjectsPage(), PlacePage(),
                        PreviewPage(on_saved=self._on_saved)]
         for p in self.pages:
-            self._stack.addWidget(p)
+            self._stack.addWidget(PageScroll(p))
 
         shell = QWidget()
         col = QVBoxLayout(shell)
@@ -169,6 +197,9 @@ class WorldBuilderWindow(QMainWindow):
         self._idx = idx
         self._stack.setCurrentIndex(idx)
         self.pages[idx].enter(self.state)
+        # Crash net: the wizard state only reaches disk when a build
+        # succeeds, and the process can die before that (OOM, 2026-09-18).
+        self.state.autosave()
         self._b_back.setEnabled(idx > 0)
         self._b_next.setVisible(idx < len(self.pages) - 1)
         self.statusBar().showMessage(
@@ -186,3 +217,6 @@ class WorldBuilderWindow(QMainWindow):
 
     def _on_saved(self, out: str) -> None:
         self.statusBar().showMessage(f"saved: {out}")
+        # The world now carries its own builder_state.yaml, so the crash
+        # net has nothing left to protect.
+        clear_autosave()

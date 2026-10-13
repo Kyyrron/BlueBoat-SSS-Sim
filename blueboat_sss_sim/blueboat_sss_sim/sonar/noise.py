@@ -43,7 +43,9 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
                      gain: float, cfg: SonarModelConfig,
                      rng: np.random.Generator,
                      specular: np.ndarray | None = None,
-                     texture: np.ndarray | None = None) -> np.ndarray:
+                     texture: np.ndarray | None = None,
+                     unoccluded: np.ndarray | None = None,
+                     ambient: np.ndarray | None = None) -> np.ndarray:
     """Return the noisy linear power vector (does not modify inputs).
 
     Speckle statistics, per component:
@@ -81,7 +83,34 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
             slooks = max(int(cfg.specular_looks), 1)
             spec *= rng.gamma(slooks, 1.0 / slooks, size=spec.shape)
         out += spec
+    # Reverberation floor: a shadow is dark, not empty. What the receiver
+    # hears where the main lobe is blocked is the same seabed at the same
+    # range through the beam's sidelobes, plus the water volume -- so the
+    # floor of a shadow follows the ping's own level rather than sitting at
+    # the white receiver floor 40+ dB below it. MEASURED on the corpus quay
+    # (analysis/wall_contrast): the deep shadow 6-12 m behind a quay face
+    # sits 17-25 dB under the seabed at the same slant range, and the
+    # 2026-09-18 review measured the simulator's at 30 dB too deep. Speckle
+    # is the seabed's own (Exp(1)), not the receiver's white noise.
+    # `reverberation_db: 0` restores the pre-2026-09-18 white floor.
     floor = cfg.noise_floor * rng.exponential(1.0, size=out.shape)
+    ref = None
+    if unoccluded is not None:
+        ref = np.asarray(unoccluded, dtype=np.float64)
+    if ambient is not None:
+        # The culled bin's own would-be response collapses to zero wherever
+        # cos_inc clipped at 0 -- a back-facing flank, a cell over land -- so
+        # the floor built from it collapses with it. That is the hard black
+        # band between a simulated object and its shadow, where the real
+        # image runs continuously. The ambient curve (the lit seabed at this
+        # range on a flat bottom at this ping's altitude) never collapses;
+        # taking the max of the two can only lighten a shadow.
+        amb = np.asarray(ambient, dtype=np.float64)
+        ref = amb if ref is None else np.maximum(ref, amb)
+    if ref is not None and cfg.reverberation_db > 0.0:
+        rev = 10.0 ** (-cfg.reverberation_db / 10.0) * ref
+        floor = np.maximum(floor,
+                           rev * rng.exponential(1.0, size=out.shape))
     out += floor
     if watercolumn_mask.any():
         out[watercolumn_mask] += cfg.watercolumn_noise * \

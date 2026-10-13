@@ -18,6 +18,6 @@ float32 pulse_duration_sec
 float32 analog_gain
 float32 max_pwr_db
 float32 min_pwr_db
-float32 transducer_heading_deg
-float32 vehicle_heading_deg
+float32 transducer_heading_deg # mounting angle relative to the bow: -90 port, +90 starboard (constant; the device convention, 100 % of the field corpus)
+float32 vehicle_heading_deg    # compass heading of the vehicle [deg, 0 = North, CW]
 uint16[] pwr_results           # linear echo power, num_results entries

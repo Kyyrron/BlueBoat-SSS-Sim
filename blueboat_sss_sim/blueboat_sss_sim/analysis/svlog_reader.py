@@ -34,9 +34,11 @@ never rewritten (CM-7).
 
 **Side identity comes from the packet, never from the ``src`` tag** (CM-5).
 ``channel_number`` sits at byte 34 of the framed packet; where a device wrote
-``255`` there, the sign of ``transducer_heading_deg`` relative to the vehicle
-heading is the fallback. In the field corpus the ``src`` tag is wrong on up to
-29.5 % of packets, so it is not consulted at all.
+``255`` there, the sign of ``transducer_heading_deg`` — wrapped to
+(-180, 180], the device reports the mounting angle -90 / +90 — is the
+fallback, the same rule the GCS and the processor apply. In the field corpus
+the ``src`` tag is wrong on up to 29.5 % of packets, so it is not consulted
+at all.
 """
 
 from __future__ import annotations
@@ -212,8 +214,13 @@ def _side_from_packet(decoded: dict) -> Side:
     """Side identity from the packet itself (CM-5).
 
     ``channel_number`` first; where the device wrote ``255``, fall back to the
-    transducer heading, which sits 90 deg counter-clockwise of the vehicle
-    heading to port and 90 deg clockwise to starboard.
+    sign of ``transducer_heading_deg`` wrapped to (-180, 180]: negative =
+    port, positive = starboard. The real device reports the mounting angle
+    (-90 / +90) and the encoder has done the same since 2026-09-15; the
+    wrap keeps older simulator logs, which carried an absolute bearing,
+    readable on the same rule (the GCS's ``core.svlog.resolve_side`` and the
+    processor's ``sss_helper.side_from_fields`` apply it verbatim). A
+    bearing of exactly 0 or a non-finite one carries no side and raises.
     """
     ch = int(decoded["channel_number"])
     if ch == Side.PORT.channel:
@@ -222,8 +229,14 @@ def _side_from_packet(decoded: dict) -> Side:
         return Side.STARBOARD
     if ch != _CHANNEL_UNKNOWN:
         raise ValueError(f"unknown channel_number {ch}")
-    rel = (float(decoded["transducer_heading_deg"])
-           - float(decoded["vehicle_heading_deg"]) + 180.0) % 360.0 - 180.0
+    h = float(decoded["transducer_heading_deg"])
+    if not np.isfinite(h) or h == 0.0:
+        raise ValueError("channel_number 255 and no transducer bearing sign")
+    rel = (h + 180.0) % 360.0 - 180.0
+    if rel == -180.0:
+        rel = 180.0
+    if rel == 0.0:
+        raise ValueError("channel_number 255 and no transducer bearing sign")
     return Side.PORT if rel < 0.0 else Side.STARBOARD
 
 

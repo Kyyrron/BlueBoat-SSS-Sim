@@ -34,12 +34,12 @@ relevant doc (the wall and sea numbers belong in `docs/sonar_model.md` §11 and
 
 | # | Command | Expected |
 |---|---|---|
-| A1 | `cd BlueBoat-SSS-Sim/blueboat_sss_sim && python3 -m test.smoke_test` | `ALL CHECKS PASSED` (~310 checks, ~100 s — the Stop hook's budget is 180 s; `[2f]` needs the corpus at `~/ros2_ws/data/SSS_data`; concurrent runs wait on a lock) |
+| A1 | `cd BlueBoat-SSS-Sim/blueboat_sss_sim && python3 -m test.smoke_test` | `ALL CHECKS PASSED` (434 checks as of 2026-10-09, ~165 s — the Stop hook's timeout is 330 s over the script's `SUITE_TIMEOUT_S` 300 s; `[2f]` needs the corpus at `~/ros2_ws/data/SSS_data`; concurrent runs wait on a lock) |
 | A2 | `QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke` | `GUI SMOKE PASSED` |
 | A3 | `cd BlueBoat-SSS/blueboat_sss && QT_QPA_PLATFORM=offscreen python3 -m pytest -q` | all pass (31 assembly tests need the sourced workspace; 9 throughput tests) |
 | A4 | `python3 -m blueboat_gcs.analysis.ping_bench --pings 4000 --turn` (same dir) | ingest ≤ 2 ms/ping, mosaic render ≤ 15 ms, waterfall ≤ 20 ms, cell ≈ 0.026 → 0.053 m after one budget coarsening, RSS flat |
 | A5 | `cd BlueBoat-MCS && ruff check . && QT_QPA_PLATFORM=offscreen python3 smoke_test.py` | `All checks passed!` + `SMOKE TEST PASSED` (`sea state ok` present) |
-| A6 | `colcon build --packages-select blueboat_sss_sim blueboat_sss` | no error; `ros2 run blueboat_sss_sim sea_state_node --ros-args -p current:=weak` starts and logs "waiting for Gazebo" |
+| A6 | `colcon build --packages-select blueboat_sss_sim blueboat_sss` | no error; `ros2 run blueboat_sss_sim sea_state_node --ros-args -p current:=weak` starts and logs its `sea state: …` summary line; the `/sim/sea_state` readback reports `waves.reason: "starting: waiting for Gazebo"` (a readback field, not a log line) |
 
 ## B. Ping pipeline (GCS + processor), 15 min live
 
@@ -60,11 +60,11 @@ Launch: `ros2 launch blueboat_sss_sim full_mission_launch.py world_dir:=$HOME/wo
 
 | # | Test | Expected observation |
 |---|---|---|
-| C1 | Null test: `sea_current:=none sea_waves:=calm` | `gz topic -e -t /world/generated_ocean/wrench` silent for 10 s; `/current` all zeros; odom z at the trim (−0.11 m) with no drift |
+| C1 | Null test: `sea_current:=none sea_waves:=calm` | no wave forcing: since 2026-10-09 `/world/generated_ocean/wrench` carries the catamaran hydrostatics every physics step (~0 at rest at the trim; silent only with `hull.hydrostatics: gazebo_box_when_calm`); `/current` all zeros; odom z at the catamaran trim with no drift |
 | C2 | Injection: `gz topic -l \| grep wrench` after launch | `/world/<w>/wrench`, `/wrench/persistent`, `/wrench/clear` listed (plugin native in new worlds, injected in old ones — the node logs which) |
 | C3 | Impulse test: `slight` for 120 s, boat station-keeping | `ros2 topic echo /blueboat/odom` z oscillates ±0.1–0.2 m; mean z equals the trim to < 1 mm; mean vz ≈ 0; `gz topic -f -t /world/<w>/wrench` ≈ 100 Hz |
 | C4 | Current direction: `strong from E`, controller off (`with_control:=false`) | boat drifts **west** at ~0.5 m/s |
-| C5 | Wake groups: `smooth` for 10 min | the SEA STATE box / `/sim/sea_state` shows "wake group … s left" about every 5 min, each 30 s; heave visibly grows and dies with a 5–6 s period; between groups the ~3 s chop only |
+| C5 | Wake groups: `smooth` for 10 min | the SEA STATE box / `/sim/sea_state` shows "wake group … s left" about every 10 min (`rate_per_hour` 6), each 25 s; heave visibly grows and dies with a 5–6 s period; between groups the ~3 s chop only |
 | C6 | Irregularity: watch odom z for 60 s under `slight` | no fixed-period metronome; periods vary 2.5–5 s; groupy amplitude |
 | C7 | Sonar coupling: GCS waterfall under `slight` | port/starboard banding (roll), altitude ripple (heave), along-track wobble of point targets (pitch) |
 | C8 | Gazebo / RViz indicators | arrow + text markers in the Gazebo GUI (`/marker_array`); `/sim/sea_state/markers` in RViz |
@@ -96,8 +96,8 @@ Launch: `ros2 launch blueboat_sss_sim full_mission_launch.py world_dir:=$HOME/wo
 | F1 | Launch → Gazebo simulation → (world dialog) → **Sea state** dialog | appears for both empty world and personalized world; presets show descriptions + references; Cancel aborts |
 | F2 | Choose "Custom" waves (Hs 0.3, Tp 4, 9 groups/h) | `~/.config/blueboat_mcs/sea_states/custom_waves.yaml` written; the launch line carries `sea_schedule:=…custom_waves.yaml` |
 | F3 | Timeline: add two rows, save as `build`; relaunch and pick it | `sea_schedule:=…/build.yaml`; SEA STATE box "Next change: in N s" counts down and the readback changes |
-| F4 | Left panel SEA STATE box | visible only during a sim run; Current / Waves / Surface / Next change / Status live within 1 s (latched topic) |
-| F5 | "Modify situation…" → strong from S, ramp 10 s → Apply | readback ramps over 10 s; Gazebo arrow turns |
+| F4 | Left panel SEA STATE box | visible only during a sim run; Current / Waves / Boat motion / Next change / Status live within 1 s (latched topic) |
+| F5 | "Change sea state…" → strong from S, ramp 10 s → Apply | readback ramps over 10 s; Gazebo arrow turns |
 | F6 | Stop Mission in the empty-world case | the `[sea]` companion terminates with the mission (no stray `sea_state_node` in `ps`) |
 
 ## G. Not verifiable on this machine / needs field data

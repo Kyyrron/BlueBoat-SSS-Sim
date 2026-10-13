@@ -9,10 +9,14 @@ Two YAML layers, both with realistic defaults so an empty file works:
 The World Builder GUI writes the world side for you (its wizard state is
 `builder_state.yaml`, translated through
 `worldgen/world_folder.state_to_world_config`); `generate_world` consumes
-a world YAML directly. Unknown keys raise immediately in the sonar
-`acquisition:`/`model:` sections, in `walls:`, in `depth:` and in each
-depth preset's `params:` (typo protection); other world sections ignore
-unknown keys.
+a world YAML directly. Unknown keys **raise by name** (typo protection)
+in the sonar `acquisition:`/`model:` sections, in `terrain:` (and its
+`slope`/`dunes`/`roughness`/`materials`), in `walls:` entries, in `depth:`
+(its preset `params:`, layers, masks, `svlog:` and paint strokes) and in
+an object's `orientation:` / `orientation.rest:`. They are **silently
+ignored** in `world:`, at the top level of `objects:` and inside a class
+entry, in `objects.explicit` entries, in `materials:` overrides and in
+extra `geo:` keys — a typo there falls back to the default.
 
 ## 1. World config
 
@@ -52,7 +56,8 @@ depth:
   # mode: svlog
   # file: survey.svlog            # a Cerulean recording (see "Recording mode")
   # svlog: {datum_offset_m: 0.0, trend_length_m: 15.0, texture_gain: 0.5,
-  #         smoothing: 1.0, cell_m: null, backscatter_layer: false}
+  #         smoothing: 1.0, cell_m: null, backscatter_layer: false,
+  #         relief: synthetic, relief_gain: 1.0, relief_max_m: 1.5}
 ```
 
 Depth values are metres positive down; **zero or negative is dry land**
@@ -71,8 +76,8 @@ author pins them).
 When `depth:` is present it produces the *base* seabed and the `terrain:`
 section contributes only texture (dunes, roughness, materials —
 `base_depth`/`slope` are ignored); when absent, legacy behaviour is
-bit-identical. Presets (all shapes grounded in the harbour/river/beach/
-canal literature survey; parameters and bounds in
+bit-identical. Presets (shapes and ranges grounded in `seabed_model.md`,
+the harbour/river/beach/canal literature; parameters and bounds in
 `worldgen/depth/presets.py`, which also feeds the GUI forms):
 
 | Preset | Shape |
@@ -91,6 +96,27 @@ canal literature survey; parameters and bounds in
 `beach_profile` also takes `berm_enabled` (+ `berm_distance_m`, `berm_height_m`,
 `berm_width_m`): a short shore-parallel ridge near the shallow edge, off by
 default so existing beach worlds are bit-identical.
+
+**Layered worlds (the World Builder's seabed editor).** The builder's
+Screen 3 authors the seabed as a layer stack over one of the three
+sources (`docs/seabed_model.md` §7: gradients, landforms, relief,
+adjustments, material layers, a reflectivity gain, brush layers, masks,
+blend modes, recipes). The stack lives only in `builder_state.yaml`
+(`depth.layers`); at build time it is **baked** (`worldgen/depth/bake.py`)
+into `depth_baked.tif` — a float32 north-up EPSG:4326 GeoTIFF whose pixel
+lattice is the world grid — and `material_map.npz`, so the world YAML of
+a layered world is an ordinary file-mode section::
+
+```yaml
+depth: {mode: file, file: /abs/path/depth_baked.tif, file_kind: geotiff, file_values: depth}
+terrain:
+  materials: {layout: uniform, uniform: sand, composition: {}, map: /abs/path/material_map.npz}
+```
+
+`load_geotiff` recognises a raster aligned with the grid and stamps it
+losslessly (no striding, no interpolation); any other GeoTIFF follows the
+historical path. `generate_world` on such a snapshot reproduces the
+builder's world bit-for-bit (smoke test [12]).
 
 File mode: CSV is `lat, lon, depth` with or without a header (columns
 found by name, any order); GeoTIFF is read through Pillow
@@ -126,9 +152,74 @@ soundings (no across-track information) falls back to the nearest-value
 fill. Walls partition the fit and the trend exactly as in file mode.
 The folder keeps `depth_source.svlog`, `depth_samples.npz` (the raw
 soundings and cells) and a `depth.svlog_quality` block in
-`metadata.yaml`; `backscatter_layer: true` also derives a relative
-mid-swath reflectivity hint (`reflectivity_hint`, uncalibrated) that the
-builder can turn into material patches on request. How to sail for it:
+`metadata.yaml`.
+
+**Relief between the lines** (`relief`, 2026-09-16). `synthetic` (the
+default, every older config bit-identically) is the seeded undulation
+above. `shading` reads the relief the recording itself carries: every
+profile bin past the bottom return is inverted through the calibrated
+sonar model (`analysis/backscatter.py`), averaged over ~2 m of track and
+0.25 m of range against the speckle, split into reflectivity (the linear
+mean over a 20 m window along range) and slope (what the ratio deviates
+from it by — Lambert inverted, `cos θᵢ = sin θ_g (I/ρ)^(1/p)`), integrated
+outward from the FBR depth with the ground range re-solved once, and
+detrended over `trend_length_m` along the ray so only the *relief* is
+kept (`analysis/shading.py`: Cuschieri & Hebert 1990, Coiras et al. 2007,
+Xie et al. 2022 — `seabed_model.md` §7.1). The measured relief replaces
+the synthetic undulation where the swath was lit and fades into it over
+2 m beyond. Its amplitude is uncertain by the sonar's Lambert exponent
+(a factor of about 1–2, and ×0.7 measured against the simulator's own
+ripples): `relief_gain` scales it, and `relief_gain: 0` **calibrates**
+it by regressing the shading relief on the relief the FBR of the *other*
+lines measured where they cross the swath (Ran et al. 2025, §2.2.3),
+reported as `gain` / `gain_pairs` / `gain_residual_m` in the quality
+block together with `coverage_fraction` (cells within `trend_length_m`
+of a sounding that carry a relief sample), `rms_m`, `overlap_rms_m` (two
+passes more than a minute apart disagreeing on a cell — the shading
+analogue of the crossover residual), `shadow_fraction` and
+`clamped_fraction` (`relief_max_m` clamps a bright object or a wall).
+`none` leaves the smooth fitted surface. The builder writes `shading`
+for a new world and keeps `synthetic` for a state that never chose.
+
+**Blending the assembled relief** (`relief_smooth_m`, default **0.75**,
+2026-09-18). Each pass leaves a hole at its own nadir — the water column
+carries no bin — and meets its neighbours at a seam, and neither is
+seabed. Rasterised raw, that prints the boat's track into the bathymetry,
+which is what the 2026-09-18 report *"feels like the path of the boat is
+printed and that's all"* was: the striping was the survey geometry, not
+the seabed. The assembled field is therefore smoothed by a
+**coverage-weighted** Gaussian (normalised convolution: the same weights
+that formed each cell mean also weight the blur), which bridges the holes
+and the seams without pulling the surrounding relief toward zero. A
+Gaussian of σ attenuates a wavelength L by `exp(−2(πσ/L)²)`, so 0.75 m
+keeps **90 %** of a 10 m ripple while removing the sub-metre track
+imprint; `0` restores the raw assembly. Smoke `[7]` gates it: the nadir
+holes go from 100 % to 0 % of the cells, the residual there drops 3×, the
+10 m bedform keeps 0.89 of its amplitude and the field ends up closer to
+the truth than the raw assembly.
+
+The inversion itself is **cached** per `(file, mtime, size, anchor,
+config)` (2026-09-18): the World Builder re-reads a selected recording on
+every parameter change and every preview, and a 180 MB survey takes
+minutes. It also runs in along-track chunks with a halo, so peak memory
+follows the chunk rather than the survey — a 129 MB recording inverts in
+1.6 GB instead of the ~10 GB that was killing the builder outright.
+
+**Reflectivity from the recording** (`backscatter_layer`, reworked
+2026-09-16). The key now stands for the builder's **`reflectivity_survey`
+layer** (Screen 3, one tick): the same per-bin inversion rasterised as
+Lambert's coefficient per ground cell — the recording's median rendered
+as the `reference` material (sand) and every cell brighter or darker
+than it as a continuous reflectivity gain, plus a coarse mud / gravel /
+rock classification by the literature contrasts (Jackson & Richardson
+2007 §12.1 carried to 450 kHz, cross-checked with Fonseca et al. 2025:
+mud −3.5 dB below, gravel +2.5 dB and rock +5.5 dB above the median,
+all editable on the layer). The folder keeps the audit record
+`reflectivity_survey.npz` and a `depth.svlog_quality.backscatter` block
+(pings, bins, cells, μ dB percentiles, the floor used, the angular
+residual slope). The layer is an ordinary row: mask it, reorder it, edit
+its thresholds, delete it or untick the box. The former disc-splat
+"hint" and its `reflectivity_hint.npz` are gone. How to sail for it:
 `svlog_depth_survey.md`.
 
 **Coverage** (both external sources): a recording or a depth file places
@@ -188,7 +279,7 @@ worlds built then are snapshots and keep their surface.)
 | Key | Default | Effect |
 |---|---|---|
 | `base_depth` | 4.0 | mean depth (m) — **ignored under a `depth:` section** |
-| `slope.direction_deg`, `slope.grade` | 15, 0.015 | planar tilt — likewise ignored under `depth:` |
+| `slope.direction_deg`, `slope.grade` | 0, 0 (`default_world.yaml` ships 15, 0.015) | planar tilt — likewise ignored under `depth:` |
 | `dunes.{enabled, wavelength, amplitude, direction_deg, irregularity}` | on, 6, 0.12, 30, 0.5 | sand-wave field |
 | `roughness.{amplitude, octaves, cells}` | 0.05, 5, 12 | fBm micro-relief |
 | `materials.layout` | `patches` | `uniform` (one material), fBm-rank `patches`, or `painted` (the `uniform` material as the base for `paint`) |
@@ -196,6 +287,7 @@ worlds built then are snapshots and keep their surface.)
 | `materials.patch_cells` | 6 | patch spatial scale |
 | `materials.uniform` | `sand` | the single material for `uniform`, the base for `painted` |
 | `materials.paint` | `[]` | material strokes stamped over the base layout in order (any layout); see "Painting" |
+| `materials.map` | `""` | a baked `material_map.npz` (`worldgen/material_map.py`: `material_id` int16 with −1 = base layout, `material_names`, optional `gain`, its grid) stamped over the layout after the paint; its `gain` multiplies the reflectivity before the clip. Written by the builder for layered worlds; absent = no-op |
 
 Unknown keys anywhere in `terrain:` (top level or inside `slope`, `dunes`,
 `roughness`, `materials`) raise by name, like `depth:` and `walls:`. The
@@ -214,7 +306,10 @@ engine. **`classes: {}` means no objects at all** (the builder with
 nothing ticked); only a config *without* the key falls to the legacy
 random composition (2026-09-05 — an empty selection used to scatter the
 legacy field). Random objects are never placed on dry cells (terrain
-height above −0.05 m); explicit instances are placed verbatim.
+height above −0.05 m); explicit instances are placed verbatim — exempt
+from the dry-cell rule, the `margin_m` keep-out, `min_separation_m`, the
+cluster machinery and the resting-pose draw, wherever the author pinned
+them.
 
 Legacy keys: `density_per_hectare` (60), `composition` (weights over the
 original 13 types — deliberately not extended, so old seeds reproduce),
@@ -248,6 +343,37 @@ objects:
 
 Distributions are `uniform` or `gauss` only, by design. Classes place in
 sorted name order — deterministic per seed.
+
+**`explicit` entries and the RNG stream.** An explicit entry accepts
+`type, x, y` (required) and `yaw` (**radians**, default 0), plus the
+verbatim overrides `length, width, proud_height, burial, fill_fraction,
+reflectivity, material`, the 3-D pose `roll_deg, pitch_deg, rest` and
+`params` (the class's construction knobs, e.g. `wall_mm`, `flooded`).
+*Only what the entry states is pinned*: every other field is drawn from
+the shared placement stream, so an entry giving just `type, x, y` changes
+size and burial whenever anything before it in the list changes. Pin all
+of `worldgen.objects.PINNED_FIELDS` (what
+`worldgen.objects.placed_to_explicit` writes) for an instance that must
+stay put — that is what the World Builder's hand-placement screen does.
+
+Two asymmetries worth knowing: `material` is assigned *after* the
+reflectivity was computed from the class's own material, so give
+`reflectivity` too when the material matters acoustically; and writing
+`roll_deg`/`pitch_deg` at all sends the instance down the 3-D solid path
+(`rest` stops being `canonical`), so omit both for an object that should
+keep the flat 2.5-D stamp.
+
+**Hand placement (World Builder Screen 5).** The builder writes
+`explicit` from map clicks, and can additionally **pin** Screen 4's
+random field so each scattered object becomes individually editable.
+That lives in `BuilderState.objects` only, never in a world YAML:
+`placed` (the pinned instances) and `placed_signature` (the
+`seed`/`classes` fingerprint that produced them). While `placed` is
+non-empty, `state_to_world_config` emits `classes: {}` and concatenates
+`placed + explicit` into this `explicit` list — leaving the classes in
+would place the whole field a second time. A pinned rebuild reproduces
+the scattered objects to float noise (~1e-14 m), and a pinned state
+rebuilds itself bit-identically.
 
 **Orientation** (`orientation:`, per class, all keys optional):
 `mode: random | fixed | path_relative`, `heading_deg` (default 0),
@@ -289,9 +415,10 @@ and ignore the block. Explicit instances take `roll_deg` / `pitch_deg`
 verbatim. The manifest carries `roll`, `pitch`, `rest` and `rest_z`
 (additive defaults), `metadata.yaml` `roll_deg` / `pitch_deg` / `rest`,
 and `world.sdf` places the same primitive at the settled pose.
-The catalog holds **27 classes** (the original 13 plus the target-family additions incl. the
+The catalog holds **29 classes** (the original 13 plus the target-family additions incl. the
 open-frame `bicycle`/`mesh_crate`/`shopping_trolley` with
-`fill_fraction`); see `worldgen/objects.py` and `CLAUDE.md` §6.
+`fill_fraction`, and the field-target `plastic_box`); see
+`worldgen/objects.py` (`CATALOG`).
 
 ### walls (optional)
 
@@ -337,11 +464,23 @@ never acoustic.
 ### materials (optional, or `config/materials.yaml`)
 
 Per material: `reflectivity`, `texture_amp`, `texture_cells`,
-`micro_roughness_m`, `lambert_exp`, `color`. Built-ins: seabed
+`micro_roughness_m`, `color`, `transmission`, `roughness_m`, and — since
+2026-09-28 — the **acoustic constants** `density_kgm3`, `sound_speed_mps`,
+`backing` (`solid` | `water` | `air`) and `wall_m`. Built-ins: seabed
 `sand/mud/gravel/rocks/seagrass`; object
 `rubber/pvc/plastic/metal/concrete/brickclay/rope/generic` plus the
-target-family additions `glass/wood/eps/tinplate` (`eps` ≈ 0.8 —
-air-backed foam reflects strongly).
+target-family additions `glass/wood/eps/tinplate` and the field box's
+`pp_shell`.
+
+How an object sounds follows from these, never from a per-object gain
+(NC #17, `sonar_model.md` §12): a material whose `roughness_m` is under
+1.6 mm is **smooth** — on a solid primitive it scatters in the facet
+layer, as coherent Kirchhoff patches scaled by the reflection coefficient
+its impedance gives (`solid`: half-space; `water`: a flooded wall of
+`wall_m`; `air`: `|R| = 1`) plus the incoherent residual; its
+`reflectivity` is then not read. Rough materials keep the raster's
+Lambert law with their `reflectivity`. A new material needs its physical
+constants, with a source.
 
 ### Shipped world variants
 
@@ -365,11 +504,22 @@ values to the node explicitly, each overridable per run exactly as on the
 real system (`ros2 launch … gain_index:=-1 range_length_mm:=30000`).
 `num_results` up to 1200 is fully supported end-to-end.
 
-The shipped defaults (15 m, gain 4) are the power-calibration anchor, not
-the real node's defaults (20 m, gain −1 = device auto) — deliberately not
-aligned; see `docs/topics.md §2`. `config/coverage_pass_sonar.yaml` is
-this file with `range_length_mm: 30000` and nothing else changed — the
-30 m coverage-pass setting `project_synthesis.md` §8.5 reserves.
+The shipped default profile is **20 m, gain −1 (device auto), 1200 bins,
+pulse 0.00125** — the device's best range resolution and, since 2026-09-28,
+exactly the real `sss_node.py`'s defaults; see `docs/topics.md §2`. A Gazebo run started from the Mission Control Station
+passes none, so it gets this profile. Four more profiles ship, each the
+default file with one idea changed:
+
+| Profile | What differs | For |
+|---|---|---|
+| `config/default_sonar.yaml` | — | 20 m / 1200 bins: the field comparison acquisition (the model constants are the calibration anchor's) |
+| `config/coverage_pass_sonar.yaml` | `range_length_mm: 30000` | the 30 m coverage pass `project_synthesis.md` §8.5 reserves |
+| `config/shallow_beach_sonar.yaml` | `multipath_enabled` + `surface_mirror_enabled` | the 2026-09-07 beach regime (≈1.2 m altitude), where the bottom–surface–bottom ghost and the surface mirror land *inside* a shadow rather than beyond the swath |
+| `config/fault_injection_sonar.yaml` | the four `fault_*` knobs + `dropped_ping_prob` | exercising the downstream paths a clean simulation never takes. **A test profile** — never a calibration or comparison run |
+
+`config/enclosed_basin_sonar.yaml` is the fifth, older one (a basin
+study: wall multipath, which `default_sonar.yaml` now enables too; the
+surface mirror is **off** in it).
 
 `model:` (no hardware equivalent):
 
@@ -377,13 +527,15 @@ this file with `range_length_mm: 30000` and nothing else changed — the
 |---|---|---|
 | Mounting | `sensor_depth_m`, `mount_x_m`, `mount_y_abs_m`, `beam_tilt_deg` (20), `vertical_aperture_deg` (50, spec), `horizontal_aperture_deg` (0.5, spec) | match the physical bracket; tilt+aperture set the usable swath |
 | Timing | `max_ping_rate_hz` (20, the device law measured on the corpus: 50 ms to 30 m, 2R/c + 3 ms beyond) | set 0 to disable the cap (experiment only) |
-| Acoustics | `lambert_exponent` (1.0), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (4.0), `tvg_compensation` (0.0), `beam_sidelobe_floor` (0.004), `specular_strength` (30), `specular_width_deg` (8.0), `specular_looks` (25), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | raise `tvg_compensation` → flatter image; the default 0.0 is measured (the profile stream is pre-TVG). Sidelobe/specular shape the first-bottom-return line (don't zero them if downstream bottom tracking must lock). Only the product `spreading_exponent · (1 − tvg_compensation)` is determined |
+| Acoustics | `lambert_exponent` (1.0), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (4.0), `tvg_compensation` (**0.30**), `specular_spreading_exponent` (**2.0**), `array_length_m` (**0.0**), `beam_sidelobe_floor` (0.004), `specular_strength` (**12**), `specular_width_deg` (8.0), `specular_looks` (25), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | the range law was re-fitted on **two altitudes at once** on 2026-09-18 (beach 1.40 m + harbour 7.33 m): `tvg_compensation` 0 → 0.30, and the coherent component got its own spreading (an image source spreads once, not twice) so the first-bottom return follows the device's altitude law. Only the product `spreading_exponent · (1 − tvg_compensation)` is determined; raising the TVG flattens the image. Sidelobe/specular shape the FBR line — don't zero them if downstream bottom tracking must lock. `array_length_m` floors the along-track footprint at the aperture; 0 because the corpus says the device focuses its near field |
 | Multipath | `multipath_enabled` (false), `multipath_gain` (0.12) | optional second-bottom-echo ghost, +altitude in slant range |
 | Wall multipath | `wall_multipath_enabled` (true), `wall_multipath_gain` (1.0), `wall_diffuse_fraction` (0.04), `wall_corner_gain` (1.0), `surface_mirror_enabled` (false), `surface_reflectivity` (0.9), `ghost_beam_lines` (1) | mirror-source ghosts off the world's `walls:` at `reflectivity²` × the Rayleigh roughness law (+ the lumped diffuse share) and the single-bounce band just beyond a quay — `sonar_model.md` §10–11, anchored on the corpus quay. ×1.25 per ping-side with one wall in range, ×1.50 with three, ×1.00 all culled |
-| Calibration | `calibration_db_offset` (97.2), `max_span_db` (90) | the only level constant — fit against the reported `max_pwr_db`, never a count histogram (NC #6). See `sonar_model.md` §6 |
-| Noise | `speckle` (true), `speckle_looks` (1), `coherent_scatterers` (true), `scatterer_cell_m` (0.01), `scatterer_seed` (0), `range_filter_bins` (3), `noise_floor` (8.3e-11, measured receiver floor), `watercolumn_noise` (1.15e-7, measured 1–3 m water column), `gain_drift_amp` (0 — augmentation-stage concern), `dropped_ping_prob` (0 — same) | zero everything for "clean physics" ablation images; `coherent_scatterers: false` restores the uncorrelated per-bin speckle |
+| Calibration | `calibration_db_offset` (**81.1**), `max_span_db` (90) | the only level constant — fit against the reported `max_pwr_db`, never a count histogram (NC #6). Re-fitted with the range law on 2026-09-18 (was 97.2, which was right at the harbour's altitude and 18 dB hot at the beach's). See `sonar_model.md` §6 |
+| Noise | `speckle` (true), `speckle_looks` (1), `coherent_scatterers` (true), `scatterer_cell_m` (0.01), `scatterer_seed` (0), `filter_duration_percent` (0.0015, the receive filter: range envelope = pulse/Ts + this·N + 1 bins; the deprecated `range_filter_bins` > 0 restores the old fixed floor), `noise_floor` (**3.39e-09**, measured receiver floor), `watercolumn_noise` (**4.68e-06**, measured 1–3 m water column), `reverberation_db` (**18.0**, a shadow's floor under the lit seabed), `gain_drift_amp` (0 — augmentation-stage concern), `dropped_ping_prob` (0 — same) | zero everything for "clean physics" ablation images; `coherent_scatterers: false` restores the uncorrelated per-bin speckle. The two floor constants encode *levels* (−3.6 and +27.8 dB reported) and moved with `calibration_db_offset` on 2026-09-18 without changing them. `reverberation_db: 0` restores the pre-2026-09-18 white floor, i.e. shadows 30 dB too deep |
+| Fault injection | `fault_gain_walk_pings` (0), `fault_counter_reset_pings` (0), `fault_counter_offset` (0), `fault_channel_255` (false) | **test knobs, not fidelity**: the downstream paths a clean simulation never takes (gain compensation, counter re-base, channel-255 side fallback, one-sided rows). `config/fault_injection_sonar.yaml` turns them on together |
 | Wall echo | `wall_echo_enabled` (true), `wall_echo_strength` (30), `wall_echo_obliquity_floor` (0.1), `wall_face_diffuse` (0.5), `wall_pontoon_specular` (0.15) | direct face return (specular lobe + Lambert over the wet face, range law floored at the altitude) + occlusion by the face band, per wall `kind` — `sonar_model.md` §11; strict no-op without walls |
-| Sampling | `sample_step_m` (0.05, coarse upper bound only) | the renderer refines the step to ~half the slant bin automatically |
+| Objects (NC #17) | `object_facets` (true), `facet_patch_m` (0.01), `sand_lambert_mu_db` (−12.0) | smooth solid objects scatter from their exact geometry (`sonar/facets.py`); `false` keeps their shadows and drops their returns (a diagnostic). The patch keeps the phase linear across it and the beam constant over it (valid from ~2 m). μ is sand's Lambert parameter at 450 kHz from the literature — the one constant tying an object's cross-section to the calibrated seabed; never fit it to an object |
+| Sampling | `sample_step_m` (0.05, coarse upper bound only) | the renderer refines the step to 0.30 × the slant bin automatically (0.45 × with `coherent_scatterers: false`; floor 4 mm) |
 
 ## 2b. Sea state (current + waves)
 
@@ -411,18 +563,24 @@ installed share directory and writes timelines under
 `~/worlds/<path_name>/<world_name>/` (immutable; every save takes a fresh
 `_i` suffix):
 
+- `scene.npz` + `scene_manifest.yaml` — the ground truth (rasters +
+  manifest, `SceneModel.save`); `world.sdf` + `seabed.stl` — the Gazebo
+  world written from the same scene (`write_world_sdf`).
 - `metadata.yaml` (`format: blueboat_world_meta/1`) — **the cross-module
   contract**: `world_name`, `created`, `source_path{name,file,
   design_offset}` (world = design − offset; the offset is the spawn
   origin), `geo_anchor{lat0,lon0,theta_deg}` (the spawn's GPS),
   `spawn{x: 0, y: 0, lat, lon}`, `limits{local{x_min…y_max},
   corners_gps[SW,SE,NE,NW]}`, `walls[{name, local[[x0,y0],[x1,y1]],
-  gps[[lat,lon]×2], top_z, reflectivity, thickness}]`,
-  `objects[{object_id, type, x, y, lat, lon, yaw, yaw_deg,
-  orientation{mode, heading_deg, jitter_deg}, length, width,
+  gps[[lat,lon]×2], top_z, reflectivity, thickness, kind, draft_m,
+  roughness_m, curve}]` (`curve` = the builder wall a curved wall's chord
+  came from), `objects[{object_id, type, x, y, lat, lon, yaw, yaw_deg,
+  roll_deg, pitch_deg, rest, orientation{mode, heading_deg, jitter_deg},
+  length, width,
   proud_height, burial, fill_fraction, material}]` (`orientation` is the
-  class's normalised rule; explicit instances report `fixed` at their
-  pinned heading),
+  class's normalised rule; explicit instances — hand-placed or pinned —
+  report `fixed` at their pinned heading, which is why a fully pinned
+  world reports `fixed` for every object),
   `depth{mode, preset|file, min_m, max_m, mean_m[, svlog{...},
   svlog_quality{pings, detected_fraction, altitude_fraction,
   altitude_p5/p50/p95_m, soundings, cells, cell_m, extent_m, crossover,
@@ -432,11 +590,16 @@ installed share directory and writes timelines under
   the shared equirectangular pair.
 - `builder_state.yaml` (`format: blueboat_world_builder_state/1`) — the
   complete wizard state incl. a cached copy of the path's points (Edit
-  survives the MCS file being renamed or deleted). GUI-internal:
+  survives the MCS file being renamed or deleted) and, since 2026-09-09,
+  `depth.layers` — the seabed editor's layer stack above the source
+  (`seabed_model.md` §7; absent or empty = the legacy state). GUI-internal:
   downstream modules read `metadata.yaml`, never this.
+- `depth_baked.tif`, `material_map.npz` (layered worlds only) — the
+  baked layer stack the world YAML references (`depth.file`,
+  `terrain.materials.map`); see "Layered worlds" above.
 - `depth.npz` — `height` (the terrain-only raster, before object stamps —
   the Screen-3 design surface), `origin_x`, `origin_y`, `resolution`.
-- `scene_manifest.yaml` — version 1, with the additive `geo:` block
+- `scene_manifest.yaml` (above) — version 1, with the additive `geo:` block
   (`anchor` + `convention: equirectangular_wgs84_r6378137`).
 - `preview_objects.png` — the Screen-5 objects map, rendered by
   `export_maps.render_objects_preview` (the GUI shows the same file).
@@ -446,8 +609,11 @@ installed share directory and writes timelines under
 - `depth_samples.npz` (`mode: svlog`) — the soundings (`east`, `north`,
   `depth`, `t_ms`, `quality`, `lat`, `lon`) and the fitted cells
   (`cell_east`, `cell_north`, `cell_depth`, `cell_count`).
-- `reflectivity_hint.npz` (`mode: svlog` with `backscatter_layer`) — the
-  0–1 mid-swath backscatter hint raster, uncalibrated.
+- `reflectivity_survey.npz` (`mode: svlog` with the `reflectivity_survey`
+  layer or the `backscatter_layer` flag) — the audit record of the
+  inverted backscatter: `mu_db` (Lambert's coefficient per 1 m cell in
+  the renderer's units), `count`, `spread_db`, the lattice origin and
+  cell, `reference`, `gain_index_ref`, `angle_norm`.
 - `source_path_world.yaml` — the source path in world coordinates
   (`blueboat_trajectory/1` points, first waypoint = (0, 0) = the spawn,
   no `geo_anchor`); a drop-in `trajectory_file` for the dev launch.

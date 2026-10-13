@@ -20,14 +20,32 @@ from ...core.geo import GeoAnchor
 from .ingest import DepthSamples
 
 SVLOG_KEYS = {"datum_offset_m", "trend_length_m", "texture_gain",
-              "smoothing", "cell_m", "backscatter_layer"}
+              "smoothing", "cell_m", "backscatter_layer", "relief",
+              "relief_gain", "relief_max_m",
+              "relief_smooth_m"}
+RELIEF_MODES = ("synthetic", "shading", "none")
 SVLOG_DEFAULTS: dict[str, Any] = {
     "datum_offset_m": 0.0,      # tide / draft: + when water stood higher
     "trend_length_m": 15.0,     # damped-trend saturation distance
     "texture_gain": 0.5,        # undulation RMS / measured residual RMS
     "smoothing": 1.0,           # spline penalty (0 = exact)
     "cell_m": None,             # decimation cell; None = auto (<= 2500)
-    "backscatter_layer": False, # also derive the reflectivity hint
+    # Relief between the lines: "synthetic" = the seeded undulation above
+    # (every older config, bit-identically), "shading" = the relief the
+    # recording's own shading measures across the swath
+    # (analysis/shading.py), fused over the spline, "none" = flat.
+    "relief": "synthetic",
+    "relief_gain": 1.0,         # shading amplitude; 0 = calibrate on the
+                                # tie lines' FBR soundings (Ran et al. 2025)
+    "relief_max_m": 1.5,        # clamp of the shading relief
+    "relief_smooth_m": 0.75,    # coverage-weighted blend of the
+                                # assembled relief: bridges each
+                                # pass's nadir hole and the seams
+                                # between passes (keeps 90 % of a
+                                # 10 m ripple)
+    "backscatter_layer": False, # the builder's reflectivity_survey layer
+                                # (kept for older states; the layer is
+                                # what applies the measurement)
 }
 
 
@@ -44,10 +62,22 @@ def normalize_svlog_options(d: Mapping[str, Any] | None) -> dict[str, Any]:
         out[k] = float(out[k])
     out["cell_m"] = None if out["cell_m"] in (None, 0, "") else float(out["cell_m"])
     out["backscatter_layer"] = bool(out["backscatter_layer"])
+    out["relief"] = str(out["relief"])
+    out["relief_gain"] = float(out["relief_gain"])
+    out["relief_max_m"] = float(out["relief_max_m"])
+    out["relief_smooth_m"] = float(out["relief_smooth_m"])
     if out["trend_length_m"] <= 0.0:
         raise ValueError("depth.svlog.trend_length_m must be > 0")
     if out["texture_gain"] < 0.0 or out["smoothing"] < 0.0:
         raise ValueError("depth.svlog.texture_gain / smoothing must be >= 0")
+    if out["relief"] not in RELIEF_MODES:
+        raise ValueError(f"depth.svlog.relief '{out['relief']}' not in "
+                         f"{RELIEF_MODES}")
+    if out["relief_smooth_m"] < 0.0:
+        raise ValueError("depth.svlog.relief_smooth_m must be >= 0")
+    if out["relief_gain"] < 0.0 or out["relief_max_m"] <= 0.0:
+        raise ValueError("depth.svlog.relief_gain must be >= 0 (0 = "
+                         "calibrate) and relief_max_m > 0")
     return out
 
 
@@ -72,36 +102,25 @@ def load_svlog(path: str | Path, anchor: GeoAnchor, opts: Mapping[str, Any]
             info)
 
 
-def backscatter_hint(path: str | Path, anchor: GeoAnchor, grid,
-                     cell_m: float = 2.0) -> dict[str, Any]:
-    """A 0-1 reflectivity-hint raster (``values``, origin, cell) on a
-    coarse lattice over ``grid`` from the recording's range-equalised
-    mid-swath backscatter; NaN where nothing was insonified."""
-    from scipy import ndimage
+def load_relief(path: str | Path, anchor: GeoAnchor, opts: Mapping[str, Any],
+                soundings: Mapping[str, Any] | None = None
+                ) -> tuple[Any, dict[str, Any]]:
+    """The shading relief of a recording (``analysis.shading``) with its
+    gain resolved -- calibrated on the tie soundings when
+    ``relief_gain`` is 0 -- and its quality block for the metadata."""
+    from ...analysis.shading import (calibrate_gain, relief_quality,
+                                     relief_samples)  # deferred: see module doc
+    o = normalize_svlog_options(opts)
+    smp = relief_samples(path, anchor, trend_length_m=o["trend_length_m"],
+                         relief_max_m=o["relief_max_m"],
+                         datum_offset_m=o["datum_offset_m"])
+    gain, cal = o["relief_gain"], {"gain_mode": "set"}
+    if gain <= 0.0:
+        gain, cal = calibrate_gain(smp, soundings,
+                                   trend_length_m=o["trend_length_m"])
+    smp.gain = float(gain)
+    q = relief_quality(smp, soundings, reach_m=o["trend_length_m"])
+    q["gain"] = float(gain)
+    q.update(cal)
+    return smp, q
 
-    from ...analysis.bathymetry import backscatter_samples
-    e, n, lvl = backscatter_samples(path, anchor)
-    xmin, ymin, xmax, ymax = grid.extent
-    nx = int(np.ceil((xmax - xmin) / cell_m)) + 1
-    ny = int(np.ceil((ymax - ymin) / cell_m)) + 1
-    acc = np.zeros((ny, nx))
-    cnt = np.zeros((ny, nx))
-    ci = np.round((e - xmin) / cell_m).astype(int)
-    cj = np.round((n - ymin) / cell_m).astype(int)
-    ok = (ci >= 0) & (ci < nx) & (cj >= 0) & (cj < ny) & np.isfinite(lvl)
-    np.add.at(acc, (cj[ok], ci[ok]), lvl[ok])
-    np.add.at(cnt, (cj[ok], ci[ok]), 1.0)
-    mean = np.where(cnt > 0, acc / np.maximum(cnt, 1), np.nan)
-    vals = mean[np.isfinite(mean)]
-    if len(vals) < 4:
-        return {"values": np.full((ny, nx), np.nan), "origin": (xmin, ymin),
-                "cell_m": cell_m, "n": int(ok.sum())}
-    lo, hi = np.percentile(vals, 5), np.percentile(vals, 95)
-    norm = np.clip((mean - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-    filled = np.where(np.isfinite(norm), norm, 0.0)
-    w = np.isfinite(norm).astype(float)
-    sm = ndimage.gaussian_filter(filled, 1.0) / np.maximum(
-        ndimage.gaussian_filter(w, 1.0), 1e-6)
-    out = np.where(ndimage.gaussian_filter(w, 1.0) > 0.05, sm, np.nan)
-    return {"values": out, "origin": (xmin, ymin), "cell_m": cell_m,
-            "n": int(ok.sum())}

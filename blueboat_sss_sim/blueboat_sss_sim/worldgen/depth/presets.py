@@ -3,7 +3,10 @@
 Each preset is a pure ``fn(grid, params, rng) -> height`` (z, negative
 down) building the *base* bathymetry; dunes/roughness texture from
 :mod:`..terrain` is layered on top by ``generate_scene``. Shapes follow
-the literature survey in the project plan:
+the literature in ``docs/seabed_model.md`` (Dean 1991 for the beach,
+Keller & Melhorn 1978 and Ahmed et al. 2024 for the river, the Fisheries
+Agency / OCDI / USACE standards for the dredged basins); the World
+Builder's layer editor (``.layers``) generalises them to drawn shapes:
 
 * harbour basin -- flat dredged floor at a maintained depth, silt
   shoaling toward the edges, tanh scarp at the dredge line, optional

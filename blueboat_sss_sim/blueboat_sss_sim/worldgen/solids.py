@@ -374,3 +374,213 @@ def settle(solid: Solid, R: np.ndarray, x: np.ndarray, y: np.ndarray,
     peak = float(bump.max())
     prof = bump / peak if peak > 0.0 else bump
     return bump, prof, centre_z, R_world
+
+
+# ------------------------------------------------------------ tessellation
+@dataclass(frozen=True)
+class Patches:
+    """Small planar patches covering a solid's surface.
+
+    The facet layer (``sonar/facets.py``, NC #17) integrates the Kirchhoff
+    (physical-optics) field over them, so every patch carries its own frame:
+    ``centre`` on the true surface, outward unit ``normal``, and two unit
+    tangents ``u``, ``v`` along which it spans ``a`` and ``b`` metres. A
+    patch is small against a Fresnel zone and the beam, so the phase across
+    it is linear and its integral is the closed form ``a b sinc sinc``.
+    """
+
+    centre: np.ndarray    # (n, 3)
+    normal: np.ndarray    # (n, 3)
+    u: np.ndarray         # (n, 3)
+    v: np.ndarray         # (n, 3)
+    a: np.ndarray         # (n,)
+    b: np.ndarray         # (n,)
+
+    @property
+    def area(self) -> np.ndarray:
+        return self.a * self.b
+
+    def __len__(self) -> int:
+        return int(self.a.size)
+
+    def transformed(self, R: np.ndarray, t: np.ndarray) -> "Patches":
+        """``R @ p + t`` for points, ``R @ n`` for directions."""
+        return Patches(self.centre @ R.T + t, self.normal @ R.T,
+                       self.u @ R.T, self.v @ R.T, self.a, self.b)
+
+    def select(self, keep: np.ndarray) -> "Patches":
+        return Patches(self.centre[keep], self.normal[keep], self.u[keep],
+                       self.v[keep], self.a[keep], self.b[keep])
+
+    @staticmethod
+    def concat(parts: list["Patches"]) -> "Patches":
+        parts = [p for p in parts if len(p)]
+        if not parts:
+            z3, z1 = np.zeros((0, 3)), np.zeros(0)
+            return Patches(z3, z3, z3, z3, z1, z1)
+        return Patches(*(np.concatenate([getattr(p, f) for p in parts])
+                         for f in ("centre", "normal", "u", "v", "a", "b")))
+
+
+def _rect(c0: np.ndarray, n: np.ndarray, eu: np.ndarray, ev: np.ndarray,
+          lu: float, lv: float, h: float) -> Patches:
+    """A flat rectangle centred at ``c0`` spanning ``lu`` x ``lv`` along the
+    unit axes ``eu``, ``ev``, cut into cells no larger than ``h``."""
+    nu, nv = max(int(np.ceil(lu / h)), 1), max(int(np.ceil(lv / h)), 1)
+    a, b = lu / nu, lv / nv
+    su = (np.arange(nu) + 0.5) * a - 0.5 * lu
+    sv = (np.arange(nv) + 0.5) * b - 0.5 * lv
+    SU, SV = (m.ravel() for m in np.meshgrid(su, sv))
+    c = c0 + SU[:, None] * eu + SV[:, None] * ev
+    k = SU.size
+    return Patches(c, np.tile(n, (k, 1)), np.tile(eu, (k, 1)),
+                   np.tile(ev, (k, 1)), np.full(k, a), np.full(k, b))
+
+
+def _axes(axis: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Unit vector of ``axis`` and two perpendicular ones (right-handed)."""
+    e = np.eye(3)
+    return e[axis], e[(axis + 1) % 3], e[(axis + 2) % 3]
+
+
+def _curved(h: float, radius: float, k: float | None) -> float:
+    """Patch size across a surface curved with ``radius``: small enough that
+    the sagitta ``b^2 / (8 radius)`` keeps the two-way phase error ``2 k``
+    times it under 0.05 rad, i.e. ``b <= sqrt(0.2 radius / k)``. A planar
+    patch wider than that misses the curvature phase around the specular
+    point: at 0.2 rad a 10 cm cylinder's broadside echo was 0.1 dB off but
+    a sphere's (curved both ways) 1.4 dB; at 0.05 rad both are within
+    0.15 dB of k a L^2 and pi a^2 (smoke [14])."""
+    if not k:
+        return h
+    return float(np.clip(np.sqrt(0.2 * max(radius, 1e-6) / k), 1e-3, h))
+
+
+def _lateral(radius: float, length: float, axis: int, h: float,
+             inward: bool = False, k: float | None = None) -> Patches:
+    """The side wall of a cylinder centred on the origin."""
+    ea, e1, e2 = _axes(axis)
+    nt = max(int(np.ceil(2.0 * np.pi * radius / _curved(h, radius, k))), 12)
+    nl = max(int(np.ceil(length / h)), 1)
+    th = (np.arange(nt) + 0.5) * 2.0 * np.pi / nt
+    sl = (np.arange(nl) + 0.5) * length / nl - 0.5 * length
+    TH, SL = (m.ravel() for m in np.meshgrid(th, sl))
+    radial = np.cos(TH)[:, None] * e1 + np.sin(TH)[:, None] * e2
+    tang = -np.sin(TH)[:, None] * e1 + np.cos(TH)[:, None] * e2
+    c = radius * radial + SL[:, None] * ea
+    k = TH.size
+    return Patches(c, -radial if inward else radial, np.tile(ea, (k, 1)),
+                   tang, np.full(k, length / nl),
+                   np.full(k, 2.0 * np.pi * radius / nt))
+
+
+def _disc(centre: np.ndarray, normal: np.ndarray, e1: np.ndarray,
+          e2: np.ndarray, r_out: float, h: float,
+          r_in: float = 0.0) -> Patches:
+    """A flat disc (or ring) cut into rings of polar cells."""
+    nr = max(int(np.ceil((r_out - r_in) / h)), 1)
+    dr = (r_out - r_in) / nr
+    parts = []
+    for i in range(nr):
+        rho = r_in + (i + 0.5) * dr
+        nphi = max(int(np.ceil(2.0 * np.pi * rho / h)), 6)
+        ph = (np.arange(nphi) + 0.5) * 2.0 * np.pi / nphi
+        radial = np.cos(ph)[:, None] * e1 + np.sin(ph)[:, None] * e2
+        tang = -np.sin(ph)[:, None] * e1 + np.cos(ph)[:, None] * e2
+        parts.append(Patches(centre + rho * radial,
+                             np.tile(normal, (nphi, 1)), radial, tang,
+                             np.full(nphi, dr),
+                             np.full(nphi, 2.0 * np.pi * rho / nphi)))
+    return Patches.concat(parts)
+
+
+def _hemisphere(centre: np.ndarray, pole: np.ndarray, e1: np.ndarray,
+                e2: np.ndarray, r: float, h: float,
+                k: float | None = None) -> Patches:
+    """The half sphere of radius ``r`` about ``centre`` on the ``pole`` side."""
+    h = _curved(h, r, k)
+    na = max(int(np.ceil(0.5 * np.pi * r / h)), 2)
+    da = 0.5 * np.pi / na
+    parts = []
+    for i in range(na):
+        al = (i + 0.5) * da                     # 0 at the pole
+        rr = r * np.sin(al)
+        nphi = max(int(np.ceil(2.0 * np.pi * rr / h)), 6)
+        ph = (np.arange(nphi) + 0.5) * 2.0 * np.pi / nphi
+        radial = np.cos(ph)[:, None] * e1 + np.sin(ph)[:, None] * e2
+        n = np.cos(al) * pole + np.sin(al) * radial
+        merid = -np.sin(al) * pole + np.cos(al) * radial
+        tang = -np.sin(ph)[:, None] * e1 + np.cos(ph)[:, None] * e2
+        parts.append(Patches(centre + r * n, n, merid, tang,
+                             np.full(nphi, r * da),
+                             np.full(nphi, 2.0 * np.pi * rr / nphi)))
+    return Patches.concat(parts)
+
+
+def tessellate(solid: Solid, h: float, k: float | None = None) -> Patches:
+    """Patches no larger than ``h`` covering the solid's whole surface, in
+    its object frame (the frame ``zbuffer`` rotates, bounding-box centre at
+    ``centre_offset``). Box, cylinder, capsule, cone and annulus -- every
+    primitive a catalog class uses; the unused ellipsoid raises. With the
+    acoustic wavenumber ``k``, curved directions are refined until a planar
+    patch holds the curvature phase (``_curved``)."""
+    kind = solid.kind
+    h = max(float(h), 1e-3)
+    e = np.eye(3)
+    if kind == "box":
+        hx, hy, hz = 0.5 * solid.a, 0.5 * solid.b, 0.5 * solid.c
+        faces = []
+        for i, half in enumerate((hx, hy, hz)):
+            j, m = (i + 1) % 3, (i + 2) % 3
+            sizes = (solid.a, solid.b, solid.c)
+            for sgn in (1.0, -1.0):
+                faces.append(_rect(sgn * half * e[i], sgn * e[i], e[j], e[m],
+                                   sizes[j], sizes[m], h))
+        return Patches.concat(faces)
+    if kind == "cylinder":
+        r, L = solid.a, solid.b
+        ea, e1, e2 = _axes(solid.axis)
+        return Patches.concat([
+            _lateral(r, L, solid.axis, h, k=k),
+            _disc(0.5 * L * ea, ea, e1, e2, r, h),
+            _disc(-0.5 * L * ea, -ea, e1, e2, r, h)])
+    if kind == "capsule":
+        r, L = solid.a, solid.b
+        ea, e1, e2 = _axes(solid.axis)
+        half = max(0.5 * L - r, 0.0)
+        parts = [_hemisphere(half * ea, ea, e1, e2, r, h, k),
+                 _hemisphere(-half * ea, -ea, e1, e2, r, h, k)]
+        if half > 0.0:
+            parts.insert(0, _lateral(r, 2.0 * half, solid.axis, h, k=k))
+        return Patches.concat(parts)
+    if kind == "cone":
+        r0, H = solid.a, solid.b
+        s = float(np.hypot(r0, H))
+        nt = max(int(np.ceil(s / h)), 1)
+        parts = []
+        for i in range(nt):
+            t = (i + 0.5) * s / nt                  # from the base rim
+            rk = r0 * (1.0 - t / s)
+            zk = H * t / s
+            # Around the axis the cone is curved with radius rk / cos(alpha)
+            # (alpha its half-angle), = rk * s / H.
+            hc = _curved(h, rk * s / max(H, 1e-9), k)
+            nphi = max(int(np.ceil(2.0 * np.pi * max(rk, 1e-6) / hc)), 6)
+            ph = (np.arange(nphi) + 0.5) * 2.0 * np.pi / nphi
+            cph, sph = np.cos(ph), np.sin(ph)
+            n = np.stack([H * cph, H * sph, np.full(nphi, r0)], 1) / s
+            u = np.stack([-r0 * cph, -r0 * sph, np.full(nphi, H)], 1) / s
+            tang = np.stack([-sph, cph, np.zeros(nphi)], 1)
+            c = np.stack([rk * cph, rk * sph, np.full(nphi, zk)], 1)
+            parts.append(Patches(c, n, u, tang, np.full(nphi, s / nt),
+                                 np.full(nphi, 2.0 * np.pi * rk / nphi)))
+        parts.append(_disc(np.zeros(3), -e[2], e[0], e[1], r0, h))
+        return Patches.concat(parts)
+    if kind == "annulus":
+        r_out, r_in, c = solid.a, solid.b, solid.c
+        return Patches.concat([
+            _lateral(r_out, c, 2, h, k=k),
+            _lateral(r_in, c, 2, h, inward=True, k=k),
+            _disc(0.5 * c * e[2], e[2], e[0], e[1], r_out, h, r_in),
+            _disc(-0.5 * c * e[2], -e[2], e[0], e[1], r_out, h, r_in)])
+    raise ValueError(f"no tessellation for solid kind {kind!r}")

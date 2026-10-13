@@ -448,59 +448,6 @@ def survey_track(path: str | Path, anchor: GeoAnchor, *,
 
 
 # ------------------------------------------------------------ backscatter
-def backscatter_samples(path: str | Path, anchor: GeoAnchor, *,
-                        band: tuple[float, float] = (0.35, 0.7)
-                        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Range-equalised mid-swath backscatter per ping-side, placed on the
-    ground at the band's midpoint along the transducer heading.
-
-    Returns ``(east, north, level_db)``, ``level_db`` being the residual
-    of the ping's mean dB over ``band`` (fractions of the range) about
-    the file's median dB-vs-bin curve for that acquisition -- i.e. what
-    is left once the device's own range law is removed. Uncalibrated and
-    relative; meant for a reflectivity *hint*, never a material label.
-    """
-    from ..core.geometry import compass_deg_to_enu_yaw
-    s = read_svlog(path, with_power=True)
-    track, _ = load_track(path)
-    alt_by_ping = {int(k): float(a) for k, a in zip(track.ping_number,
-                                                     track.altitude_m)
-                   if np.isfinite(a)}
-    _, idx, lat, lon = _place_profiles(s)
-    if len(idx) == 0:
-        return np.empty(0), np.empty(0), np.empty(0)
-    # Per-acquisition median curve.
-    groups: dict[tuple, list[np.ndarray]] = {}
-    curves: dict[int, np.ndarray] = {}
-    for i in idx:
-        p = s.profiles[i]
-        db = scale_to_db(p.pwr_results, p.min_pwr_db, p.max_pwr_db)
-        curves[i] = db
-        groups.setdefault((p.length_mm, p.num_results, p.side), []).append(db)
-    med = {k: np.median(np.stack(v), axis=0) for k, v in groups.items()}
-    east, north, level = [], [], []
-    e_all, n_all = anchor.to_en(lat, lon)
-    off = track.counter_offset
-    for j, i in enumerate(idx):
-        p = s.profiles[i]
-        key = int(p.ping_number) - (off if p.side is Side.STARBOARD else 0)
-        alt = alt_by_ping.get(key)
-        if alt is None:
-            continue
-        n = p.num_results
-        b0, b1 = int(band[0] * n), int(band[1] * n)
-        resid = curves[i][b0:b1] - med[(p.length_mm, p.num_results, p.side)][b0:b1]
-        r_mid = slant_m(0.5 * (b0 + b1), p.start_mm, p.length_mm, n)
-        if r_mid <= alt:
-            continue
-        ground = float(np.sqrt(r_mid * r_mid - alt * alt))
-        look = compass_deg_to_enu_yaw(p.transducer_heading_deg)
-        east.append(float(e_all[j]) + ground * np.cos(look))
-        north.append(float(n_all[j]) + ground * np.sin(look))
-        level.append(float(np.median(resid)))
-    return np.array(east), np.array(north), np.array(level)
-
-
 def _place_profiles(s: SvlogStreams):
     from .svlog_reader import gps_track
     return gps_track("", streams=s)

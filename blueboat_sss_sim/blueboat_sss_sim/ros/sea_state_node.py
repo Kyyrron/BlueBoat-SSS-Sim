@@ -9,9 +9,13 @@ its own -- the model is documented in ``docs/sea_state_model.md``:
   velocity) on ROS ``/current``, which the existing ros_gz bridge forwards
   to gz ``/ocean_current`` where the boat's ``Hydrodynamics`` plugin turns
   it into drag (relative-velocity damping);
-* the **wave excitation wrench** -- catamaran buoyancy under the wave
-  surface minus the Gazebo box's flat-plane buoyancy -- as one-shot
-  ``ros_gz_interfaces/EntityWrench`` messages on ``/world/<w>/wrench``,
+* the **hull wrench** -- the catamaran's buoyancy under the actual
+  surface (flat on calm water, the wave surface otherwise) minus the
+  Gazebo box's flat-plane buoyancy, plus the hull damping -- as one-shot
+  ``ros_gz_interfaces/EntityWrench`` messages on ``/world/<w>/wrench``.
+  Since 2026-10-09 it is published in **every** run, calm water included
+  (``hull.hydrostatics: catamaran``), so every scenario floats the same
+  hull and a change of sea never switches the hydrostatics; it is
   bridged to gz-sim's ``ApplyLinkWrench`` system. One-shot (never
   persistent): each message is applied for exactly one physics step, so
   the impulse is conserved under transport jitter and a dead node leaves
@@ -24,17 +28,28 @@ If the running world carries no ``ApplyLinkWrench`` system (BlueBoat-
 Control's stock ``ocean``, or a world folder built before 2026-09), the
 node injects it at runtime through gz-sim's
 ``/world/<w>/entity/system/add`` service -- no neighbour package and no
-saved world is modified. If that fails, waves are reported
-``unavailable`` and the current still applies.
+saved world is modified. The system is detected by its own
+``/world/<w>/wrench/persistent`` topic (:func:`wrench_system_loaded`),
+never by ``/wrench``, which the launch's bridge advertises itself. If
+injection fails, waves are reported ``unavailable`` and the current
+still applies.
 
 Topics
 ------
-Pub  /current                    geometry_msgs/Vector3     rate_hz
+Pub  /current                    geometry_msgs/Vector3     rate_hz -- the
+                                 water velocity AT THE BOAT (mean current +
+                                 its smooth variation in time and space +
+                                 wave orbital velocity)
 Pub  /world/<w>/wrench           ros_gz_interfaces/EntityWrench (one-shot)
 Pub  /world/<w>/wrench/clear     ros_gz_interfaces/Entity  startup/shutdown
 Pub  /sim/sea_state              std_msgs/String (JSON)    2 Hz, TRANSIENT_LOCAL
 Pub  /sim/sea_state/markers      visualization_msgs/MarkerArray (RViz)
-Sub  <odom_topic>                nav_msgs/Odometry (default /blueboat/odom)
+Sub  <pose_topic>                geometry_msgs/TransformStamped (default
+                                 /sim/sea_state/boat_pose: the 100 Hz Gazebo
+                                 model pose, stamped, bridged by
+                                 sea_state_launch.py): the pose the wrench uses
+Sub  <odom_topic>                nav_msgs/Odometry (default /blueboat/odom):
+                                 20 Hz fallback + the boat-motion readback
 Sub  /sim/sea_state/command      std_msgs/String (JSON): a state
                                  ``{"current": {"preset": "strong",
                                  "from": "E"}, "waves": {...},
@@ -62,11 +77,13 @@ depth_m          fallback mean water depth
 target_entity / target_entity_type   gz entity of the hull (model
                  "blueboat" -> its canonical link, base_link)
 presets_file     alternative presets YAML
-enable_waves, enable_gz_markers, marker_arrow_axis, ramp_s, odom_topic
+enable_waves, enable_gz_markers, marker_arrow_axis, ramp_s, odom_topic,
+pose_topic (100 Hz stamped pose; "" = odometry only)
 """
 
 from __future__ import annotations
 
+import collections
 import json
 import queue
 import re
@@ -79,8 +96,9 @@ from typing import Optional
 
 import numpy as np
 import rclpy
-from geometry_msgs.msg import Vector3
+from geometry_msgs.msg import TransformStamped, Vector3
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from ros_gz_interfaces.msg import Entity, EntityWrench
@@ -89,7 +107,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from ..core.geometry import quat_to_rpy
 from ..core.types import Pose3D
-from ..sea import (SeaModel, SeaSchedule, load_presets, predict_pose,
+from ..sea import (HighRatePose, SeaModel, SeaSchedule, load_presets,
+                   predict_pose,
                    resolve_state)
 from ..sea.hull import rotation_zyx
 from ..sea.markers import (gz_delete_all_request, gz_marker_request,
@@ -101,6 +120,8 @@ COMMAND_TOPIC = "/sim/sea_state/command"
 MARKER_TOPIC = "/sim/sea_state/markers"
 WRENCH_PLUGIN = ("gz-sim-apply-link-wrench-system",
                  "gz::sim::systems::ApplyLinkWrench")
+#: Odometry window behind the readback's boat-motion statistics [s].
+MOTION_WINDOW_S = 30.0
 
 
 # --------------------------------------------------------------- helpers
@@ -143,6 +164,18 @@ def discover_world_names(topics: list[str]) -> list[str]:
                    (re.match(r"^/world/([^/]+)/stats$", t) for t in topics) if m})
 
 
+def wrench_system_loaded(topics: list[str], world: str) -> bool:
+    """Whether the world runs gz-sim's ``ApplyLinkWrench`` system.
+
+    Judged by ``/world/<w>/wrench/persistent``, which only that system
+    creates. ``/world/<w>/wrench`` itself proves nothing: our own ROS->gz
+    bridge advertises it (sea_state_launch starts the bridge before this
+    node looks), so testing it skipped the injection into the stock
+    ``ocean`` world and every wrench went to a topic nothing applied --
+    the hull rode only the wave orbital drag (found live 2026-10-09)."""
+    return f"/world/{world}/wrench/persistent" in topics
+
+
 class SeaStateNode(Node):
     def __init__(self) -> None:
         super().__init__("sea_state")
@@ -166,6 +199,7 @@ class SeaStateNode(Node):
         dp("marker_arrow_axis", "z")
         dp("ramp_s", 20.0)
         dp("odom_topic", "/blueboat/odom")
+        dp("pose_topic", "/sim/sea_state/boat_pose")
         p = lambda k: self.get_parameter(k).value  # noqa: E731
 
         # ---- Model --------------------------------------------------------
@@ -206,7 +240,18 @@ class SeaStateNode(Node):
         # tick actually used -- see sea/motion.py for why prediction matters.
         self._twist_body = (np.zeros(3), np.zeros(3))
         self._pose_age_ms = 0.0
+        # What the sea does to the boat, for the readback: the last
+        # MOTION_WINDOW_S of odometry (t, z, roll, pitch).
+        self._motion = collections.deque()
         self.create_subscription(Odometry, str(p("odom_topic")), self._on_odom, 10)
+        # The 100 Hz Gazebo pose (2026-10-09): the catamaran's stiff
+        # restoring must not act on the 20 Hz odometry (it rang the roll
+        # mode at 3.2 Hz) -- sea/motion.py::HighRatePose.
+        self._hr = HighRatePose()
+        self._pose_source = "odom"
+        if str(p("pose_topic")):
+            self.create_subscription(TransformStamped, str(p("pose_topic")),
+                                     self._on_boat_pose, 50)
         self.create_subscription(String, COMMAND_TOPIC, self._on_command, 10)
 
         # ---- Gazebo-side state (set by the bootstrap thread) ---------------
@@ -251,6 +296,24 @@ class SeaStateNode(Node):
         # The message's own (sim-time) stamp is what the prediction
         # measures against; an unstamped message counts from arrival.
         self._pose_t = stamp if stamp > 0.0 else self._now()
+        self._motion.append((self._pose_t, pp.z, roll, pitch))
+        while self._motion and self._motion[0][0] < self._pose_t - MOTION_WINDOW_S:
+            self._motion.popleft()
+
+    def _boat_motion(self) -> dict:
+        """Roll / pitch / heave standard deviations of the boat over the
+        last MOTION_WINDOW_S of odometry (additive readback, 2026-10-08):
+        what the operator sees the waves actually doing to the hull."""
+        if len(self._motion) < 20:
+            return {"samples": len(self._motion), "window_s": 0.0}
+        a = np.array(self._motion)
+        return {"samples": int(a.shape[0]),
+                "window_s": round(float(a[-1, 0] - a[0, 0]), 1),
+                "heave_std_m": round(float(a[:, 1].std()), 4),
+                "roll_std_deg": round(float(np.degrees(a[:, 2].std())), 2),
+                "pitch_std_deg": round(float(np.degrees(a[:, 3].std())), 2),
+                "roll_max_deg": round(float(np.degrees(np.abs(a[:, 2]).max())), 2),
+                "pitch_max_deg": round(float(np.degrees(np.abs(a[:, 3]).max())), 2)}
 
     def _on_command(self, msg: String) -> None:
         try:
@@ -265,10 +328,38 @@ class SeaStateNode(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     # -------------------------------------------------------------- tick
+    def _on_boat_pose(self, msg: TransformStamped) -> None:
+        """The model pose of every physics step, with Gazebo's own sim-time
+        stamp (exact differencing); only the hull's (child frame = the
+        target entity), never a nested model's."""
+        child = msg.child_frame_id.split("/")[-1]
+        if child and child != self._entity_name:
+            return
+        tr, q = msg.transform.translation, msg.transform.rotation
+        roll, pitch, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)
+        st = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._hr.update(st if st > 0.0 else self._now(),
+                        Pose3D(tr.x, tr.y, tr.z, roll, pitch, yaw))
+
     def _tick(self) -> None:
+        if not rclpy.ok():
+            return                      # shutting down: publish nothing more
         t = self._now()
         dt = 0.0 if self._t_prev is None else t - self._t_prev
         self._t_prev = t
+        hr = self._hr.state()
+        if hr is not None and t - hr[3] < 0.1:
+            # 100 Hz pose, at most a step old, its own differenced rates.
+            pose, v_body, w_body, t_hr = hr
+            age = max(t - t_hr, 0.0)
+            self._pose_age_ms = 1000.0 * age
+            self._pose_source = "pose_100hz"
+            pose = predict_pose(pose, v_body, w_body, age)
+            v_world = rotation_zyx(pose.roll, pose.pitch, pose.yaw) @ v_body
+            sample = self._model.update(t, pose, (v_world, w_body))
+            self._after_update(sample, dt)
+            return
+        self._pose_source = "odom"
         pose = self._pose if (t - self._pose_t) < 1.0 else None
         twist = None
         if pose is not None:
@@ -282,12 +373,14 @@ class SeaStateNode(Node):
             v_world = rotation_zyx(pose.roll, pose.pitch, pose.yaw) @ v_body
             twist = (v_world, w_body)
         sample = self._model.update(t, pose, twist)
+        self._after_update(sample, dt)
 
+    def _after_update(self, sample, dt: float) -> None:
         v = Vector3()
         v.x, v.y, v.z = (float(x) for x in sample.water_velocity)
         self._current_pub.publish(v)
 
-        if (sample.waves_active and self._enable_waves
+        if (sample.wrench_active and self._enable_waves
                 and self._wrench_armed.is_set() and dt > 0.0
                 and (np.any(sample.force) or np.any(sample.torque))):
             k = float(np.clip(dt / self._max_step, 0.0, 5.0))
@@ -314,13 +407,15 @@ class SeaStateNode(Node):
 
     def _publish_status(self, force: bool = False) -> None:
         sample = getattr(self, "_last_sample", None)
-        if sample is None:
+        if sample is None or not rclpy.ok():
             return
         reason = ("waves disabled by parameter" if not self._enable_waves
                   else self._waves_reason)
         d = self._model.status_dict(sample, self._world, self._entity_name, reason)
         d["wrench_messages"] = self._wrench_count
         d["pose_age_ms"] = round(float(self._pose_age_ms), 1)   # additive
+        d["pose_source"] = self._pose_source                    # additive
+        d["boat"] = self._boat_motion()                         # additive
         d["waves"]["status"] = self._waves_status(sample)
         self._status_pub.publish(String(data=json.dumps(d)))
         # RViz markers ride at the boat.
@@ -386,9 +481,9 @@ class SeaStateNode(Node):
         w = self._world
         self._gz_markers_ok = self._probe_marker_service()
         # Wrench topics need the ApplyLinkWrench system on the world.
-        if f"/world/{w}/wrench" not in topics:
+        if not wrench_system_loaded(topics, w):
             log.info(f"world '{w}' has no ApplyLinkWrench system -- injecting it "
-                     "at runtime (/world/{w}/entity/system/add)")
+                     f"at runtime (/world/{w}/entity/system/add)")
             if not self._inject_wrench_plugin(w):
                 return
         if self.get_parameter("world_name").value == "":
@@ -417,7 +512,7 @@ class SeaStateNode(Node):
                              "--reptype", "gz.msgs.Boolean", "--timeout", "5000",
                              "--req", req], timeout=12.0)
         for _ in range(12):
-            if f"/world/{w}/wrench" in gz_topics():
+            if wrench_system_loaded(gz_topics(), w):
                 self.get_logger().info("ApplyLinkWrench injected")
                 return True
             time.sleep(0.25)
@@ -481,11 +576,25 @@ def main(args=None) -> None:
     node = SeaStateNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass   # Ctrl-C, or a launch teardown (rclpy's own SIGINT handler)
+    except Exception:
+        # A tick already past its rclpy.ok() test when the SIGINT handler
+        # invalidated the context fails its publish (RCLError) -- a
+        # teardown, not a fault. Anything raised while the context is still
+        # valid is real.
+        if rclpy.ok():
+            raise
     finally:
-        node.shutdown()
-        node.destroy_node()
+        try:
+            node.shutdown()
+            node.destroy_node()
+        except KeyboardInterrupt:
+            # A process-group SIGINT (MCS and the Gazebo gate stop launches
+            # with killpg) reaches this node twice -- directly and forwarded
+            # by ros2 launch -- and the second copy lands here. The wrench is
+            # one-shot, so nothing is left applied either way.
+            pass
         if rclpy.ok():
             rclpy.shutdown()
 

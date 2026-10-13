@@ -35,3 +35,31 @@ def raster_to_qimage(arr: np.ndarray, lo: float | None = None,
     u8 = np.ascontiguousarray(u8)
     h, w = u8.shape
     return QImage(u8.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+
+
+def sonar_shading(height: np.ndarray, cell_m: float,
+                  grazing_deg: float = 20.0,
+                  heading_deg: float = 90.0) -> np.ndarray:
+    """What the sonar makes of a relief field: cos(incidence) in [0, 1].
+
+    The same quantity the renderer shades with (``cos_inc`` from the local
+    slope against a ray at ``grazing_deg`` above horizontal, arriving from
+    the compass direction ``heading_deg``), reduced to a picture. A ripple
+    field is invisible in a plain depth stretch -- 6 cm of relief against
+    metres of bathymetry -- and unmistakable here, which is the whole
+    difference between authoring bedforms blind and seeing them.
+
+    Qt-free on purpose: the offline suite gates it, and the GUI only turns
+    the result into pixels.
+    """
+    h = np.asarray(height, dtype=np.float64)
+    gy, gx = np.gradient(h, max(float(cell_m), 1e-6))
+    th = np.radians(90.0 - float(heading_deg))          # compass -> ENU
+    g = np.radians(float(grazing_deg))
+    # Ray direction: horizontal component along the look bearing, dropping
+    # at the grazing angle. Surface normal from the two slopes.
+    lx, ly, lz = np.cos(th) * np.cos(g), np.sin(th) * np.cos(g), -np.sin(g)
+    nx, ny, nz = -gx, -gy, np.ones_like(h)
+    n = np.sqrt(nx * nx + ny * ny + nz * nz)
+    cos_inc = -(lx * nx + ly * ny + lz * nz) / np.maximum(n, 1e-12)
+    return np.clip(cos_inc, 0.0, 1.0)

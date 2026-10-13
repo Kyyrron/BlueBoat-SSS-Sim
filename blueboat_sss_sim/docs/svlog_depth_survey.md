@@ -15,16 +15,29 @@ to the seabed. For a transducer a few centimetres off the hull's
 centreline that is, to a few centimetres, the **depth under the boat**:
 one sounding per ping, placed at the boat's GPS fix, depth = FBR
 altitude + the transducer's submersion (`sensor_depth_m`, 0.15 m) + the
-datum offset you enter (tide / draft). Nothing across-track is measured:
-the side-scan imagery to either side tells the tool nothing about depth.
-Between the lines you sailed the surface is **inferred** — a smoothing
-thin-plate spline through the along-track cell medians — and beyond the
-outermost line the slope measured at the edge is **continued and damped**
-(it flattens out over the *trend length*, 15 m by default). A gentle
-undulation whose size is set by how rough the recording itself measured
-(the residual about the fit: 5–15 cm on the field corpus) is added
-between the lines, tapered to zero within 2 m of a sounding, so a flat
-beach stays flat and a rippled harbour floor ripples.
+datum offset you enter (tide / draft). Between the lines you sailed the
+surface is **inferred** — a smoothing thin-plate spline through the
+along-track cell medians — and beyond the outermost line the slope
+measured at the edge is **continued and damped** (it flattens out over
+the *trend length*, 15 m by default).
+
+Across the swath the imagery does carry depth information, in its
+shading (2026-09-16, *Relief between lines: shading*): on a Lambertian
+seabed brightness is slope, so the tool reads the across-track tilt out
+of every lit bin, integrates it outward from the depth under the boat
+and keeps the **relief** about the along-ray trend — sand waves, scour,
+a bank — which replaces the guessed undulation where the swath was lit
+(`seabed_model.md` §7.1). Its *amplitude* is only known to a factor of
+about 1–2 (the sonar's Lambert exponent is measured over sand only —
+`sonar_model.md` §6 — not over the bottom being surveyed), so
+leave the relief gain at 0 to have it **calibrated on the tie lines**:
+wherever another line's bottom return crosses a swath, the relief the
+FBR measured along that line is what the shading relief is fitted to.
+Where you chose `synthetic` instead, a gentle undulation whose size is
+set by how rough the recording itself measured (the residual about the
+fit: 5–15 cm on the field corpus) is added between the lines, tapered to
+zero within 2 m of a sounding, so a flat beach stays flat and a rippled
+harbour floor ripples.
 
 Consequences:
 
@@ -73,9 +86,14 @@ Rules of thumb:
   deepest expected depth): the bottom return must sit past the
   transmit ringing (the first ~1 m of slant range) and well inside the
   range. Keep `range_length_mm` constant for the whole survey.
-* **Gain**: auto-gain is fine for depth. Fix `gain_index` (4) only if
-  you also want the **backscatter reflectivity hint** layer — with
-  auto-gain the mid-swath level is not comparable between pings.
+* **Gain**: auto-gain is fine for depth, and for the reflectivity layer
+  too — every bin is brought back to the calibration gain through the
+  measured ladder. A fixed `gain_index` (4, the calibration rung) keeps
+  every bin off the ladder entirely; the calibration's old ±6 dB auto-gain
+  caveat was retired on 2026-09-18 (`sonar_model.md` A8).
+* **Tie lines** matter twice now: they give the crossover residual *and*
+  calibrate the shading relief's amplitude. Two or three, across the
+  primaries, at least a minute apart from them.
 * **GPS**: a 3-D fix before you start, fixes at ≥ 5 Hz (the corpus
   carries 25 Hz `GLOBAL_POSITION_INT`). Heading comes from the ping
   itself, not from the GPS.
@@ -101,6 +119,8 @@ Rules of thumb:
 | crossover residual | < 0.2 m | datum / tide, or a bad fix |
 | clock | live | file order is fine; it only says the recording came through the processor |
 | coverage | as much of the area as you can | the share of the world within 15 m (the trend length) of a sounding; below 35 % the readout warns, and the rest of the seabed is the edge slope continued, not a measurement |
+| relief from shading | most of the survey hull; passes disagree by < 0.3 m; gain calibrated on tie soundings | a low share means a dark swath (short range, a floor reached late); a large pass disagreement means the shading is not slope there (a moving object, a wake, a wall); "default" for the gain means no tie line crossed a swath — sail one |
+| reflectivity (Screen 3 layer) | thousands of cells, a 6–25 dB spread | a narrower spread is a uniform bottom; the classes are relative to the survey median (assumed sand) — change the reference material if the site is mud |
 
 Expected accuracy on the lines: ±0.1–0.2 m (FBR bin size 2.5 cm, fit
 residual 5–15 cm measured on the field corpus).
@@ -141,3 +161,27 @@ as a plausible seabed, not as a survey.
 
 The same rules apply to a CSV or GeoTIFF depth file; the message says
 "the file" instead of "the recording".
+
+**"the depth looks like the boat's track, printed"**
+
+It was, before 2026-09-18. Each pass leaves a hole at its own nadir (the
+water column carries no bin) and meets its neighbour at a seam, and
+rasterising the assembled relief raw turned both into ridges that follow
+the survey lines. The relief is now blended over its own coverage
+(`relief_smooth_m`, default 0.75 m — a coverage-weighted Gaussian, which
+bridges the holes without pulling the surrounding relief toward zero) and
+each ray's across-track bias is removed before assembly. What survives is
+the bedform band the method can resolve: 0.75 m keeps 90 % of a 10 m
+ripple. If a survey still prints its lines, the passes disagree — read
+`overlap_rms_m` in the quality line, and see "the two passes disagree"
+below.
+
+**"selecting the recording takes minutes, every time"**
+
+It did, and it also killed the builder outright on large files: a 180 MB
+survey inverted to several gigabytes of samples with no cache, so every
+parameter change re-did it. Since 2026-09-18 the inversion is cached per
+(file, modification time, size, anchor, settings) and runs in along-track
+chunks, so the first read of a 129 MB recording costs about 1.6 GB and
+every later one is free. A file you *edit* is re-read: the cache key
+carries its modification time.

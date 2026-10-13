@@ -26,6 +26,18 @@ def quat_to_rpy(qx: float, qy: float, qz: float, qw: float) -> tuple[float, floa
     return float(roll), float(pitch), float(yaw)
 
 
+def rotation_zyx(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Body -> world rotation matrix, ZYX (yaw, pitch, roll) convention --
+    the inverse of :func:`quat_to_rpy`."""
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return rz @ ry @ rx
+
+
 def enu_yaw_to_compass_deg(yaw_rad: float) -> float:
     """ENU yaw (0 = +x, CCW) -> compass heading degrees (0 = +y/North, CW)."""
     return float((90.0 - np.degrees(yaw_rad)) % 360.0)
