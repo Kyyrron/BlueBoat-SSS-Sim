@@ -1,0 +1,23 @@
+# AROB 2027 yaw-fragmentation study, condition C1 (BlueBoat-Experiments,
+# docs/EXPERIMENT_PROTOCOL.md §5): waves + current, no synthetic yaw moment.
+# A blueboat_sea_schedule/1 scenario, launched with `sea_schedule:=<this
+# file>` and the run's `sea_seed`. Frozen 2026-10-21: never edit -- a changed
+# condition is a new file (C2/C3 are written by `bbx` after the E3 fit).
+#
+# Waves: tuned once so that MPC's straight-leg roll std (field gains, route A,
+# two legs, seeds 201/202) is inside the protocol's 1.6-2.6 deg band. Hs 0.10:
+# 1.31 deg; 0.15: 1.85; 0.20: 2.14 (closest to the band centre, 2.1) -> 0.20 m,
+# Tp from the presets' own (Hs, Tp) table (`auto`), short-crested, no wakes.
+# Current: 0.1 m/s, the protocol default -- the E1 cross-flow estimate from the
+# field lawnmowers (0.029 m/s) lies outside the 0.05-0.2 m/s band that would
+# replace it. Variation `steady` (the controlled-comparison level). Waves and
+# current both come FROM north (0 deg): across the legs of orientation A,
+# along those of B. Tuning runs: ~/ros2_ws/sim_runs/arob2027_yaw/tune_c1/.
+format: blueboat_sea_schedule/1
+name: arob_c1
+seed: 0
+interpolation: hold
+keyframes:
+- t_s: 0.0
+  current: {speed_mps: 0.1, from_deg: 0.0, variation: steady}
+  waves: {hs_m: 0.2, tp_s: auto, from_deg: 0.0, crest: short, wakes: none}

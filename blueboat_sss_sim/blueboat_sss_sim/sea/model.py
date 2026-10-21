@@ -15,7 +15,10 @@ rebuilds rare (a rebuild is ~100 µs).
 Determinism: the wave phases derive from ``seed`` alone, and the current
 is a pure function of ``(seed, t, x, y)`` and the schedule
 (sea/current.py), so a re-run of the same mission with the same seed sees
-the same sea -- however the ROS timer happens to tick.
+the same sea -- however the ROS timer happens to tick. The optional
+synthetic yaw moment (sea/yaw_moment.py, 2026-10-21) is a pure function of
+``(seed, t)`` and the schedule in the same way, and is added to the
+wrench's vertical torque; a state without it adds nothing.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from .motion import DampingSpec, damping_wrench, hull_damping_from_config
 from .presets import (SeaPresets, SeaSchedule, SeaState, compass_name,
                       parse_command)
 from .wavefield import WaveField
+from .yaw_moment import YawMomentField
 
 
 @dataclass
@@ -54,6 +58,8 @@ class SeaSample:
     #: run since 2026-10-09) and/or wave forcing. ``waves_active`` alone
     #: says whether there is wave forcing.
     wrench_active: bool = False
+    #: The synthetic yaw moment in the torque's z [N·m] (0 when off).
+    yaw_moment_nm: float = 0.0
 
 
 HYDROSTATICS = ("catamaran", "gazebo_box_when_calm")
@@ -102,6 +108,8 @@ class SeaModel:
         #: The run's current: mean + variation in time and space, a pure
         #: function of (seed, t, x, y) and the state it is given.
         self.current = CurrentField(self.seed)
+        #: The run's synthetic yaw moment (off unless a state carries one).
+        self.yaw = YawMomentField(self.seed)
         self._schedule = schedule
         self._schedule_t0 = 0.0
         self._t_last: float | None = None
@@ -223,11 +231,18 @@ class SeaModel:
         ev = self._events
         active = ((fa.active or fb.active or ev.active) and self.waves_available)
         hull_always = self.hydrostatics == "catamaran" and self.waves_available
+        mz = self._yaw_moment(t_sim, state, w)
+        yaw_on = mz != 0.0 and self.waves_available
         zeros = np.zeros(3)
-        if boat is None or not (active or hull_always):
+        if boat is None or not (active or hull_always or yaw_on):
             return SeaSample(t_sim, cur.copy(), zeros, zeros.copy(), 0.0, state,
                              cur, False, w, self._next_change(ts),
                              ev.current_event(t_sim), parts, False)
+        if not (active or hull_always):
+            # gazebo_box_when_calm on calm water: the yaw moment alone.
+            return SeaSample(t_sim, cur.copy(), zeros, np.array([0.0, 0.0, mz]),
+                             0.0, state, cur, False, w, self._next_change(ts),
+                             ev.current_event(t_sim), parts, True, mz)
         if not active:
             # Calm water, catamaran hydrostatics: the hull swap on the flat
             # plane (no wave field evaluated) plus the hull damping -- the
@@ -238,9 +253,12 @@ class SeaModel:
                                         boat.yaw)
                 force = force + fd
                 torque = torque + td
+            if yaw_on:
+                torque = torque + np.array([0.0, 0.0, mz])
             return SeaSample(t_sim, cur.copy(), force, torque, 0.0, state, cur,
                              False, w, self._next_change(ts),
-                             ev.current_event(t_sim), parts, True)
+                             ev.current_event(t_sim), parts, True,
+                             mz if yaw_on else 0.0)
 
         def surface(x, y):
             if w >= 1.0:
@@ -278,9 +296,23 @@ class SeaModel:
                                     self.damping, boat.yaw)
             force = force + fd
             torque = torque + td
+        if yaw_on:
+            torque = torque + np.array([0.0, 0.0, mz])
         return SeaSample(t_sim, cur + orb, force, torque, eta, state, cur,
                          True, w, self._next_change(ts), ev.current_event(t_sim),
-                         parts, True)
+                         parts, True, mz if yaw_on else 0.0)
+
+    def _yaw_moment(self, t_sim: float, state: SeaState, w: float) -> float:
+        """The synthetic yaw moment at ``t_sim`` [N·m]: the blended std, the
+        two endpoint time constants crossfaded by ``w`` (never restarted by
+        a ramp). Exactly 0.0, with nothing evaluated, when the std is 0."""
+        std = state.yaw_moment.std_nm
+        if std <= 0.0:
+            return 0.0
+        ya, yb = self._from["state"].yaw_moment, self._to["state"].yaw_moment
+        tau_a = ya.tau_s if ya.active else yb.tau_s
+        tau_b = yb.tau_s if yb.active else ya.tau_s
+        return self.yaw.moment(t_sim, std, tau_a, tau_b, w)
 
     def _next_change(self, ts: float):
         nxt = self._schedule.next_change(ts)
@@ -299,7 +331,10 @@ class SeaModel:
         wav = ("calm" if w.hs_m <= 0.0 else
                f"waves {w.preset} Hs {w.hs_m:.2f} m Tp {w.tp_s:.1f} s from "
                f"{compass_name(w.from_deg)} ({w.from_deg:.0f}°)")
-        return f"{cur}; {wav}"
+        y = state.yaw_moment
+        yaw = (f"; synthetic yaw moment {y.std_nm:.2f} N·m std, tau {y.tau_s:.1f} s"
+               if y.active else "")
+        return f"{cur}; {wav}{yaw}"
 
     def status_dict(self, sample: SeaSample, world: str = "", entity: str = "",
                     waves_reason: str = "") -> dict:
@@ -352,6 +387,10 @@ class SeaModel:
                 "crest": w.crest, "wakes": w.wakes,
                 "spread_s": round(float(w.spread_s), 2),
             },
+            # additive (2026-10-21): the synthetic yaw disturbance
+            "yaw_moment": {"std_nm": round(float(sample.state.yaw_moment.std_nm), 4),
+                           "tau_s": round(float(sample.state.yaw_moment.tau_s), 3),
+                           "nm": round(float(sample.yaw_moment_nm), 4)},
             # additive (2026-10-09): which hydrostatics carry the hull
             "hull": {"model": ("catamaran" if (self.hydrostatics == "catamaran"
                                                or sample.waves_active)

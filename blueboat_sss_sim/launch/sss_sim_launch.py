@@ -20,6 +20,9 @@ sim_origin_lat  geographic latitude of the ENU world origin (default "":
                 43.6961 fallback applies only to unanchored worlds)
 sim_origin_lon  geographic longitude, same resolution as the latitude
 auto_ping       enable pinging automatically at startup       (default true)
+with_sonar      start the sonar node at all (2026-10-21, additive): false
+                keeps the MAVROS shim only -- no renderer, no auto ping
+                                                              (default true)
 quiet           route helper one-shot output to log           (default true)
 
 Acquisition parameters
@@ -69,6 +72,7 @@ if sl is not None:
     sl.declare_arg("sim_origin_lat", default_value="")
     sl.declare_arg("sim_origin_lon", default_value="")
     sl.declare_arg("auto_ping", default_value=True)
+    sl.declare_arg("with_sonar", default_value=True)
     sl.declare_arg("quiet", default_value=True)
     for _a in ACQUISITION_ARGS:
         sl.declare_arg(_a, default_value="",
@@ -147,14 +151,16 @@ def launch_setup():
     sonar_yaml = resolve_sonar_config(world_dir, sl.arg("sonar_config"))
     acquisition = resolve_acquisition(
         sonar_yaml, {a: sl.arg(a) for a in ACQUISITION_ARGS})
-    sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
-            parameters={
-                "scene_dir": world_dir,
-                "sonar_config": sonar_yaml,
-                "odom_topic": "/blueboat/odom",
-                "publish_ground_truth": True,
-                **acquisition,
-            })
+    with_sonar = bool(sl.arg("with_sonar"))
+    if with_sonar:
+        sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
+                parameters={
+                    "scene_dir": world_dir,
+                    "sonar_config": sonar_yaml,
+                    "odom_topic": "/blueboat/odom",
+                    "publish_ground_truth": True,
+                    **acquisition,
+                })
 
     if sl.arg("with_mavros_shim"):
         # Origin priority: explicit launch args > the world's own anchor >
@@ -176,7 +182,7 @@ def launch_setup():
                 parameters={"sim_origin_lat": float(lat),
                             "sim_origin_lon": float(lon)})
 
-    if sl.arg("auto_ping"):
+    if with_sonar and sl.arg("auto_ping"):
         # One-shot ping enable a few seconds after the graph is up (same
         # command an operator issues on the real system). Its publisher
         # chatter ("beginning loop", "publishing #1: ...") goes to the log

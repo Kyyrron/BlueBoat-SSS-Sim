@@ -60,3 +60,20 @@ old files read unchanged. Rules that hold:
   water; reproduced by a roll-only discrete model, stable on the 100 Hz
   pose up to 4 steps of delay). Never feed the stiff hull spring from the
   odometry again; it is only the fallback.
+
+**2026-10-21 — synthetic yaw disturbance (`yaw_moment.py`, ordered by the
+user for the AROB 2027 study in BlueBoat-Experiments).** An optional
+`yaw_moment: {std_nm, tau_s}` block on a `SeaState` (keyframes and
+commands) adds a seeded first-order Gauss-Markov moment to the wrench's
+`torque.z` -- the current's `UnitGaussMarkov` with stream id 13 and knots
+at `tau/12`. It is a fitted surrogate, not physics
+(`docs/sea_state_model.md` §5.9). Rules that hold:
+
+* **Absent means off and bit-identical**: `std_nm = 0` evaluates nothing;
+  a state without the block serialises (`to_dict`) exactly as before.
+  `[10]` checks both; never let the term touch force or the x/y torque.
+* Ramps change its std, never its realisation; like the current, it is a
+  pure function of `(seed, t)`.
+* Campaign conditions using it are scenario files, never new keys in
+  `config/sea_states.yaml` (MCS parses that file with its own reader).
+

@@ -24,6 +24,10 @@ schedule and command reads exactly as before):
   from the preset's own, or from the nearest preset's by Hs);
 * keyframe ``ramp_s`` -> how long the change to that keyframe takes under
   ``interpolation: hold`` (the MCS timeline's "gradual over N s").
+
+Optional ``yaw_moment: {std_nm, tau_s}`` (2026-10-21, additive): the
+synthetic yaw disturbance of :mod:`.yaw_moment`, in a keyframe or a command.
+Absent means off, and a state without it serialises exactly as before.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import yaml
 import numpy as np
 
 from .events import EventSpec
+from .yaw_moment import YawMomentSpec
 
 PRESETS_FORMAT = "blueboat_sea_state_presets/1"
 SCHEDULE_FORMAT = "blueboat_sea_schedule/1"
@@ -173,14 +178,19 @@ def _events_from(raw: Any, where: str) -> EventSpec:
 class SeaState:
     current: CurrentSpec = field(default_factory=CurrentSpec)
     waves: WaveSpec = field(default_factory=WaveSpec)
+    #: Synthetic yaw disturbance (2026-10-21, additive); std 0 = off.
+    yaw_moment: YawMomentSpec = field(default_factory=YawMomentSpec)
 
     @property
     def is_null(self) -> bool:
         return (self.current.speed_mps <= 0.0 and self.current.sigma_speed_mps <= 0.0
-                and self.waves.hs_m <= 0.0)
+                and self.waves.hs_m <= 0.0 and not self.yaw_moment.active)
 
     def to_dict(self) -> dict:
-        return {"current": asdict(self.current), "waves": asdict(self.waves)}
+        d = {"current": asdict(self.current), "waves": asdict(self.waves)}
+        if self.yaw_moment.active:
+            d["yaw_moment"] = asdict(self.yaw_moment)
+        return d
 
     @property
     def current_active(self) -> bool:
@@ -218,7 +228,15 @@ class SeaState:
             wav["tp_s"] = b.waves.tp_s
         elif b.waves.hs_m <= 0.0 < a.waves.hs_m:
             wav["tp_s"] = a.waves.tp_s
-        return SeaState(CurrentSpec(**cur), WaveSpec(**wav))
+        # Yaw moment: the std blends; the time constant is the active side's
+        # (SeaModel crossfades the two processes by w itself, as for the
+        # current). An inactive side takes the other's tau, so a ramp from
+        # off to on is a pure std ramp.
+        ya, yb = a.yaw_moment, b.yaw_moment
+        tau = (yb.tau_s if (w >= 0.5 or not ya.active) and yb.active
+               else ya.tau_s if ya.active else yb.tau_s)
+        yaw = YawMomentSpec((1.0 - w) * ya.std_nm + w * yb.std_nm, tau)
+        return SeaState(CurrentSpec(**cur), WaveSpec(**wav), yaw)
 
 
 # --------------------------------------------------------------- presets
@@ -443,9 +461,28 @@ def _spec_from_entry(presets: SeaPresets, entry: Mapping[str, Any] | None,
     return apply_wave_options(presets, spec, explicit, tp_auto)
 
 
+def yaw_moment_from(raw: Any, where: str = "yaw_moment block") -> YawMomentSpec:
+    """A ``yaw_moment: {std_nm, tau_s}`` block; absent/None = off. Unknown
+    keys raise by name; std must be >= 0 and tau > 0."""
+    if raw is None:
+        return YawMomentSpec()
+    if isinstance(raw, YawMomentSpec):
+        return raw
+    raw = dict(raw)
+    known = {f.name for f in fields(YawMomentSpec)}
+    unknown = set(raw) - known
+    if unknown:
+        raise KeyError(f"unknown {where} keys {sorted(unknown)}; valid: {sorted(known)}")
+    spec = YawMomentSpec(**{k: float(v) for k, v in raw.items()})
+    if spec.std_nm < 0.0 or spec.tau_s <= 0.0:
+        raise ValueError(f"{where}: std_nm must be >= 0 and tau_s > 0, got {spec}")
+    return spec
+
+
 def state_from_dict(presets: SeaPresets, d: Mapping[str, Any]) -> SeaState:
     return SeaState(_spec_from_entry(presets, d.get("current"), "current"),
-                    _spec_from_entry(presets, d.get("waves"), "waves"))
+                    _spec_from_entry(presets, d.get("waves"), "waves"),
+                    yaw_moment_from(d.get("yaw_moment")))
 
 
 # -------------------------------------------------------------- schedule
@@ -529,7 +566,7 @@ class SeaSchedule:
             t = float(k.pop("t_s", k.pop("t", 0.0)))
             if "ramp_s" in k:
                 ramps[t] = max(float(k.pop("ramp_s")), 0.0)
-            extra = set(k) - {"current", "waves"}
+            extra = set(k) - {"current", "waves", "yaw_moment"}
             if extra:
                 raise KeyError(f"keyframe {i}: unknown keys {sorted(extra)}")
             kfs.append((t, state_from_dict(presets, k)))
@@ -565,7 +602,7 @@ def parse_command(presets: SeaPresets, payload: str | Mapping[str, Any]
         sched = SeaSchedule.from_dict(presets, d["schedule"])
         t0 = d.get("t0", "now")
         return "schedule", sched, 0.0 if t0 == "now" else float(t0)
-    extra = set(d) - {"current", "waves", "ramp_s"}
+    extra = set(d) - {"current", "waves", "ramp_s", "yaw_moment"}
     if extra:
         raise KeyError(f"unknown command keys {sorted(extra)}")
     return "state", state_from_dict(presets, d), float(d.get("ramp_s", -1.0))

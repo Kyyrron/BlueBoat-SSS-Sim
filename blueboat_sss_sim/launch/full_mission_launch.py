@@ -44,6 +44,18 @@ with_mavros_shim  forwarded to sss_sim_launch.py        (default true)
 headless          run the Gazebo server only (``gz sim -s``), no GUI --
                   scripted runs such as ``test/gazebo_sea_test.py``
                                                   (default false)
+gain_profile      forwarded to ``master_control`` only when set: ``field``
+                  flies the real-boat tuning branch in simulation, ``sim``
+                  the simulation branch (BlueBoat-Control's parameter,
+                  2026-10-21)                     (default '' = not passed)
+control_params_file
+                  a ROS 2 parameters YAML appended to ``master_control``'s
+                  parameters (e.g. ``mpc_Q_diag``) -- scripted campaigns
+                  such as BlueBoat-Experiments    (default '' = none)
+with_sonar        start the simulated sonar node (and its auto ping);
+                  forwarded to ``sss_sim_launch.py``. ``false`` keeps the
+                  MAVROS shim and drops the renderer's CPU cost
+                                                  (default true)
 
 sea_current / sea_current_from_deg / sea_waves / sea_waves_from_deg /
 sea_schedule / sea_seed
@@ -170,6 +182,11 @@ _declare("with_mavros_shim", default_value=True)
 _declare("sim_origin_lat", default_value="")
 _declare("sim_origin_lon", default_value="")
 _declare("headless", default_value=False)
+# Additive (2026-10-21): scripted-campaign pass-throughs; the defaults leave
+# every node's parameters exactly as before.
+_declare("gain_profile", default_value="")
+_declare("control_params_file", default_value="")
+_declare("with_sonar", default_value=True)
 
 # The six run-dependent acquisition parameters, forwarded to sss_sim_launch.
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
@@ -261,6 +278,21 @@ def trajectory_total_time(trajectory_file: str) -> float:
     return 600.0  # safe fallback (file not written yet: it is watched)
 
 
+def master_control_parameters(base: dict, gain_profile="", params_file=""):
+    """``master_control``'s parameters: ``base`` unchanged when neither
+    pass-through is set (the pre-2026-10-21 call, exactly); otherwise
+    ``gain_profile`` joins the dict and a parameters file follows it.
+    Module scope and launch-free so the smoke test can exercise it."""
+    gp = str(gain_profile or "").strip()
+    pf = str(params_file or "").strip()
+    if not gp and not pf:
+        return base
+    params = [dict(base, gain_profile=gp) if gp else dict(base)]
+    if pf:
+        params.append(pf)
+    return params
+
+
 def launch_setup():
     world_dir = sl.arg("world_dir")
     if not world_dir:
@@ -312,9 +344,11 @@ def launch_setup():
                 parameters={"total_time":
                             trajectory_total_time(trajectory_file)})
         sl.node("blueboat_control", "master_control.py", output="screen",
-                parameters={"controller_type": sl.arg("controller_type"),
-                            "simulation": True,
-                            "data_dir": sl.arg("data_dir")})
+                parameters=master_control_parameters(
+                    {"controller_type": sl.arg("controller_type"),
+                     "simulation": True,
+                     "data_dir": sl.arg("data_dir")},
+                    sl.arg("gain_profile"), sl.arg("control_params_file")))
 
     # 3. Simulated SSS + MAVROS shim, anchored at the world's GPS anchor.
     sl.include("blueboat_sss_sim", "sss_sim_launch.py",
@@ -323,6 +357,7 @@ def launch_setup():
                                  "with_mavros_shim": sl.arg("with_mavros_shim"),
                                  "sim_origin_lat": sl.arg("sim_origin_lat"),
                                  "sim_origin_lon": sl.arg("sim_origin_lon"),
+                                 "with_sonar": sl.arg("with_sonar"),
                                  **{a: sl.arg(a) for a in ACQUISITION_ARGS}})
 
     # 4. Sea state: current + waves on the hull (docs/sea_state_model.md).

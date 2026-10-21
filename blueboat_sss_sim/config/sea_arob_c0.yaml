@@ -1,0 +1,13 @@
+# AROB 2027 yaw-fragmentation study, condition C0 (BlueBoat-Experiments,
+# docs/EXPERIMENT_PROTOCOL.md §5): no waves, no current, no synthetic yaw
+# moment. A blueboat_sea_schedule/1 scenario, launched with
+# `sea_schedule:=<this file>` and the run's `sea_seed`. Frozen 2026-10-21:
+# never edit -- a changed condition is a new file.
+format: blueboat_sea_schedule/1
+name: arob_c0
+seed: 0
+interpolation: hold
+keyframes:
+- t_s: 0.0
+  current: {preset: none}
+  waves: {preset: calm}

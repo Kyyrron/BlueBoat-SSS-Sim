@@ -28,9 +28,10 @@ from .motion import (DampingSpec, HighRatePose, damping_wrench,
 from .presets import (CurrentSpec, SeaPresets, SeaSchedule, SeaState,
                       WaveSpec, douglas_from_hs, find_default_presets_yaml,
                       load_presets, parse_command, resolve_state,
-                      state_from_dict)
+                      state_from_dict, yaw_moment_from)
 from .spectrum import dispersion, jonswap, tp_from_hs_dnv
 from .wavefield import WaveField
+from .yaw_moment import YawMomentField, YawMomentSpec
 
 __all__ = [
     "Box", "CurrentField", "CurrentProcess", "CurrentSpec", "EddyField",
@@ -40,4 +41,5 @@ __all__ = [
     "predict_pose", "simulate_3dof",
     "dispersion", "find_default_presets_yaml", "jonswap", "load_presets",
     "parse_command", "resolve_state", "tp_from_hs_dnv",
+    "YawMomentField", "YawMomentSpec", "yaw_moment_from",
 ]

@@ -209,7 +209,11 @@ sonar/shim; `headless:=true` runs the Gazebo server only (`gz sim -s`, for
 scripted runs); `with_control:=true trajectory_file:=<yaml>` adds the unmodified
 control stack with **`blueboat_control`'s own `path_generation`** on
 `trajectory:=from_yaml:<file>` — dev convenience, operational missions are
-MCS's), `sss_sim_launch.py`, `sim_world_launch.py`, `sea_state_launch.py`
+MCS's; additive 2026-10-21 for scripted campaigns (BlueBoat-Experiments):
+`gain_profile` and `control_params_file` reach `master_control` only when set
+(`master_control_parameters`, smoke-checked to return the old dict
+otherwise) and `with_sonar:=false` (forwarded to `sss_sim_launch.py`) drops
+the sonar node and its auto ping, keeping the shim), `sss_sim_launch.py`, `sim_world_launch.py`, `sea_state_launch.py`
 (also **standalone next to BlueBoat-Control's `Sim_launch.py`**,
 `world_name:=ocean` — MCS starts it there for every empty-world run, a calm
 sea included, since 2026-10-09). In such a world the node injects
@@ -503,8 +507,9 @@ of `controller_type`.
 python3 -m test.smoke_test        # from the package source root
 ```
 
-The only automated gate of the Stop hook (no lint, no type-check). **439
-checks** (436 + one visible `SKIP`, covering the two bridge checks and the
+The only automated gate of the Stop hook (no lint, no type-check). **444
+checks** since 2026-10-21 (439 + four synthetic-yaw-moment checks in `[10]` + the
+`master_control_parameters` launch check; 444 / 444 on the system python that day) (441 + one visible `SKIP`, covering the two bridge checks and the
 `ApplyLinkWrench` detection, when the interpreter has no ROS; one
 more when the `BlueBoat-SSS` checkout beside it is missing), ~205 s (2026-10-20).
 Section `[10]` (sea state) is unit-level only — the current's statistics,
@@ -556,7 +561,10 @@ lost once (empty from 2026-10-12). They were rebuilt on 2026-10-20 by
 `~/ros2_ws/sim_runs/sea_validation/build_inputs.py` (deterministic, refuses
 to overwrite). On 2026-10-20 the gate ran 24/25 (5 m) and 23/24 (1.5 m). The
 only failure each time was an intermittent "fresh pose" stall in *waves*,
-which passed when re-run (`TODO.md`).
+which passed when re-run (`TODO.md`). On 2026-10-21, after the synthetic
+yaw moment and the launch pass-throughs were added (none configured), it ran
+24/24 + 1 INFO on 1.5 m, every scenario first time
+(`~/ros2_ws/sim_runs/sea_validation/2026-10-21_1p5m_yawmoment_setup`).
 
 ### Session hooks
 

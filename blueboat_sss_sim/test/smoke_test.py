@@ -5185,6 +5185,92 @@ def main() -> None:
           and sched_model.update(320.5, None).next_change[0] == 900.0,
           f"speed {st_late.current.speed_mps:.3f}")
 
+    # Synthetic yaw disturbance (2026-10-21, sea/yaw_moment.py): off unless a
+    # state carries one; then a seeded Gauss-Markov moment on the torque's z.
+    from blueboat_sss_sim.sea import YawMomentField, yaw_moment_from  # noqa: E402
+    _ym_base = {"current": {"speed_mps": 0.1, "from_deg": 0.0, "variation": "steady"},
+                "waves": {"preset": "smooth", "from_deg": 0.0, "crest": "short",
+                          "wakes": "none"}}
+    _ym_off = SeaModel(presets, SeaSchedule.constant(state_from_dict(presets, _ym_base)),
+                       depth_m=1.5, seed=5)
+    _ym_zero = SeaModel(presets, SeaSchedule.constant(state_from_dict(
+        presets, {**_ym_base, "yaw_moment": {"std_nm": 0.0, "tau_s": 2.0}})),
+        depth_m=1.5, seed=5)
+    _ym_on = SeaModel(presets, SeaSchedule.constant(state_from_dict(
+        presets, {**_ym_base, "yaw_moment": {"std_nm": 2.0, "tau_s": 2.0}})),
+        depth_m=1.5, seed=5)
+    _same, _diff_ok = True, True
+    for _k in range(300):
+        _t = 0.01 * _k
+        _bp = Pose3D(0.1 * _t, 0.0, z_eq, 0.01 * np.sin(_t), 0.0, 0.2)
+        _tw = (np.array([0.5, 0.0, 0.0]), np.array([0.0, 0.0, 0.05]))
+        _a0, _z0, _o0 = (m.update(_t, _bp, _tw) for m in (_ym_off, _ym_zero, _ym_on))
+        _same &= (np.array_equal(_a0.force, _z0.force) and np.array_equal(_a0.torque, _z0.torque)
+                  and _z0.yaw_moment_nm == 0.0)
+        _diff_ok &= (np.array_equal(_o0.force, _a0.force)
+                     and np.array_equal(_o0.torque[:2], _a0.torque[:2])
+                     and abs(_o0.torque[2] - _a0.torque[2] - _o0.yaw_moment_nm) < 1e-12)
+    check("synthetic yaw moment: absent and std 0 give the identical wrench; "
+          "on, it adds exactly its moment to torque z and nothing else",
+          _same and _diff_ok)
+    _yf = YawMomentField(4)
+    _tt = np.arange(0.0, 6000.0, 0.05)
+    _m1 = 1.5 * np.asarray(bounded_fn(_yf.unit(2.0)(_tt)))
+    _yf2 = YawMomentField(4)                    # evaluated backwards, by scalar
+    _m2 = np.array([_yf2.moment(t, 1.5, 2.0) for t in _tt[:3000][::-1]])[::-1]
+    _m2 = np.r_[_m2, _m1[3000:]]
+    _m3 = 1.5 * np.asarray(bounded_fn(YawMomentField(5).unit(2.0)(_tt[:2000])))
+    _lag = int(round(2.0 / 0.05))
+    _x = _m1 - _m1.mean()
+    _rho = float(np.dot(_x[:-_lag], _x[_lag:]) / np.dot(_x, _x))
+    check("yaw moment: a pure function of (seed, t) whatever the evaluation "
+          "order, std as configured (+-5 %), correlation e^-1 at lag tau "
+          "(+-0.08), bounded below 2.9 std; another seed differs",
+          np.array_equal(_m1, _m2) and not np.array_equal(_m1[:2000], _m3)
+          and abs(_m1.std() / 1.5 - 1.0) < 0.05 and abs(_rho - np.exp(-1.0)) < 0.08
+          and np.abs(_m1).max() < 2.9 * 1.5,
+          f"std {_m1.std():.3f} N·m (1.5), rho(tau) {_rho:.3f} "
+          f"(e^-1 = {np.exp(-1):.3f}), max {np.abs(_m1).max():.2f}")
+    _ym_r = SeaModel(presets, SeaSchedule.constant(state_from_dict(presets, _ym_base)),
+                     depth_m=1.5, seed=5)
+    _ym_r.update(99.99, Pose3D(0.0, 0.0, z_eq))
+    _ym_r.apply_command(json.dumps({**_ym_base, "yaw_moment": {"std_nm": 2.0, "tau_s": 2.0},
+                                    "ramp_s": 10.0}), 100.0)
+    _ramp = [_ym_r.update(100.0 + 0.01 * k, Pose3D(0.0, 0.0, z_eq)) for k in range(1500)]
+    _mz = np.array([s.yaw_moment_nm for s in _ramp])
+    _full = _ym_r.yaw.moment(114.99, 2.0, 2.0)
+    check("yaw moment ramps in with a command (std 0 -> 2 N·m over 10 s, "
+          "continuous) and runs the same realisation after the ramp",
+          abs(_mz[0]) < 0.05 and np.abs(np.diff(_mz)).max() < 0.5
+          and abs(_ramp[500].state.yaw_moment.std_nm - 1.0) < 0.01
+          and _mz[-1] == _full,
+          f"first {_mz[0]:.3f}, max step {np.abs(np.diff(_mz)).max():.3f} N·m, "
+          f"std at 5 s {_ramp[500].state.yaw_moment.std_nm:.2f}")
+    _ksched = SeaSchedule.from_dict(presets, {
+        "format": SCHEDULE_FORMAT, "seed": 3, "interpolation": "hold",
+        "keyframes": [{"t_s": 0.0, **_ym_base, "yaw_moment": {"std_nm": 1.0, "tau_s": 0.5}}]})
+    _bad = []
+    for _blk in ({"std_nm": 1.0, "tau": 2.0}, {"std_nm": -1.0}, {"std_nm": 1.0, "tau_s": 0.0}):
+        try:
+            yaw_moment_from(_blk)
+        except (KeyError, ValueError) as exc:
+            _bad.append(type(exc).__name__)
+    _plain = SeaSchedule.from_dict(presets, {"format": SCHEDULE_FORMAT, "keyframes": [
+        {"t_s": 0.0, **_ym_base}]}).to_dict()
+    _st_y = _ym_on.status_dict(_ym_on.update(3.5, Pose3D(0.0, 0.0, z_eq)))
+    check("yaw_moment blocks parse in keyframes and commands, unknown keys / "
+          "negative std / tau 0 raise, a state without one serialises as "
+          "before, the readback carries it (additive)",
+          _ksched.state_at(0.0).yaw_moment.tau_s == 0.5
+          and _ksched.to_dict()["keyframes"][0]["yaw_moment"] == {"std_nm": 1.0, "tau_s": 0.5}
+          and _bad == ["KeyError", "ValueError", "ValueError"]
+          and "yaw_moment" not in _plain["keyframes"][0]
+          and _st_y["yaw_moment"]["std_nm"] == 2.0
+          and _st_y["yaw_moment"]["nm"] == round(_ym_on.update(3.5, Pose3D(
+              0.0, 0.0, z_eq)).yaw_moment_nm, 4)
+          and "synthetic yaw moment" in _st_y["summary"],
+          f"errors {_bad}")
+
     # Markers: RViz dicts and the gz Marker_V request text.
     rv = rviz_markers(st, (1.0, 2.0))
     check("RViz markers: current + wave arrows at the boat plus a text label",
@@ -5209,6 +5295,15 @@ def main() -> None:
     check("headless launches run the Gazebo server only (-s), default keeps the GUI",
           gz_args_for(True) == "-r -s" and gz_args_for("true") == "-r -s"
           and gz_args_for(False) == "-r" and gz_args_for("false") == "-r")
+    from full_mission_launch import master_control_parameters  # noqa: E402
+    _mcb = {"controller_type": "MPC", "simulation": True, "data_dir": ""}
+    check("master_control's parameters are the old dict when gain_profile and "
+          "control_params_file are empty; set, they are added and nothing else",
+          master_control_parameters(_mcb) is _mcb
+          and master_control_parameters(_mcb, "", "") is _mcb
+          and master_control_parameters(_mcb, "field") == [dict(_mcb, gain_profile="field")]
+          and master_control_parameters(_mcb, "", "/x/p.yaml") == [_mcb, "/x/p.yaml"]
+          and _mcb == {"controller_type": "MPC", "simulation": True, "data_dir": ""})
     check("the sea-state launch arguments are the six the launches forward",
           set(SEA_ARGS) == {"sea_current", "sea_current_from_deg", "sea_waves",
                             "sea_waves_from_deg", "sea_schedule", "sea_seed"})

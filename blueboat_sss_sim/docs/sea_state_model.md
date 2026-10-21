@@ -453,6 +453,45 @@ with a C1 tanh knee of `width_g` weights (1.0). A hull that rides its
 wave never reaches the knee (a +0.1 m crest is 2.2 weights, checked
 exact in `[10]`); it only removes the slam.
 
+### 5.9 Synthetic yaw disturbance (wind and wave yaw moment surrogate) (2026-10-21)
+
+**What it is.** An optional yaw moment about the hull's vertical axis,
+added to the wrench's `torque.z`: `N(t) = std_nm · bounded(ξ(t))`, where
+ξ is a unit-variance first-order Gauss–Markov process with time constant
+`tau_s` (`sea/yaw_moment.py`). It is a **surrogate**, not a model of wind
+or of second-order wave yaw: the simulator has no wind field, and the
+wave excitation of §5.5 yaws the hull only through the first-order
+horizontal Froude–Krylov force. Its two numbers are meant to be **fitted**
+so that the simulated boat's yaw statistics match field statistics that
+the 3 Hz poslogs can observe (BlueBoat-Experiments, protocol §5–6: 3 Hz
+yaw-rate RMS and reversals per minute of MPC's straight lawnmower legs;
+roll std, speed and dominant yaw frequency checked, not fitted; content
+above 1.5 Hz, sway and the wind field unobservable). Anything said with
+it is conditional on that fit.
+
+**How it is computed.** The unit process is the current's
+(`UnitGaussMarkov`, §3): exact AR(1) knots on a fixed sim-time grid
+(Gillespie 1996), C1 Catmull-Rom joins, the `tanh` soft bound at
+≈ 2.84 σ rescaled to unit std, seeded from `(seed, 13, round(1000·tau))`.
+So `N` is a pure function of `(seed, t)` — never of the tick rate — and
+the same seed gives every run the same moment history. The knot spacing
+is `tau/12` clipped to 10–500 ms (finer than the current's, because time
+constants of a second or less are in scope); the spline's variance dip
+stays ≤ 2 %.
+
+**How it is set.** A `yaw_moment: {std_nm, tau_s}` block in a
+`blueboat_sea_schedule/1` keyframe or a `/sim/sea_state/command` payload
+(both additive; unknown keys raise, `std_nm < 0` or `tau_s <= 0` raise).
+**Absent means off**: `std_nm = 0` evaluates nothing, and the wrench is
+bit-identical to a model without the term (checked in `[10]`, and against
+the pre-change model on 3 208 ticks, both hydrostatics, four states). A
+command ramps the std like every other term (linear blend over `ramp_s`)
+and never restarts the realisation; a change of `tau_s` crossfades two
+independent unit processes, variance-preserving, as the current does.
+The readback `/sim/sea_state` carries `yaw_moment {std_nm, tau_s, nm}`
+(additive). The world-frame z torque equals the body yaw moment for the
+small roll and pitch of a surveying boat.
+
 ## 6. Delivery into Gazebo
 
 * **One-shot wrenches at the physics rate.** `sea_state_node` publishes
@@ -529,6 +568,10 @@ this), the motion-induced Doppler on the pulse, and wave-induced
 roughness of the sea surface in the optional surface mirror (S8).
 
 ## 8. Assumptions
+
+* **S0 — synthetic yaw moment (§5.9), when configured.** A fitted
+  surrogate for wind and wave yaw moments, not a physical model; off by
+  default.
 
 * **S1 — linear waves, single spectrum.** Airy components with random
   phases; no breaking, no swell partition, no wave–current interaction.
