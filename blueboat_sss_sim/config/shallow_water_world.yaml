@@ -17,7 +17,8 @@ world:
   seed: 42
   size: [80.0, 60.0]        # [m] x, y
   origin: [-40.0, -30.0]    # world coords of the min corner
-  resolution: 0.10          # raster cell [m] (0.10 ~ 2.5x finer than a range bin)
+  resolution: 0.10          # raster cell [m]: 6x the 16.7 mm range bin; the renderer
+                            # samples every 0.30 x bin and interpolates bilinearly
 
 terrain:
   base_depth: 2.5           # [m] mean water depth (thesis shallow regime, 1-3 m)

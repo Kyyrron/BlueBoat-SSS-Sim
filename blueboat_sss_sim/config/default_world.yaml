@@ -4,7 +4,8 @@ world:
   seed: 42
   size: [80.0, 60.0]        # [m] x, y
   origin: [-40.0, -30.0]    # world coords of the min corner
-  resolution: 0.10          # raster cell [m] (0.10 ~ 2.5x finer than a range bin)
+  resolution: 0.10          # raster cell [m]: 6x the 16.7 mm range bin; the renderer
+                            # samples every 0.30 x bin and interpolates bilinearly
 
 terrain:
   base_depth: 4.0           # [m] mean water depth (shallow coastal regime)
@@ -36,7 +37,8 @@ objects:
 #                          # Absent = open water, which is the default.
 #                          # Each wall is a finite vertical segment from the
 #                          # seabed up to top_z; it produces multipath ghosts
-#                          # in the sonar image and a visual box in Gazebo.
+#                          # in the sonar image and a solid (visual + collision) box
+#                          # in Gazebo.
 #                          # Needs model.wall_multipath_enabled in the sonar
 #                          # profile before any ghost is rendered.
 #   - {name: quay_north, x0: -30.0, y0: 22.0, x1: 30.0, y1: 22.0,

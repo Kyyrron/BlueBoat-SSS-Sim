@@ -8,7 +8,8 @@ Design choices:
   it can be enabled (``seabed_collision: true``) for future AUV work.
 * Objects are exported as simple SDF primitives (box / cylinder) with the
   material colour -- their *acoustic* appearance is owned entirely by the
-  sonar renderer, Gazebo only needs them visible and physically present.
+  sonar renderer, Gazebo only needs them visible (they carry no
+  collision body; the walls do).
 * The world-level plugin block is copied from the existing BlueBoat
   ``world.sdf`` so the vehicle spawns and behaves identically
   (physics, buoyancy, sensors, scene broadcaster). The plugin filename

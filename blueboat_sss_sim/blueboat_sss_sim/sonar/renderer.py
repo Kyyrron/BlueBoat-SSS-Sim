@@ -576,8 +576,8 @@ class GeometricRenderer(SonarRenderer):
         The lever arm ``[mount_x, ±mount_y, -sensor_depth]`` (body frame)
         is rotated by the full attitude R(roll, pitch, yaw) (2026-10-08;
         before, by yaw only). A rolling boat therefore lifts one transducer
-        and dips the other by ``mount_y·sin(roll)`` -- 35 mm at 10° on the
-        ±0.20 m mount, opposite on the two sides -- and pitch swings the
+        and dips the other by ``mount_y·sin(roll)`` -- 49.5 mm at 10° on the
+        ±0.285 m mount, opposite on the two sides -- and pitch swings the
         transducer ``sensor_depth·sin(pitch)`` along-track; both change the
         slant geometry the ping is rendered with. The fan plane's tilt and
         the beam-pattern steering stay in ``_ping_geometry`` /
@@ -840,7 +840,8 @@ class GeometricRenderer(SonarRenderer):
         if wall is not None:
             cross = crossing_mask(wall, origin, g.px, g.py, g.seabed_z)
             bw = bounce_weight(wall, origin, g.px, g.py, g.seabed_z,
-                               cfg.wall_diffuse_fraction)
+                               cfg.wall_diffuse_fraction,
+                               acoustics.wavenumber(cfg))
             # A folded path is occluded by whatever stands in either of its
             # two *real* legs -- transducer -> face -> ground -- exactly as
             # a direct one is. The unfolded ray's own horizon cull covers

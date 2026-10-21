@@ -27,9 +27,11 @@ Three details separate this from a plausible-looking approximation:
   which tilts the vertical fan toward the look direction, flips with it.
 * **The surface image radiates upward.** A ``z = 0`` reflection negates the
   launch depression, so its beam weight is evaluated at ``-depression``. The
-  main lobe sits *below* horizontal, so this path passes only through the
-  sidelobe floor -- physically right, and the reason a near-perfectly
-  reflecting interface does not swamp the calibrated direct field.
+  main lobe sits *below* horizontal (tilt 20 deg, FWHM 50 deg), so this path
+  is attenuated by 8 dB at 20 deg up, 17 dB at 40 deg, and is held at the
+  sidelobe floor (-24 dB) beyond 50.6 deg up -- physically right, and the
+  reason a near-perfectly reflecting interface does not swamp the
+  calibrated direct field.
 * **Walls are finite.** A ray only reflects if it actually crosses the wall
   segment, below its top. Without that test, ghosts appear on the wrong side
   of the basin.
@@ -47,10 +49,6 @@ import numpy as np
 from ..core.geometry import (reflect_direction_across_line,
                              reflect_point_across_line)
 from ..core.types import Pose3D, Side, Wall
-from .config import OMNISCAN_FREQ_HZ, SPEED_OF_SOUND_MPS
-
-#: Acoustic wavenumber at the Omniscan's frequency [rad/m] (~1900).
-WAVENUMBER = 2.0 * np.pi * OMNISCAN_FREQ_HZ / SPEED_OF_SOUND_MPS
 
 #: Name carried by the water-surface image on ground-truth contacts.
 SURFACE_NAME = "surface"
@@ -257,24 +255,28 @@ def segment_blocked(walls: list[Wall], ax, ay, az, bx, by, bz,
 
 
 def bounce_weight(wall: Wall, origin: Pose3D, px: np.ndarray, py: np.ndarray,
-                  pz: np.ndarray, diffuse_fraction: float) -> np.ndarray:
+                  pz: np.ndarray, diffuse_fraction: float,
+                  wavenumber: float) -> np.ndarray:
     """Energy fraction of **one** bounce surviving the face's roughness.
 
     The coherent (mirror) part of a reflection off a rough face falls with
     the Rayleigh roughness parameter ``Gamma = 2 k sigma_h cos(theta)``,
     ``theta`` the angle from the face normal, as ``exp(-Gamma^2)`` in power
-    (Eckart 1953, Urick 1983 ch. 5). At 450 kHz (k ~ 1900 rad/m) a
+    (Eckart 1953, Urick 1983 ch. 5). At 450 kHz (k = 1885 rad/m) a
     millimetre-rough quay keeps its mirror only near grazing -- which is
     exactly the band just beyond the face, where the mirrored seabed sits.
     The rest is scattered incoherently; ``diffuse_fraction`` is the share of
     it that still reaches the mirror geometry (lumped, set against the
-    corpus: docs/sonar_model.md section 11).
+    corpus: docs/sonar_model.md section 11). ``wavenumber`` is the model's
+    one k, ``acoustics.wavenumber(cfg)`` (``sonar_frequency_hz``, the same k
+    as the coherent split and the object facets); the reported ``ping_hz``
+    of the profile is a separate wire field and never enters the physics.
     """
     nx, ny = wall.normal
     dx, dy, dz = px - origin.x, py - origin.y, pz - origin.z
     norm = np.sqrt(dx * dx + dy * dy + dz * dz)
     cos_face = np.abs(dx * nx + dy * ny) / np.maximum(norm, 1e-9)
-    gamma = 2.0 * WAVENUMBER * float(wall.roughness_m) * cos_face
+    gamma = 2.0 * float(wavenumber) * float(wall.roughness_m) * cos_face
     coherent = np.exp(-gamma * gamma)
     return coherent + float(diffuse_fraction) * (1.0 - coherent)
 

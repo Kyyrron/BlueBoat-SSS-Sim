@@ -23,13 +23,19 @@ below the git root.
 ## 1. What this module is for
 
 The thesis tests *aspect-aware adaptive replanning* for SSS survey from a
-surface vehicle; its headline policy comparison runs here, so output must be
-defensible as evidence, not merely plausible imagery. **Worlds in, SSS data
+surface vehicle; its headline result is a model-conditional **simulated**
+comparison against a seriously tuned two-pass orthogonal survey (Replanner and
+Evaluation are planned, not built; superproject `.claude/CLAUDE.md` §1), so
+output must be defensible as evidence, not merely plausible imagery. A
+built-world run cannot yet host a replanner-owned run (Control
+`docs/REQUESTS.md` R-3). **Worlds in, SSS data
 out:** World Builder = MCS anchored path + operator intent → georeferenced
 Gazebo world with ground truth; sonar node = world + vehicle odom →
 profiles, raw frames, ground-truth contacts. Pictures are the visualization
-app's job, missions MCS/Control's, training data the downstream AI stage's
-(the in-package YOLO recorder was deleted in the 2026-09 rework).
+app's job, missions MCS/Control's, training data BlueBoat-Perception's dataset
+mode's (the in-package YOLO recorder was deleted in the 2026-09 rework; the
+dataset mode labels the seabed images from this node's
+`/side_scan_sonar/ground_truth/*` topics).
 
 ---
 
@@ -98,7 +104,7 @@ Node name `side_scan_sonar`, so private topics resolve under
 | `/side_scan_sonar/ground_truth/sensor` | `std_msgs/String` (JSON) | pub | default 10 | every ping cycle: the boat pose at the ping time and each transducer's rendered pose; **simulation-only, additive** (2026-10-08), read by `analysis/sea_validation.py` |
 | `/side_scan_sonar/ping/enable` | `std_msgs/Bool` | sub | default 10 | operator / launch one-shot |
 | `/sim/sea_state/boat_pose` | `geometry_msgs/TransformStamped` | sub | default 50 | `sea_state_launch.py` bridge (param `pose_topic`); the primary pose |
-| `/blueboat/odom` | `nav_msgs/Odometry` | sub | default 10 | Gazebo bridge (param `odom_topic`); the fallback pose |
+| `/blueboat/odom` | `nav_msgs/Odometry` | sub | default 10 | Gazebo bridge (param `odom_topic`); the fallback pose (optional while `boat_pose` flows) |
 
 Pinging is **off at startup**, like hardware; run-dependent parameters are
 re-read on every enable.
@@ -250,8 +256,11 @@ scientific argument.
 
 4. **The first bottom return must survive every change to the acoustic
    model.** Six coupled pieces make downstream bottom tracking lock; remove
-   any and the tracker fails silently: (1) the beam-pattern sidelobe floor
-   (`beam_sidelobe_floor`); (2) the specular near-nadir lobe
+   any and the tracker fails silently: (1) the vertical beam weight at nadir
+   (at tilt 20°/FWHM 50° the Gaussian tail alone gives 0.00436 there, so the
+   FBR rides on it and `beam_sidelobe_floor` (0.004) is the guard when the
+   fan is rolled up >0.55°, the tilt reduced or the aperture narrowed; keep
+   w(nadir) ≥ ~0.004); (2) the specular near-nadir lobe
    (`specular_strength`); (3) the specular component rendered and speckled
    **separately** from the diffuse field, low CV (`specular_looks`); (4)
    pulse-length range smearing (`pulse_smearing`); (5) (2026-09-18) that
@@ -321,9 +330,17 @@ scientific argument.
     bundles keep loading (their frozen `sonar.yaml`/`trajectory.yaml` are the
     resolver fallbacks) and are equally write-once.
 
-11. **Project-level:** the thesis's headline detector trains on *real*
-    imagery only; this module's synthetic data is for the policy comparison,
-    the sim-to-real transfer-gap experiment and development.
+11. **Project-level (owner's decision, 2026-10-20; superproject CM-11):** the
+    headline detector is a YOLO model in BlueBoat-Perception, trained on
+    *simulated* datasets that Perception's dataset mode labels from this
+    module's ground truth, with its confidence calibrated on held-out
+    simulated worlds. Real water validates this simulator (boat motion and
+    sensor), runs the heading-response experiment and serves the final
+    demonstration; a labelled real dataset blocks nothing. The consequence
+    stays stated: a simulation-trained detector inherits its aspect
+    sensitivity from this module's model, so the model is what the real
+    heading-response experiment bounds, and the module's data are also for
+    the policy comparison and development.
 
 12. **Limits never reflect.** World-limit borders are Gazebo collision-only
     geometry, in neither `scene.walls`, the rasters, nor the manifest. Only
@@ -376,6 +393,8 @@ scientific argument.
       members (lattice classes, rope, chain, anchor, debris, coils) stay on
       the raster's Lambert path — the right law for a wavelength-rough
       scatterer, bit-identical to before;
+      (fired brick, 1 mm, is on the smooth side: C = 6e-7 at normal
+      incidence, 0.5 at 77° off it — a facet object, smoke `[14]`);
     * **smooth solid primitives** (`objects.is_facet_object`: a smooth
       material on a box / cylinder / capsule / cone / annulus — any primitive
       `solids.tessellate` knows — proud of the seabed) scatter in the **facet
@@ -448,7 +467,10 @@ The traps:
   when anything before it changes. Screen 5 therefore writes all of
   `worldgen.objects.PINNED_FIELDS` + `material`, and
   `roll_deg`/`pitch_deg`/`rest` **only** for an object that actually rested
-  (any tilt sends the instance down the 3-D solid path).
+  (any tilt sends the instance down the 3-D solid path). `transmission` and
+  `roughness_m` follow a pinned `material` (since 2026-10-21); `object_id`
+  is positional and seeds rope/chain/debris/coil/lattice shapes, so deleting
+  or reordering a pinned object re-draws those shapes of later objects.
 - `BuilderState.objects.placed` (never in a world YAML) = Screen 4's random
   field pinned into verbatim instances; while non-empty,
   `state_to_world_config` emits `classes: {}` — keeping the classes would
@@ -481,10 +503,10 @@ of `controller_type`.
 python3 -m test.smoke_test        # from the package source root
 ```
 
-The only automated gate of the Stop hook (no lint, no type-check). **434
-checks** (431 + one visible `SKIP`, covering the two bridge checks and the
+The only automated gate of the Stop hook (no lint, no type-check). **439
+checks** (436 + one visible `SKIP`, covering the two bridge checks and the
 `ApplyLinkWrench` detection, when the interpreter has no ROS; one
-more when the `BlueBoat-SSS` checkout beside it is missing), ~165 s.
+more when the `BlueBoat-SSS` checkout beside it is missing), ~205 s (2026-10-20).
 Section `[10]` (sea state) is unit-level only — the current's statistics,
 bound, smoothness, tick-independence and no-reset; the plain-language
 preset keys; the sensor lever arm; the image's roll/pitch/yaw response
@@ -495,7 +517,14 @@ test/smoke_test.py` lists the sections. Two rules the code does not
 explain: the **render fixture** `test/fixtures/render_baseline_v1.npz` is
 rebaselined only for a deliberate model change, by deleting the file, and is
 compared to **float precision** (1e-12 of each array's scale) — the venv's
-numpy 2.4 and the system numpy 1.26 differ by a few ULP; `[2f]` reads the
+numpy 2.4 and the system numpy 1.26 differ by a few ULP. It renders with the default
+profile's mount, so a geometry change in `config/default_sonar.yaml` is a model change.
+The 2026-10-12 move of `mount_y_abs_m` from 0.20 to 0.285 m left the gate red, and the
+first failure hid a second: the pontoon-crossing check assumed the old mount. Both were
+repaired on 2026-10-19. The fixture was rebaselined, after a re-render at 0.20 had
+reproduced the old one bit for bit, and the crossing pose is now placed from the
+profile's mount. The suite ran 434 / 434 again on the system python, and 431 + 1 visible
+`SKIP` on the venv python. `[2f]` reads the
 field corpus at `$BLUEBOAT_SSS_CORPUS` (default `~/ros2_ws/data/SSS_data`) and
 skips without it. Calibration gates: `[2c]`, `[2e]`, `[2f]`; object physics:
 `[14]`. Runs serialize on `/tmp/blueboat_sss_smoke.lock` — give a manual run
@@ -522,7 +551,12 @@ corpus band, impulse conserved, no 1.6 Hz line); and the sonar shows it
 moved or distorted against calm). `report.md` + figures in `--out`. The
 validation worlds and trajectory are data built with the World Builder
 and the Pattern Designer — how, and the results, in
-`docs/sea_state_validation.md`.
+`docs/sea_state_validation.md`. They live outside every repository and were
+lost once (empty from 2026-10-12). They were rebuilt on 2026-10-20 by
+`~/ros2_ws/sim_runs/sea_validation/build_inputs.py` (deterministic, refuses
+to overwrite). On 2026-10-20 the gate ran 24/25 (5 m) and 23/24 (1.5 m). The
+only failure each time was an intermittent "fresh pose" stall in *waves*,
+which passed when re-run (`TODO.md`).
 
 ### Session hooks
 
@@ -531,8 +565,9 @@ and the Pattern Designer — how, and the results, in
 dirty on an in-scope edit and reminds to regenerate worlds after
 `config/`/`sonar/`/`worldgen/` edits; **Stop** runs the suite when an
 in-scope file changed and **exits 2 to block the stop** until it passes.
-The hook's `timeout` (330 s) must stay above the script's
-`SUITE_TIMEOUT_S` (300 s): a harness-cancelled Stop hook does not block, so
+The hook's `timeout` (450 s) must stay above the script's
+`SUITE_TIMEOUT_S` (420 s, raised from 300 s on 2026-10-20 when the suite
+reached ~205 s): a harness-cancelled Stop hook does not block, so
 a too-short timeout makes the gate pass silently.
 
 ---
@@ -602,6 +637,7 @@ a too-short timeout makes the gate pass silently.
   `python3 - <<'PY'` from that root).
 - Superproject rules hold here (root `CLAUDE.md` §2.1, §3): **never
   `git commit` or `git push`** — the user stages and commits;
-  **`BlueBoat-Control` and `BlueBoat-MCS` are frozen at tag `v1.0`** —
-  without an explicit user order they are read-only neighbours, and a
-  needed change becomes a post-v1.0 item in this module's `TODO.md`.
+  **`BlueBoat-Control` and `BlueBoat-MCS` are updated by additions only**
+  (owner, 2026-10-20; they were frozen at tag `v1.0`) — without an explicit
+  user order they are read-only neighbours, and a needed change becomes an
+  item in this module's `TODO.md`.

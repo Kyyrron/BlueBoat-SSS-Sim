@@ -9,7 +9,7 @@ uint32 ping_number
 uint32 start_mm
 uint32 length_mm
 uint32 timestamp_ms            # device uptime clock [ms]
-uint32 ping_hz                 # acoustic frequency (~451127 Hz)
+uint32 ping_hz                 # acoustic frequency in Hz (450000 nominal; the sim reports the observed 451127)
 uint16 gain_index
 uint16 num_results
 uint16 sos_dmps                # speed of sound [dm/s] (15000 = 1500 m/s)
@@ -20,4 +20,4 @@ float32 max_pwr_db
 float32 min_pwr_db
 float32 transducer_heading_deg # mounting angle relative to the bow: -90 port, +90 starboard (constant; the device convention, 100 % of the field corpus)
 float32 vehicle_heading_deg    # compass heading of the vehicle [deg, 0 = North, CW]
-uint16[] pwr_results           # linear echo power, num_results entries
+uint16[] pwr_results           # u16, normalised per ping: db = min_pwr_db + raw/65535*(max_pwr_db - min_pwr_db); NOT linear power, NOT absolute counts; num_results entries

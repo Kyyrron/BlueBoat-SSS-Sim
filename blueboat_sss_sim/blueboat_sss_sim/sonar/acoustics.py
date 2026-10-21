@@ -51,10 +51,15 @@ def beam_weight(depression_rad: np.ndarray, cfg: SonarModelConfig,
     this side's look direction (positive = fan pushed downward).
 
     A real transducer has sidelobes, so the pattern is floored at
-    ``beam_sidelobe_floor``: without it, near-nadir rays (~70 deg off the
-    beam axis at shallow-water altitudes) are attenuated so hard that the
-    first bottom return disappears below the water-column noise and
-    downstream FBR/bottom-tracking cannot lock."""
+    ``beam_sidelobe_floor``. At the shipped geometry (tilt 20 deg, FWHM
+    50 deg) the nadir ray is 70 deg off the beam axis and the Gaussian tail
+    alone gives 0.00436 (-23.6 dB) there, so the floor does not bind for a
+    downward ray at level attitude; it takes over when the fan is rolled up
+    by more than 0.55 deg, when the tilt is reduced or the aperture
+    narrowed, and for upward paths steeper than 50.6 deg (the surface
+    image). Without it the first bottom return would sink below the
+    water-column noise in those cases and downstream FBR/bottom-tracking
+    could not lock."""
     center = np.radians(cfg.beam_tilt_deg) + roll_toward_side
     sigma = np.radians(cfg.vertical_aperture_deg) / 2.355  # FWHM -> sigma
     main = np.exp(-0.5 * ((depression_rad - center) / max(sigma, 1e-6)) ** 2)
@@ -83,7 +88,9 @@ def specular(reflectivity: np.ndarray, cos_incidence: np.ndarray,
 
 
 #: Speed of sound the wavenumber is built from, matching
-#: ``sonar/config.SPEED_OF_SOUND_MPS`` and ``sonar/multipath.WAVENUMBER``.
+#: ``sonar/config.SPEED_OF_SOUND_MPS``. The one wavenumber of the model:
+#: the coherent split, the object facets and the wall bounce weight
+#: (``sonar/multipath.bounce_weight``) all take it from here.
 _C_WATER_MPS = 1500.0
 
 #: RMS height a cell with no smooth surface on it is treated as having.
@@ -92,7 +99,7 @@ _ROUGH_DEFAULT_M = 0.01
 
 
 def wavenumber(cfg: SonarModelConfig) -> float:
-    """Acoustic wavenumber k = 2 pi f / c [rad/m] (1890 at 450 kHz)."""
+    """Acoustic wavenumber k = 2 pi f / c [rad/m] (1885 at 450 kHz)."""
     return 2.0 * np.pi * float(cfg.sonar_frequency_hz) / _C_WATER_MPS
 
 

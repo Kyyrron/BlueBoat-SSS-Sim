@@ -553,8 +553,8 @@ def main() -> None:
     # gap from bin 0, so it averages the transmit ringing (55 -> 33 dB over
     # the first metre) with the measured 25 dB water column; at this
     # fixture's ~3.5 m altitude that mean sits near 37 dB against a ~68 dB
-    # peak. (The corpus at gain 4, 6-9 m altitude, excluding the ringing
-    # bins, gives 30-36 dB -- the [2f] statistic.)
+    # peak. (The corpus at gain 4 gives a median of about 32 dB, 10-90 %
+    # 25-42, on the [2f] statistic: bins 10 to FBR-8, ringing tail included.)
     contrast_db = peak - float(wc.mean())
     check("water column is quiet vs FBR peak (~31 dB incl. ringing bins)",
           24.0 < contrast_db < 44.0,
@@ -1071,7 +1071,7 @@ def main() -> None:
         check("water column sits where the fitted noise floor puts it",
               16.0 < wc_med < 36.0,
               f"{wc_med:.1f} dB below the bottom return over {len(wc_gaps)} "
-              "field pings; the simulator's fitted floor targets 26")
+              "field pings (bins 10..FBR-8, ringing tail included); gate 16-36 dB")
         # The range law. The shipped tvg_compensation of 0.90 left a ~2 dB per
         # decade residual; the corpus falls an order of magnitude faster, which
         # is what moved spreading_exponent to the two-way value with no TVG.
@@ -2122,7 +2122,7 @@ def main() -> None:
     # A quay's wet face returns a bright coherent line at its own horizontal
     # distance and hides every seabed sample behind it -- the bright band
     # followed by a dark region that every real harbour mosaic shows.
-    d_face = W_Y - sensor_mp.y                       # 5.8 m with the mount
+    d_face = W_Y - sensor_mp.y                       # 5.715 m with the 0.285 m mount
     r_foot = float(np.hypot(d_face, sensor_mp.z - W_DEPTH))
     b_face = int(d_face / mp_bin)
     echo_nowall, _, _ = _mp_render([], False, echo=True)
@@ -2273,8 +2273,11 @@ def main() -> None:
     # Crossing the line: the transducer 0.3 m from a pontoon sees no slab in
     # its water column (the range law is floored at the altitude) and the
     # first bottom return stays at the altitude; a quay this close would
-    # light the whole column with its face.
-    cross_pose = Pose3D(x=0.0, y=W_Y - 0.5, z=0.0, yaw=0.0)
+    # light the whole column with its face. The pose is placed from the
+    # profile's mount offset so the transducer stays 0.3 m from the line
+    # whatever the lever arm (it was a fixed 0.5 m, i.e. 0.3 m at the former
+    # 0.20 m mount and 0.215 m after the 0.285 m agreement of 2026-10-12).
+    cross_pose = Pose3D(x=0.0, y=W_Y - 0.3 - mp_c.model.mount_y_abs_m, z=0.0, yaw=0.0)
     cross_p, _, _ = _mp_render([pont], True, echo=True, pose=cross_pose)
     cross_q, _, _ = _mp_render([basin_wall], True, echo=True, pose=cross_pose)
     cross_0, _, _ = _mp_render([], True, echo=True, pose=cross_pose)
@@ -2493,7 +2496,7 @@ def main() -> None:
     g_obs = [o for o in obs_lab.observations if o.ghost]
     d_obs = [o for o in obs_lab.observations if not o.ghost]
     # Hand-computed: object 1 sits at y = 6, the transducer track at y = 4
-    # (+ the 0.20 m mount), the quay at y = 10. The mirror images the object
+    # (+ the 0.285 m mount), the quay at y = 10. The mirror images the object
     # at (mirror_y - 6) across, so the ghost is that much further out than
     # the direct return of the same object.
     g1 = [o for o in g_obs if o.object_id == 1]
@@ -6128,6 +6131,99 @@ def main() -> None:
     check("class params and the material override reach the entry",
           all(i["fill_fraction"] == 0.42 and i["material"] == "tinplate"
               for i in stamped13))
+
+    # (h) 2026-10-21 fixes: roughness follows a pinned material; a driven
+    # pile has no rest poses; the Builder's worlds continue their edge.
+    from blueboat_sss_sim.worldgen.objects import (draw_rest as _draw13,
+                                                   is_facet_object as _isf13,
+                                                   rest_poses as _rp13,
+                                                   typical_instance as _ti13)
+    st13m = _state13(seed=7, explicit=[
+        {"type": "can", "x": 210.0, "y": 110.0, "material": "concrete"},
+        {"type": "concrete_block", "x": 215.0, "y": 110.0,
+         "material": "metal"}])
+    scene13m, _pre13m, _ = _run13(st13m)
+    can13, blk13 = scene13m.objects[0], scene13m.objects[1]
+    check("a pinned material brings its own roughness: can+concrete is rough "
+          "(raster), concrete_block+metal is smooth (facet)",
+          abs(can13.roughness_m - 2.0e-3) < 1e-12 and not _isf13(can13)
+          and abs(blk13.roughness_m - 5.0e-5) < 1e-12 and _isf13(blk13),
+          f"can {can13.roughness_m:g} m, block {blk13.roughness_m:g} m")
+    pile13 = _CAT13["mooring_pile"]
+    o13p = _ti13(pile13)
+    _draw13(pile13, o13p, 1.0)
+    check("a driven pile has no rest poses and stays a flat stamp",
+          not pile13.rest_allowed and _rp13(pile13) == ()
+          and o13p.rest == "canonical" and not o13p.rested
+          and all(_CAT13[k].rest_allowed for k in _CAT13
+                  if k != "mooring_pile"))
+    tmp13o = Path(_tf13.mkdtemp(dir=OUT))
+    scene13.save(tmp13o)
+    sc13o = SceneModel.load(tmp13o)
+    xmax13 = scene13.grid.extent[2]
+    far13 = np.array([xmax13 + 7.0]), np.array([scene13.grid.extent[1] + 3.0])
+    edge13 = (np.array([xmax13]), np.array([scene13.grid.extent[1] + 3.0]))
+    fill13 = dataclasses.replace(scene13, outside="fill")
+    check("the Builder's world continues its edge outward (and round-trips "
+          "the manifest key); generate_scene keeps the phantom plain",
+          scene13.outside == "edge" and sc13o.outside == "edge"
+          and abs(float(scene13.sample_height(*far13)[0])
+                  - float(scene13.sample_height(*edge13)[0])) < 1e-4
+          and abs(float(scene13.sample_reflectivity(*far13)[0])
+                  - float(scene13.sample_reflectivity(*edge13)[0])) < 1e-4
+          and float(fill13.sample_height(*far13)[0])
+          == float(scene13.height.min())
+          and float(fill13.sample_reflectivity(*far13)[0]) == 0.2
+          and SceneModel.load(tmp13o).outside == "edge",
+          "edge: nearest edge cell repeated; fill: deepest cell, rho 0.2")
+    fill_dir13 = Path(_tf13.mkdtemp(dir=OUT))
+    fill13.save(fill_dir13)
+    check("a 'fill' scene writes no 'outside' key (manifests stay "
+          "byte-identical) and loads as fill",
+          "outside" not in _yaml13.safe_load(
+              (fill_dir13 / "scene_manifest.yaml").read_text())
+          and SceneModel.load(fill_dir13).outside == "fill")
+
+    # The sonar node pings from the 100 Hz pose alone (no odometry needed),
+    # falls back to odometry when the pose is stale, and skips the cycle --
+    # instead of asserting -- when it has neither. Needs rclpy; the message
+    # package is stubbed (only the import has to resolve).
+    try:
+        import types as _ty13
+        if "blueboat_interfaces" not in sys.modules:
+            _bi13 = _ty13.ModuleType("blueboat_interfaces")
+            _bim13 = _ty13.ModuleType("blueboat_interfaces.msg")
+            _bim13.OmniscanProfile = type("OmniscanProfile", (), {})
+            _bi13.msg = _bim13
+            sys.modules["blueboat_interfaces"] = _bi13
+            sys.modules["blueboat_interfaces.msg"] = _bim13
+        from blueboat_sss_sim.ros.sss_sim_node import (
+            SideScanSonarSimNode as _Node13)
+        from blueboat_sss_sim.sea.motion import HighRatePose as _HRP13
+        from blueboat_sss_sim.core.types import Pose3D as _P13
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"  SKIP: sonar-node pose fallback ({type(exc).__name__}: "
+              f"{exc})")
+    else:
+        hr13 = _HRP13()
+        hr13.update(1.00, _P13(1.0, 2.0, -0.2, 0.0, 0.0, 0.3))
+        hr13.update(1.01, _P13(1.01, 2.0, -0.2, 0.0, 0.0, 0.3))
+        node13 = _ty13.SimpleNamespace(
+            _hr=hr13, _pose=None, _pose_t=0.0, _predict=True,
+            _twist_body=(np.zeros(3), np.zeros(3)), _pose_source="")
+        got13 = _Node13._ping_pose(node13, 1.02)
+        src13a = node13._pose_source
+        none13 = _Node13._ping_pose(node13, 1.5)
+        node13._pose = _P13(5.0, 6.0, -0.2, 0.0, 0.0, 0.0)
+        odom13 = _Node13._ping_pose(node13, 1.5)
+        check("the sonar pings from the 100 Hz pose alone, falls back to "
+              "odometry when it is stale, and skips the cycle (no assert) "
+              "with neither source",
+              got13 is not None and src13a == "pose_100hz"
+              and abs(got13[0].x - 1.01) < 0.05
+              and none13 is None
+              and odom13 is not None and node13._pose_source == "odom"
+              and abs(odom13[0].x - 5.0) < 1e-9)
 
     _section_object_physics()
 

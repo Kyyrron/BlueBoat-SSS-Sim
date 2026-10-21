@@ -22,7 +22,9 @@ Builder's layer editor (``.layers``) generalises them to drawn shapes:
   along both sides;
 * marina -- pontoon rows over a basin, deeper berth pockets between them
   and scour pits at the piles;
-* rocky outcrop -- seeded rounded rock heads over a base depth;
+* rocky outcrop -- seeded rounded rock heads over a base depth (heights
+  only: the heads keep the base material; the layered editor's
+  "outcrops" layer also stamps the rocks material);
 * sandbar ripples -- a periodic longshore bar field.
 
 ``DEPTH_PRESETS`` maps name -> (fn, label, schema rows); the schema rows

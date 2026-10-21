@@ -162,14 +162,45 @@ class SceneModel:
     #: object -- every scene built before 2026-09-28 -- and the array is then
     #: absent from ``scene.npz``.
     facet_bump: np.ndarray | None = None
+    #: What the sonar sees beyond the grid. ``"fill"`` (the historical
+    #: default, frozen by the render fixture): a flat phantom plain at the
+    #: deepest cell of the map with reflectivity 0.2. ``"edge"``: the
+    #: nearest edge cell repeated outward, so the seabed simply continues.
+    #: The World Builder builds ``"edge"`` worlds; additive in the manifest
+    #: (absent = ``"fill"``), so every world on disk renders as before.
+    outside: str = "fill"
 
     # ---- queries used by the sonar renderer -------------------------------
+    def _clamp_to_map(self, x: np.ndarray, y: np.ndarray
+                      ) -> tuple[np.ndarray, np.ndarray]:
+        """World (x, y) pulled onto the grid's covered area (the edge cell
+        is repeated outward); a hair inside the extent so floating-point
+        round-off cannot push an edge query back out of bounds."""
+        xmin, ymin, xmax, ymax = self.grid.extent
+        eps = 1e-6 * self.grid.resolution
+        return (np.clip(x, xmin + eps, xmax - eps),
+                np.clip(y, ymin + eps, ymax - eps))
+
     def sample_height(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Seabed z at world (x, y); outside the map, deep flat fallback."""
+        """Seabed z at world (x, y).
+
+        Outside the grid this depends on ``outside``: ``"fill"`` returns the
+        DEEPEST cell of the map (a flat phantom plain, so a boat within the
+        sonar range of the world edge sees a step down and a horizon-cull
+        shadow band there); ``"edge"`` repeats the nearest edge cell. The
+        default stays ``"fill"`` on purpose: the render fixture is frozen on
+        it (sonar_model.md A13).
+        """
+        if self.outside == "edge":
+            x, y = self._clamp_to_map(x, y)
         return bilinear_sample(self.height, self.grid, x, y,
                                fill=float(self.height.min()))
 
     def sample_reflectivity(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Reflectivity at world (x, y); beyond the grid 0.2 (``"fill"``)
+        or the nearest edge cell (``"edge"``), like ``sample_height``."""
+        if self.outside == "edge":
+            x, y = self._clamp_to_map(x, y)
         return bilinear_sample(self.reflectivity, self.grid, x, y, fill=0.2)
 
     def sample_transmission(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -250,6 +281,11 @@ class SceneModel:
             # world as before.
             doc["geo"] = {"anchor": self.geo_anchor.to_dict(),
                           "convention": GEO_CONVENTION}
+        if self.outside != "fill":
+            # Additive as well: written only when it departs from the
+            # historical phantom plain, so every other manifest is
+            # byte-identical to before.
+            doc["outside"] = self.outside
         with open(manifest, "w", encoding="utf-8") as f:
             yaml.safe_dump(doc, f, sort_keys=False)
         return npz, manifest
@@ -285,7 +321,11 @@ class SceneModel:
                        if "roughness" in data.files else None),
             facet_bump=(data["facet_bump"]
                         if "facet_bump" in data.files else None),
+            outside=str(doc.get("outside", "fill")),
         )
+        if scene.outside not in ("fill", "edge"):
+            raise ValueError(f"Unknown scene 'outside' mode "
+                             f"'{scene.outside}' (fill | edge)")
         stale = scene.stale_rasters()
         if stale:
             # Every loader goes through here (the sonar node, the analysis

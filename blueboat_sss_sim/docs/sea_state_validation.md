@@ -87,6 +87,20 @@ headless the same way: `MissionModel.add_waypoint` + `sample_mission` +
 5. Save as **`flat_5p0m`** (and **`flat_1p5m`**). The worlds land in
    `~/worlds/sea_validation/`.
 
+**These inputs live outside every repository.** By 2026-10-20 they had been lost:
+`~/worlds/sea_validation/` was empty since 2026-10-12, and the trajectory was deleted. On
+2026-10-20 they were rebuilt headless, exactly to Steps 1–2, through the tools' own code:
+- Step 1 through the designer's `MissionModel` / `sample_mission` / `save_mission`. The path
+  comes out at 158.85 m, 198.6 s.
+- Step 2 through `BuilderState` / `build_world_folder`. The objects come from the Screen-5
+  stamp form with its defaults, seeded as `PlacePage` seeds it (`[5, 1]`); the pipes are set
+  to 3 m as a Screen-5 edit.
+
+The script is `~/ros2_ws/sim_runs/sea_validation/build_inputs.py`, also outside the
+repositories. It refuses to overwrite and is deterministic, so it reproduces these inputs.
+Each object's drawn sizes, headings and burials differ from the lost originals, which no
+record kept. Positions, classes and the survey are as specified.
+
 ### Step 3 — run the four sea states
 
 **Automatically (recommended):**
@@ -171,6 +185,18 @@ the repository; the figures below are copies). The 2026-10-08 campaigns
 "Reading it"). Re-run with `--quick` (line 1 only) after BlueBoat-Control's
 readiness fix the same day: 25 / 25, every scenario under way on its first
 attempt (`…/2026-10-09_controlfix_5m_quick/`).
+
+**2026-10-20, on the rebuilt inputs (0.285 m mount):**
+
+| World | Checks | Failed |
+|---|---|---|
+| 5 m | 24 / 25 | *waves* "fresh pose" (0.67 % of pings over 60 ms) |
+| 1.5 m | 23 / 24 | *waves* "fresh pose" (0.08 % of pings over 60 ms) |
+
+Every physics and sonar check passed. Re-run alone, *waves* passed (0.00 %, worst 10 ms).
+The failures are intermittent pose-delivery stalls to the sonar node, with Gazebo at RTF 1.000
+throughout. That is `.claude/TODO.md`'s 2026-10-20 item, not a model change. The runs are in
+`~/ros2_ws/sim_runs/sea_validation/2026-10-20_{5m,1p5m,5m_waves_rerun}/`.
 
 ### What happened to the boat
 

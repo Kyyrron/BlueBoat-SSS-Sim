@@ -16,7 +16,7 @@ Namespace: node name `side_scan_sonar` → private topics resolve under
 | `/side_scan_sonar/ground_truth/contacts` | `std_msgs/String` (JSON) | pub | **simulation-only extra**, additive |
 | `/side_scan_sonar/ground_truth/sensor` | `std_msgs/String` (JSON) | pub | **simulation-only extra**, additive (2026-10-08): every ping cycle, `{t_sim, stamp, pose_age_ms, predicted, pose_source: pose_100hz|odom, boat[x,y,z,roll,pitch,yaw], sensors{port|starboard: {pose[6], altitude_m, ping_number|null, dropped}}}` — the vehicle pose at the ping time and the exact transducer pose each side was rendered from (world ENU, m / rad). Read by `analysis/sea_validation.py` |
 | `/sim/sea_state/boat_pose` | `geometry_msgs/TransformStamped` | sub (depth 50) | primary pose source since 2026-10-09: Gazebo's per-step model pose (parameter `pose_topic`; `""` = odometry only) |
-| `/blueboat/odom` | `nav_msgs/Odometry` | sub | fallback pose source (parameter `odom_topic`) |
+| `/blueboat/odom` | `nav_msgs/Odometry` | sub | fallback pose source (parameter `odom_topic`); optional while the 100 Hz pose is flowing, required otherwise |
 
 `sea_state_node` (simulation only — started by `full_mission_launch.py`
 since 2026-09-03 and by `sea_state_launch.py` standalone, e.g. beside
@@ -68,11 +68,12 @@ to the real node; re-read at every enable):
 
 These are the device's best range resolution: at 1200 bins and 0.00125 the
 pulse sits on its 44.3 µs floor up to ~27 m (33 mm true range resolution).
-`project_synthesis.md` §8.5's 30 m coverage and 15 m revisit passes are
-passed per run. The acquisition is also always **explicit**: `sss_sim_launch.py`
+`project_synthesis.md` §8.5 (since 2026-10-20) fixes the survey range at
+20 m per side for every condition — the default, no per-run override; the
+30 m profile is a diagnostic. The acquisition is also always **explicit**: `sss_sim_launch.py`
 passes all six from the resolved sonar profile (explicit `sonar_config:=` >
 a legacy bundle's frozen `sonar.yaml` > `config/default_sonar.yaml`), each
-overridable per run (`gain_index:=-1`, `range_length_mm:=30000`, …), and
+overridable per run (`gain_index:=-1`, a diagnostic `range_length_mm:=30000`, …), and
 the node warns at every enable when what is in force differs from what the
 named profile records.
 

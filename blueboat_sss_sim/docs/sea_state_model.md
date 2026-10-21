@@ -74,8 +74,9 @@ against the xacro's own formula:
   inheriting it.
 * **The damping and added-mass coefficients are the BlueROV2's**
   (`hydrodynamics.xacro` cites von Benzon et al. 2022 [8]; no BlueBoat
-  identification exists in the project; BlueBoat-Control is frozen at
-  `v1.0`, so one would be a post-v1.0 item).
+  identification exists in the project; BlueBoat-Control is updated by
+  additions only (it was frozen at `v1.0`), so one would be a request to
+  that module).
   The current drag the controllers feel is therefore
   `xU·u + xUabsU·u|u|` with the ROV's 25.15 N·s/m and 33.8 N·s²/m²:
   0.25 m/s → 8.4 N, 0.5 m/s → 21 N, 0.8 m/s → 42 N against 2 × 40 N of
@@ -503,7 +504,7 @@ Oppenheim & Jaffe [9]; Blondel [10] ch. 4; Anstee [20]):
 **The sensor pose (2026-10-08).** `renderer._sensor_pose` rotates the
 lever arm `[mount_x, ±mount_y, −sensor_depth]` by the full R(roll, pitch,
 yaw) (yaw only before — the docs' "3 mm at 10°" was the horizontal term;
-the vertical one is 35 mm on the ±0.20 m mount). `sss_sim_node` renders
+the vertical one is 49.5 mm on the ±0.285 m mount). `sss_sim_node` renders
 each ping at the boat's pose **propagated to the ping time** — since
 2026-10-09 Gazebo's per-step model pose (`/sim/sea_state/boat_pose`, at
 most a physics step old), the 20 Hz odometry only as a fallback — with

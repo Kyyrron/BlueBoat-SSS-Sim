@@ -238,9 +238,13 @@ class SonarModelConfig:
                                            # review, P6-8) is what would fix
                                            # it, and this knob is where the
                                            # answer goes.
-    beam_sidelobe_floor: float = 0.004     # pattern never below this (~-24 dB);
-                                           # lets the nadir specular return
-                                           # through, as real sidelobes do
+    beam_sidelobe_floor: float = 0.004     # pattern never below this (~-24 dB),
+                                           # as real sidelobes. At tilt 20 /
+                                           # FWHM 50 the nadir tail alone is
+                                           # 0.00436, so it binds only under
+                                           # >0.55 deg of roll-up, a smaller
+                                           # tilt / aperture, or for upward
+                                           # (surface-image) paths
     specular_strength: float = 12.0        # near-normal-incidence specular lobe
                                            # amplitude (relative to Lambert).
                                            # Sized so the FBR clears a +8 dB
@@ -340,8 +344,9 @@ class SonarModelConfig:
                                            # nearly a perfect reflector, but
                                            # the path leaves the transducer
                                            # *upward*, so the beam pattern
-                                           # sees it at -depression and only
-                                           # the sidelobe floor passes
+                                           # sees it at -depression: -8 dB at
+                                           # 20 deg up, -17 dB at 40 deg and
+                                           # the sidelobe floor beyond 50.6
     surface_reflectivity: float = 0.9      # pressure-release interface
     # Direct wall echo (closes the former assumption A9): a vertical quay
     # face returns a bright coherent line at its own range and occludes the
@@ -481,7 +486,9 @@ class SonarModelConfig:
                                            # under which a smooth plastic box
                                            # rendered +32 dB over the sand it
                                            # sat on against a measured +2.5.
-    sonar_frequency_hz: float = 450_000.0  # the wavenumber the split uses
+    sonar_frequency_hz: float = 450_000.0  # the model's one wavenumber (split,
+                                           # facets, wall bounce weight); the
+                                           # reported ping_hz is separate
     smooth_lobe_width_deg: float = 0.0     # near-normal lobe width on a
                                            # surface the roughness raster
                                            # calls smooth (0 = use the global
@@ -582,7 +589,7 @@ class SonarModelConfig:
                                            # re-evaluated at the 2026-09-18
                                            # offset (81.1; it was 8.3e-11 at
                                            # 97.2 -- the same -3.6 dB). The former
-                                           # 6.79e-7 (38.5 dB) was fitted on
+                                           # 6.79e-7 (35.5 dB) was fitted on
                                            # files that never reached the
                                            # floor and hid the range law
                                            # beyond ~20 m.
@@ -629,9 +636,12 @@ class SonarModelConfig:
                                            # -> 10**((27.8 - 81.1)/10), the
                                            # 2026-09-18 offset (1.15e-07 at
                                            # the old 97.2 -- the same 27.8 dB).
-                                           # Stays
-                                           # 40 dB under the FBR peak, so
-                                           # bottom tracking locks with margin.
+                                           # It sits ~28 dB (corpus, 6-9 m
+                                           # altitude) to ~43 dB (the 3.5 m
+                                           # smoke fixture) under the FBR
+                                           # peak, the margin growing as the
+                                           # altitude falls, so bottom
+                                           # tracking locks with margin.
 
     # Ground-line sampling: renderer step is min(sample_step_m, ~half the
     # slant bin) so every range bin receives samples at any num_results

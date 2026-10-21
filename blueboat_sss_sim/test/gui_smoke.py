@@ -711,6 +711,20 @@ def main() -> None:
     check("a tilt written by hand carries roll, pitch and the rest name",
           {"roll_deg", "pitch_deg", "rest"} <= set(dlg7.item()))
 
+    # Reflectivity is read only by the raster path: a smooth solid is a
+    # facet object (NC #17), so the row is greyed out for it and comes back
+    # when the material turns the object rough.
+    dlg7f = ObjectEditDialog({
+        "type": "can", "x": 0.0, "y": 0.0, "yaw": 0.0, "length": 0.13,
+        "width": 0.08, "proud_height": 0.08, "burial": 0.0,
+        "reflectivity": 0.9, "material": "metal"})
+    off7 = not dlg7f._spins["reflectivity"].isEnabled()
+    dlg7f._material.setCurrentText("concrete")
+    on7 = dlg7f._spins["reflectivity"].isEnabled()
+    check("the editor greys Reflectivity for a facet object only",
+          off7 and on7,
+          "can+metal is a facet object, can+concrete is rough (raster)")
+
     n_manual7 = sum(1 for r in pp._rows if r["kind"] == "manual")
     n_pinned7 = sum(1 for r in pp._rows if r["kind"] == "pinned")
     pp.commit(state)

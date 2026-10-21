@@ -6,13 +6,14 @@
 #
 # The walls enclose the 60 x 40 m survey box of `default_mission.yaml` at 2 m
 # clearance, so a lawnmower leg running at y = +/-20 sees the nearer quay at
-# 2 m and the far one at 42 m. At the default 15 m range only the near wall is
+# 2 m and the far one at 42 m. At the default 20 m range only the near wall is
 # in the receive window; the far one is culled by the renderer, which is what
 # the ghosts of a real basin do too.
 #
-# Walls are acoustic reflectors and Gazebo visuals; they are NOT stamped into
-# the height raster (a 2.5-D heightfield carries no vertical face) and have no
-# collision, exactly like the litter objects. See docs/sonar_model.md A9.
+# Walls are acoustic reflectors and solid Gazebo boxes (visual + collision: the
+# boat cannot drive through a quay); they are NOT stamped into the height
+# raster (a 2.5-D heightfield carries no vertical face). The litter objects,
+# by contrast, are visual-only. See docs/sonar_model.md A9 and section 11.
 world:
   seed: 42
   size: [80.0, 60.0]

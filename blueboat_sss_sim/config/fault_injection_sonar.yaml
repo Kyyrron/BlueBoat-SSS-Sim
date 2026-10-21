@@ -137,8 +137,9 @@ model:
   surface_mirror_enabled: false # also mirror across z=0. The air/water
                                 # interface reflects almost perfectly, but the
                                 # path leaves the transducer upward, so the
-                                # vertical pattern sees it at -depression and
-                                # only the sidelobe floor passes
+                                # vertical pattern sees it at -depression:
+                                # -8 dB at 20 deg up, -17 dB at 40 deg, and the
+                                # sidelobe floor beyond 50.6 deg
   surface_reflectivity: 0.9     # pressure-release interface
   # Direct wall echo (closes the former assumption A9): a quay's wet face
   # returns a bright coherent line at its own slant range and occludes the
@@ -175,17 +176,20 @@ model:
   scatterer_cell_m: 0.01      # seed-class parameter: changing it changes
                               # every image
   scatterer_seed: 0
-  # Fitted as one number with the range law: puts the water column 26 dB below
-  # the bottom return, as the corpus does across three range settings.
+  # History: the former single constant, fitted jointly with the range law,
+  # put the water column 26 dB below the bottom return (corpus, three range
+  # settings). It is now two measured levels, below.
   # MEASURED separately on the corpus at gain 4 (2026-09-02). The receiver
   # floor is the far decile of the 72-126 m recordings, -6.1 dB reported
   # (mean of dB; -3.6 dB as the linear mean this constant is); the water
   # column is the 1-3 m band, 25.3 dB reported (27.8 dB linear mean). Both
   # are `10**((level - calibration_db_offset)/10)`. The former single fitted
-  # value (6.79e-7, 38.5 dB) never reached the real floor and hid the range
+  # value (6.79e-7, 35.5 dB at the then offset of 97.2) never reached the real floor and hid the range
   # law beyond ~20 m.
   noise_floor: 3.39e-09
-  watercolumn_noise: 4.68e-06   # 40 dB under the FBR peak
+  watercolumn_noise: 4.68e-06   # 25.3 dB reported (27.8 linear); ~28 dB under the
+                                # corpus FBR peak at 6-9 m (the margin grows as
+                                # the altitude falls)
   # Radiometric/link degradations are deferred to the downstream
   # augmentation stage per the tuning request -- OFF in the base model
   # (set >0 to re-enable here):

@@ -209,7 +209,7 @@ class Wall:
     y1: float
     top_z: float = 0.0            # world z of the wall top (0 = waterline)
     reflectivity: float = 0.5     # 0..1 energy fraction returned per bounce
-    thickness: float = 0.30       # visual thickness in Gazebo [m]
+    thickness: float = 0.30       # box thickness in Gazebo, visual + collision [m]
     kind: str = "quay"            # quay | pontoon
     draft_m: float = 0.4          # pontoon only: wet depth of the floating face
     roughness_m: float = 0.003    # rms face roughness [m] (concrete ~3 mm)

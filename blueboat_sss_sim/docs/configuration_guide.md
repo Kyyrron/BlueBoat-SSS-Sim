@@ -25,7 +25,12 @@ world:
   seed: 42                # every stochastic choice derives from this
   size: [80.0, 60.0]      # m
   origin: [-40.0, -30.0]  # world xy of min corner
-  resolution: 0.10        # raster cell, m — keep ≤ half a range bin
+  resolution: 0.10        # raster cell, m — 0.10 is the validated default; the renderer
+                          # interpolates (a cell is ~6 range bins wide): it limits relief and
+                          # outline detail, not brightness
+  # Beyond the grid the sonar sees a phantom plain (deepest cell, rho 0.2) in
+  # `outside: fill` worlds (hand YAML, legacy); builder worlds are `outside: edge`
+  # (the edge cell repeated, manifest key `outside`). See sonar_model.md A13.
   limits_collision: false # true (builder worlds): four invisible
                           # collision-only border boxes; never acoustic
 
@@ -90,7 +95,7 @@ the harbour/river/beach/canal literature; parameters and bounds in
 | `sloped_plane` | depth at the area centre + a grade along a direction (floored) |
 | `dredged_channel` | navigation cut through a basin (tanh scarps) with a Gaussian spoil shoal hugging each side |
 | `marina` | pontoon rows at a pitch, deeper tanh-edged berth pockets between them, scour pits at the piles |
-| `rocky_outcrop` | seeded super-Gaussian rock heads over a base depth (positions from the terrain RNG stream — objects never move) |
+| `rocky_outcrop` | seeded super-Gaussian rock heads over a base depth (positions from the terrain RNG stream — objects never move); **height only** — the heads keep the base material (for rock tone use a rocks patch or paint, or the layered editor's `outcrops` layer, which stamps rocks) |
 | `sandbar_ripples` | periodic bar field with crests along a heading, optional sawtooth asymmetry |
 
 `beach_profile` also takes `berm_enabled` (+ `berm_distance_m`, `berm_height_m`,
@@ -358,7 +363,10 @@ stay put — that is what the World Builder's hand-placement screen does.
 
 Two asymmetries worth knowing: `material` is assigned *after* the
 reflectivity was computed from the class's own material, so give
-`reflectivity` too when the material matters acoustically; and writing
+`reflectivity` too when the material matters acoustically (the raster path
+only — a facet object ignores reflectivity; `transmission` and the surface
+roughness, which decides facet vs raster, do follow the pinned `material`
+since 2026-10-21); and writing
 `roll_deg`/`pitch_deg` at all sends the instance down the 3-D solid path
 (`rest` stops being `canonical`), so omit both for an object that should
 keep the flat 2.5-D stamp.
@@ -411,7 +419,9 @@ a settle tilt `N(0, 4°·randomness)` is added. The draw uses a
 **per-object stream** seeded from the object's id and position, so
 enabling it for one class moves no other object. Lines, blobs and
 tangles (rope, chain, anchor, debris, coils, nets) have no rest poses
-and ignore the block. Explicit instances take `roll_deg` / `pitch_deg`
+and ignore the block, and so does a class whose spec sets
+`rest_allowed=False` (the driven `mooring_pile`), which keeps its upright
+flat stamp. Explicit instances take `roll_deg` / `pitch_deg`
 verbatim. The manifest carries `roll`, `pitch`, `rest` and `rest_z`
 (additive defaults), `metadata.yaml` `roll_deg` / `pitch_deg` / `rest`,
 and `world.sdf` places the same primitive at the settled pose.
@@ -501,7 +511,8 @@ acquisition in force is the **resolved profile** (explicit
 `sonar_config:=` > a legacy bundle's frozen copy > this package's
 `config/default_sonar.yaml`), and `sss_sim_launch.py` passes the six
 values to the node explicitly, each overridable per run exactly as on the
-real system (`ros2 launch … gain_index:=-1 range_length_mm:=30000`).
+real system (`ros2 launch … gain_index:=-1 range_length_mm:=30000` — a 30 m
+diagnostic run; every survey condition keeps the 20 m default).
 `num_results` up to 1200 is fully supported end-to-end.
 
 The shipped default profile is **20 m, gain −1 (device auto), 1200 bins,
@@ -513,7 +524,7 @@ default file with one idea changed:
 | Profile | What differs | For |
 |---|---|---|
 | `config/default_sonar.yaml` | — | 20 m / 1200 bins: the field comparison acquisition (the model constants are the calibration anchor's) |
-| `config/coverage_pass_sonar.yaml` | `range_length_mm: 30000` | the 30 m coverage pass `project_synthesis.md` §8.5 reserves |
+| `config/coverage_pass_sonar.yaml` | `range_length_mm: 30000` | a 30 m **diagnostic** profile (historical name; the project's survey range is 20 m per side for every condition since 2026-10-20, `project_synthesis.md` §8.5) |
 | `config/shallow_beach_sonar.yaml` | `multipath_enabled` + `surface_mirror_enabled` | the 2026-09-07 beach regime (≈1.2 m altitude), where the bottom–surface–bottom ghost and the surface mirror land *inside* a shadow rather than beyond the swath |
 | `config/fault_injection_sonar.yaml` | the four `fault_*` knobs + `dropped_ping_prob` | exercising the downstream paths a clean simulation never takes. **A test profile** — never a calibration or comparison run |
 

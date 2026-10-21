@@ -42,7 +42,7 @@ sampled; a beach site over known sand at 0.9–1.7 m) pins sand alone —
 `sonar_model.md` A10 — so nothing here calibrates the *acoustic* response
 of any other material; the five seabed materials remain
 relative (`materials.py`). Second, the renderer's whole material spread is
-about 3.7 dB against an 18 dB range law (`.claude/TODO.md`, known
+a nominal 5.9 dB (about 3.7 dB measured in an image under the old range law) against an 18 dB range law (`.claude/TODO.md`, known
 limitations), so material layers act on the image mostly through the
 micro-relief and shadows they carry until that is re-measured over a known
 bottom.
@@ -96,9 +96,16 @@ vessels swing [32]. The `furrows` layer makes the parallel lineations
 **Texture and its sonar appearance.** Backscatter strength orders mud <
 sand < gravel < rock, roughly 10–15 dB from mud to rock at hundreds of kHz
 and the 20–30° grazing angles a hull-mounted 450 kHz side-scan works at
-[33, 34]; the pixel statistics are K-distributed with a shape parameter
-set by the facies patch size relative to the resolution cell [35]; the
-interpretation vocabulary — dark smooth mud, bright grainy gravel, rock
+[33, 34]. Real pixel statistics are heavier-tailed than fully developed
+speckle (K-distributed, with a shape parameter set by the facies patch size
+relative to the resolution cell [35]); **the simulator does not model
+that**: every material, mud to rock, gets the same fully developed Exp(1)
+intensity speckle (`sonar/noise.py`, from the coherent ground-scatterer
+field of `renderer._texture`; CV 1, correlated along range and track).
+Facies differ only in mean level (`reflectivity`), a static reflectivity
+texture (`texture_amp`, `texture_cells`) and the micro-relief that throws
+shadows (`micro_roughness_m`); per-material K shape parameters are an open
+item (`roadmap.md`). The interpretation vocabulary — dark smooth mud, bright grainy gravel, rock
 with hard shadows, lineations — is Blondel's and Lurton's [36, 37]. Hence
 material **gradients with a transition width** (`material_gradient`) and
 **patch fields with a characteristic length** (`material_patches`), and
@@ -237,7 +244,7 @@ is for.
 | canal | depth / toe silt | draft + clearance; marina 1.5 m | [22, 23] |
 | tidal flat | gradient | ~10⁻³ | [11] |
 | material gradient | backscatter order | mud < sand < gravel < rock, 10–15 dB | [33, 34] |
-| material patches | patch length | 1–10 m (seagrass), K-statistics | [12, 35] |
+| material patches | patch length | 1–10 m (seagrass); K-statistics [35] not modelled | [12, 35] |
 
 ## 7. The editing model
 
@@ -335,7 +342,7 @@ spread of ±5–8 dB: a sediment boundary resolved to a metre is a claim the
 measurement cannot carry.
 
 **The static table and its literature counterpart.** The shipped material
-table (`worldgen/materials.py`) spans 5.9 dB from seagrass to rock, where
+table (`worldgen/materials.py`) spans a nominal 5.9 dB from seagrass to rock (10·log₁₀ ρ; about 3.7 dB measured in an image under the old range law, `.claude/TODO.md`), where
 the numbers above span about 15. Those values are judgement, kept because
 every existing world was built with them, and widening them silently would
 change every world's absolute level. `config/materials_literature.yaml`

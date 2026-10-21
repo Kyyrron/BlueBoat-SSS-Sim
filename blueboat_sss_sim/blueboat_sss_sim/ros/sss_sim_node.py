@@ -16,7 +16,9 @@ Pub  ~/ground_truth/sensor    std_msgs/String (JSON)   [simulation extra]:
                             per ping cycle, the vehicle pose and both
                             transducer poses the ping was rendered from
 Sub  ~/ping/enable          std_msgs/Bool   true=start, false=stop
-Sub  <odom_topic>           nav_msgs/Odometry (default /blueboat/odom)
+Sub  <odom_topic>           nav_msgs/Odometry (default /blueboat/odom); the
+                            fallback pose -- optional while the 100 Hz
+                            <pose_topic> is flowing
 
 Run-dependent parameters (identical names/semantics to the real node)
 ----------------------------------------------------------------------
@@ -291,9 +293,10 @@ class SideScanSonarSimNode(Node):
         self._hr.update(st if st > 0.0 else self._now(),
                         Pose3D(tr.x, tr.y, tr.z, roll, pitch, yaw))
 
-    def _ping_pose(self, t_now: float) -> tuple[Pose3D, float]:
+    def _ping_pose(self, t_now: float) -> Optional[tuple[Pose3D, float]]:
         """The vehicle pose at the ping time and the source's age [s]:
-        the 100 Hz model pose when it is fresh, else the odometry."""
+        the 100 Hz model pose when it is fresh, else the odometry; None
+        when neither exists (no ping that cycle)."""
         hr = self._hr.state()
         if hr is not None and t_now - hr[3] < 0.1:
             pose, v_body, w_body, t_hr = hr
@@ -302,8 +305,9 @@ class SideScanSonarSimNode(Node):
             if not self._predict:
                 return pose, age
             return predict_pose(pose, v_body, w_body, age), age
+        if self._pose is None:
+            return None
         self._pose_source = "odom"
-        assert self._pose is not None
         age = t_now - self._pose_t
         if not self._predict:
             return self._pose, age
@@ -311,11 +315,14 @@ class SideScanSonarSimNode(Node):
         return predict_pose(self._pose, v_body, w_body, age), age
 
     def _tick(self) -> None:
-        if self._pose is None or self._renderer is None or self._acq is None:
+        if self._renderer is None or self._acq is None:
             return
         t_now = self._now()
+        got = self._ping_pose(t_now)
+        if got is None:
+            return
+        pose, age = got
         t_sim = t_now - (self._t0 or 0.0)
-        pose, age = self._ping_pose(t_now)
         gt_payload = []
         sensors: dict = {}
         for ch in self._channels.values():

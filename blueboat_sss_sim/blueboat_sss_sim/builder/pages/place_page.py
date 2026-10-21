@@ -32,9 +32,11 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QMessageBox, QPushButton, QScrollArea,
                                QSpinBox, QVBoxLayout, QWidget)
 
+from ...core.types import PlacedObject
 from ...worldgen.materials import MaterialLibrary
-from ...worldgen.objects import (CATALOG, make_explicit_instances,
-                                 rest_poses, typical_instance)
+from ...worldgen.objects import (CATALOG, is_facet_object,
+                                 make_explicit_instances, rest_poses,
+                                 typical_instance)
 from ..forms import SchemaForm
 from ..layout import ToolBar, split
 from ..layers.commands import SnapshotCommand
@@ -66,7 +68,9 @@ class ObjectEditDialog(QDialog):
          "Size across the long axis; a round class keeps it equal to the "
          "length."),
         ("proud_height", "Height [m]", 0.0, 20.0, 3,
-         "How far the object stands above the seabed before burial."),
+         "How far the object stands above the seabed before burial. For a "
+         "lying cylinder or bottle the scattering solid is only as high as "
+         "it is wide: a larger height lengthens the shadow, not the echo."),
         ("burial", "Burial", 0.0, 0.95, 3,
          "Fraction sunk into the sediment; 0 sits proud, 0.95 is nearly "
          "gone."),
@@ -89,6 +93,7 @@ class ObjectEditDialog(QDialog):
         self._item = dict(item)
         col = QVBoxLayout(self)
         form = QFormLayout()
+        self._form = form
         self._spins: dict[str, QDoubleSpinBox] = {}
         values = dict(item)
         # Wrapped into the spin box's range: a heading drawn as 200 deg is
@@ -113,11 +118,49 @@ class ObjectEditDialog(QDialog):
             "an explicit instance keeps whatever reflectivity is pinned.")
         form.addRow("Material", self._material)
         col.addLayout(form)
+        # The Reflectivity row only means something to the raster path: a
+        # smooth solid is scattered by the facet layer from its material's
+        # impedance and its geometry (NC #17). Grey it out then. The slots
+        # only toggle widgets -- no scene rebuild, no modal.
+        for key in ("proud_height", "burial", "roll_deg", "pitch_deg"):
+            self._spins[key].valueChanged.connect(self._sync_reflectivity)
+        self._material.currentTextChanged.connect(self._sync_reflectivity)
+        self._sync_reflectivity()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                                    | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         col.addWidget(buttons)
+
+    def _is_facet(self) -> bool:
+        """Would the object, as the dialog now describes it, be scattered by
+        the facet layer?"""
+        sp = self._spins
+        roll = float(np.radians(sp["roll_deg"].value()))
+        pitch = float(np.radians(sp["pitch_deg"].value()))
+        tilted = abs(roll) > 1e-9 or abs(pitch) > 1e-9
+        o = PlacedObject(
+            object_id=0, type=str(self._item["type"]), x=0.0, y=0.0, yaw=0.0,
+            length=sp["length"].value(), width=sp["width"].value(),
+            proud_height=sp["proud_height"].value(),
+            burial=sp["burial"].value(), reflectivity=0.5,
+            material=self._material.currentText(), roll=roll, pitch=pitch,
+            rest="explicit" if tilted else "canonical")
+        return is_facet_object(o)
+
+    def _sync_reflectivity(self, *_args) -> None:
+        w = self._spins["reflectivity"]
+        facet = self._is_facet()
+        w.setEnabled(not facet)
+        tip = ("Not read for this object: a smooth material on a solid "
+               "primitive is rendered by the facet layer from the "
+               "material's impedance and the geometry (NC #17), never from "
+               "a brightness. The value is kept in the entry."
+               if facet else "Acoustic reflection strength, 0-1.")
+        w.setToolTip(tip)
+        label = self._form.labelForField(w)
+        if label is not None:
+            label.setToolTip(tip)
 
     def item(self) -> dict:
         """The edited entry, ready for ``objects.explicit``."""

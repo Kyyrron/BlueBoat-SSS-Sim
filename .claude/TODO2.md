@@ -52,7 +52,7 @@ relevant doc (the wall and sea numbers belong in `docs/sonar_model.md` §11 and
 | B5 | Leave the live view running 10 min (Record OFF), watch `top` | CPU steady (< 50 % of one core), RSS flat once the waterfall cap is reached (≈ 100 k rows × 1200 columns ≈ 480 MB + pixmaps); no "display N pings behind" status at rest |
 | B6 | Drag the Contrast slider while streaming | one re-render per drag, no multi-second freeze |
 | B7 | Record ON for 2 min, then OFF | session folder complete; no 50 ms hitches every 6 s (seabed images now save on a pool thread) |
-| B8 | 30 m / 1200-bin profile (`range_length_mm:=30000 num_results:=1200`) for 5 min | same as B5; the waterfall keeps ~50 k rows |
+| B8 | 30 m / 1200-bin diagnostic profile (`range_length_mm:=30000 num_results:=1200`) for 5 min | same as B5; the waterfall keeps ~50 k rows |
 
 ## C. Sea state (current + waves + wake groups), 30 min live
 

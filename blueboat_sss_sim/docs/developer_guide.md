@@ -242,7 +242,8 @@ property: one `_WALL_SCHEMA` row (with help), one `Wall` field.
 
 ### Give an object class 3-D rest poses
 `ObjectSpec.solid()` maps the class's mask to a `worldgen/solids.Solid`
-by mask name; a new primitive needs a `line_interval` branch (the
+by mask name (set `rest_allowed=False` on a class fixed in place, like the
+driven `mooring_pile`, so it never gets rest poses); a new primitive needs a `line_interval` branch (the
 vertical-ray interval through the solid) and a `stable_poses` entry. The
 stamp path (`objects._rasterize_solid`), the SDF pose and the metadata
 follow automatically.
@@ -253,7 +254,7 @@ All noise/physics knobs are in the sonar YAML (`configuration_guide.md
 
 ## 4. Testing
 
-* `python3 -m test.smoke_test` — the offline gate (434 checks: geo →
+* `python3 -m test.smoke_test` — the offline gate (439 checks: geo →
   world folder → render → encode → decode → metrics → calibration),
   artifacts in `/tmp/blueboat_sss_smoke/`. Run it after any change; it
   needs only numpy/scipy/yaml/PIL.
@@ -301,7 +302,8 @@ full-resolution raster).
   sonar node instance, namespace it or the keys collide downstream.
 * `dropped_ping_prob` advances the encoder's counter on drops
   (hardware-faithful) — don't "fix" that.
-* `world.resolution` coarser than ~half a range bin causes visible
-  stair-stepping in shadows.
+* `world.resolution` coarser than ~0.10–0.20 m quantises shadow edges and
+  object outlines to the cell (brightness is resolution-independent to
+  ~0.2 dB: `sonar_model.md` A6, smoke `[8]`).
 * Launch files follow the project's `simple_launch` style; keep new ones
   consistent.

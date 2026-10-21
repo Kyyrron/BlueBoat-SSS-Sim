@@ -28,6 +28,44 @@ pairing the recording with a path anchored elsewhere — the message now
 names both places, but only a live pass says whether that is enough for
 the operator.
 
+### [P2] Gazebo gate: intermittent pose-delivery stalls fail "fresh pose" (2026-10-20)
+On 2026-10-20 the gate's inputs had been lost (see `docs/sea_state_validation.md` §2, the
+2026-10-20 note) and were rebuilt. Two full campaigns then each failed **one** check, both
+times in *waves*: "a fresh pose under every ping".
+- 5 m world: 24 / 25. 0.67 % of pings over 60 ms (limit 0.1 %), worst 320 ms.
+- 1.5 m world: 23 / 24. 0.08 % over 60 ms, worst 180 ms; the sea node also saw 120 ms.
+
+`waves` re-run alone on the 5 m world passed: 0.00 %, worst 10 ms. 2026-10-09 passed in all
+eight scenarios. **Not reproducible, not a model change.** Measured, all on
+`2026-10-20_5m/waves`:
+- **The renderer is not the cause.** Re-rendered offline at the run's 5227 ping poses, a
+  two-side tick takes median 17.7 ms, max 31.6 ms, never near the 50 ms period. The
+  late pings' own ticks took 15–21 ms.
+- **Gazebo did not stall.** RTF was 1.000. `/blueboat/odom` reached the bag recorder every
+  50 ms (stamp and wall) straight through each late ping.
+- The late pings come in bursts whose age grows 50 ms per ping (170 → 320 ms). A 310 ms age
+  means `sss_sim_node` held neither a fresh 100 Hz pose nor a fresh odometry message
+  (`_ping_pose` falls back to odom past 100 ms), while its sim clock and timer ran on. So
+  both pose subscriptions to that node stopped being delivered for ~0.3 s.
+
+A second session ran the offline smoke suites on this machine while these campaigns were live.
+Those suites put CPU load on the machine but no DDS traffic (they are ROS-free). Whether they
+overlapped the two failing *waves* runs, or the clean re-run, was not established. CPU
+contention is therefore a candidate too, and the next campaign should run with nothing else
+on the machine.
+
+Candidate, **unproven**: reliable-QoS head-of-line blocking in the default RMW (Fast DDS,
+no profile). One lost sample holds back the ones behind it until repaired. The pose
+subscription (`/sim/sea_state/boat_pose`, depth 50, simulation-only) could go BEST_EFFORT
+(a stale pose is worthless; a RELIABLE publisher stays compatible). `/blueboat/odom` is a
+cross-module contract (CM-1/CM-4), not to be touched for this.
+
+Next step: record `/sim/sea_state/boat_pose` in the gate's bag (`gazebo_sea_test.py`'s topic
+list). Its receive times against its stamps tell delivery stalls from publisher stalls.
+Run campaigns until one fails; change the QoS only if the bag shows delivery stalls. Until
+then, a lone "fresh pose" failure with every other check passing is this item, not a
+regression.
+
 ### [x] Live Gazebo pass with the sea state — done 2026-10-08 (world-folder path)
 `test/gazebo_sea_test.py` ran the null, impulse and motion tests and the
 sonar consequences in Gazebo on `~/worlds/sea_validation/flat_{5p0m,1p5m}`
@@ -71,7 +109,7 @@ map is good to 1–2 dB; its *absolute* level carries the calibration's
 renders about the survey median as a reference material rather than as
 absolute values. Two things a capture over a known bottom would settle:
 the reference material itself, and whether the fixed material table
-(sand 0.55, mud 0.30, gravel 0.70, rocks 0.85 — a ~3.7 dB spread) should
+(sand 0.55, mud 0.30, gravel 0.70, rocks 0.85, seagrass 0.22 — a nominal 5.9 dB spread, ~3.7 dB measured in-image under the old range law) should
 be re-anchored to the literature contrasts the layer classifies with
 (mud −5, gravel +3, rock +5…8 dB about sand at 450 kHz, [33] §12.1,
 [41]). Decision 2026-09-16: the table stays, the rendered ceiling opens
@@ -97,7 +135,7 @@ gate that would move any of the three.
 
 ### [P2] Curved walls: Gazebo shows chords
 A bent wall is flattened to ≤ 0.1 m sagitta chords; in Gazebo they are
-that many boxes with slight overlaps at the joints (visual only). The
+that many boxes with slight overlaps at the joints (cosmetic; each chord box carries visual and collision). The
 depth barriers and the sonar see the same chords, so nothing disagrees.
 
 ### [P2] Objects v3: lattice classes on their side
@@ -126,7 +164,9 @@ way. Swap to a real `<cone>` when the workspace moves past Harmonic.
 ### [P2] EPS reflectivity is a judgement call
 `eps` ships at 0.80 (air-backed closed-cell foam reflects strongly — the
 water/air impedance step is near-total), which is counter-intuitive for
-"foam" and unmeasured. Flag from a field capture of an EPS fish box.
+"foam" and unmeasured. Since NC #17 it is read only by non-facet shapes
+(lattice classes); on a solid primitive eps renders at |R| = 1 (air
+backing). No class defaults to it; it is kept for the planned float/buoy class. Flag from a field capture of an EPS fish box.
 
 ### [P2] Depth flood fill ignores wall height
 Every wall blocks the nearest-value extension regardless of `top_z` — a
@@ -173,7 +213,7 @@ that re-interpolates its soundings in (s, n) would close this; the
 
 The seabed editor's material layers (regions, gradients, patches, belts,
 the reflectivity gain) render through the same five materials whose whole
-spread is ~3.7 dB against the 18 dB range law (known limitations below),
+nominal spread is 5.9 dB (~3.7 dB measured in-image, old range law) against the 18 dB range law (known limitations below),
 so on the image a material edit reads mainly through the micro-relief and
 shadows it carries. Re-measuring the material constants over a known
 bottom (the [P2] item below) is what would make the gradient a
@@ -271,22 +311,27 @@ envelope` and its LOCAL_POSITION_NED twin should stamp the autopilot's
 `time_boot_ms`, CM-3); until then every processor recording pays a
 ≤ 5 cm placement error.
 
-### [P1] Transducer lateral offset disagrees across modules
-The simulator mounts transducers at `mount_y_abs_m: 0.20`
-(`sonar/config.py`, `config/default_sonar.yaml`); `sss_processor_node.py`
-still has all four of `TRANSDUCER_X_OFFSET_M`, `TRANSDUCER_Y_OFFSET_PORT_M`,
-`TRANSDUCER_Y_OFFSET_STBD_M` and `TRANSDUCER_SUBMERSION_M` at `0.0` with their
-"TODO: measure on the physical BlueBoat" comments intact. Until both use the
-same numbers, slant-range-corrected geometry from simulated data carries a
-systematic across-track bias.
+### [x] Transducer lateral offset agreed at 0.285 m — closed 2026-10-12/13
+The disagreement this item recorded (simulator `mount_y_abs_m: 0.20`,
+processor `0.0`) is gone. Both now use **0.285 m**, half the BR-101447 hull
+spacing (570 mm / 2), the BlueBoat drawing rather than a tape measurement:
+- every profile in `config/*_sonar.yaml` (`default_sonar.yaml:36`; edited 2026-10-12);
+- `TRANSDUCER_Y_OFFSET_PORT_M` / `_STBD_M` in `sss_processor_node.py` (SSS `994a74b`,
+  2026-10-13), mirrored in the GCS's `core/svlog.py`.
 
-**Needs a physical measurement, and there is no second source for it**:
-`blueboat_description` ships a `sonar_snippets.xacro` but never instantiates it
-on the BlueBoat model, so the URDF does not carry the geometry either. Measure
-on the hull, then set both repositories (the `BlueBoat-SSS` half is that
-repo's change — CM-3) and record who measured it, on which hull, from which
-reference point. Do not pick a number to make the two agree: an
-agreed-but-wrong offset is worse than a recorded disagreement.
+The smoke test's render fixture `test/fixtures/render_baseline_v1.npz` was rebaselined
+for this change on 2026-10-19. It had been frozen at 0.20, and re-rendering at 0.20
+reproduces it bit for bit. The pontoon-crossing check now places the boat from the
+profile's mount, so its transducer stays 0.3 m from the line.
+
+### [P2] Transducer fore/aft offset and submersion are not measured
+`TRANSDUCER_X_OFFSET_M` = `mount_x_m` = 0.0 (unmeasured, amidships assumed), and
+`TRANSDUCER_SUBMERSION_M` = `sensor_depth_m` = 0.15 m (an estimate). The two modules
+agree, but neither number is measured. `blueboat_description` ships a
+`sonar_snippets.xacro` but never instantiates it, so the URDF carries no geometry.
+
+Measure on the hull, then set both repositories (the `BlueBoat-SSS` half is that repo's
+change, CM-3). Record who measured it, on which hull, from which reference point.
 
 ### [x] The simulator never exercised the downstream degradation paths — closed 2026-09-18
 CM-2 promises the real stack runs unmodified against simulated data, and a
@@ -513,7 +558,7 @@ shell, 2 mm for form-finished concrete — is sized from manufacture. It is
 what decides whether a target images as a glint or a faint patch, so it is
 stated in one table rather than spread through the material entries. A
 capture of two known objects of different finish at one grazing angle would
-anchor it.
+anchor it. `brickclay` (1 mm) is the entry nearest the 1.6 mm line: judged, on the facet side (smoke `[14]`).
 
 ### [P2] The beach's shore needs a swash zone, not a model change
 
@@ -602,7 +647,7 @@ lawnmower, 19 354 pings, mosaic cells 3.4 M):
   by a wide margin.** Intensity falls **18.5 dB** from just past the bottom
   return to the 12–15 m far edge (measured on the fitted range law at 3.8 m
   mean altitude), against a **3.67 dB** total spread between all five
-  materials. Sand→mud is ~0.7 dB and seagrass sits 0.24 dB from sand, so the
+  materials (the table's nominal spread is 5.9 dB). Sand→mud is ~0.7 dB and seagrass sits 0.24 dB from sand, so the
   "mud/seagrass image 5–10 dB darker" reading does not hold; the only material
   that separates is **rocks, ~2 dB brighter**. The gradient is the device's own
   pre-TVG range loss, measured against the corpus — dark far-range bands are

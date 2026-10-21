@@ -111,6 +111,10 @@ def object_patches(o: PlacedObject, seabed, patch_m: float,
         R = rot_z(o.yaw)
         z0 = float(seabed(np.array([o.x]), np.array([o.y]))[0])
         e_z = float(np.abs(R @ sol.extent)[2])
+        # The solid never floats and is cut by the seabed when lower: its top
+        # is min(effective_height, diameter) over a lying cylinder/capsule
+        # (pipe, can, bottle ...), while the raster occluder is
+        # effective_height tall (sonar_model.md section 12).
         top = z0 + o.effective_height
         centre = np.array([o.x, o.y, min(top - e_z, z0 + e_z)])
     w = p.transformed(R, centre - R @ sol.centre_offset)

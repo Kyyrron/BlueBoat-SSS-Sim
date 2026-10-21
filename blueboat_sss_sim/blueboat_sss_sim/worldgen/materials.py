@@ -3,7 +3,9 @@
 Values are *relative* acoustic parameters tuned for a 450 kHz side-scan
 regime; they parameterise the backscatter model in
 :mod:`blueboat_sss_sim.sonar.acoustics`, not a physical scattering theory.
-All defaults can be overridden from ``config/materials.yaml``.
+Defaults are overridden by passing a ``materials:`` mapping inline in the
+world YAML (``config/materials.yaml`` and ``materials_literature.yaml`` are
+examples to copy entries from; nothing loads them by name).
 """
 
 from __future__ import annotations
@@ -52,7 +54,7 @@ class Material:
             ``sonar/multipath.bounce_weight`` already applies to a wall).
             What is coherent leaves in the mirror direction and does not
             come back; only ``1 - C`` scatters diffusely. At 450 kHz
-            (k = 1890 rad/m) every seabed material is far past the limit --
+            (k = 1885 rad/m) every seabed material is far past the limit --
             ``2 k sigma`` is 15 for the smoothest of them, mud -- so
             ``C = 0`` and the split is exactly a no-op for the seabed. It
             is manufactured surfaces that are smooth on this scale, and
@@ -104,7 +106,7 @@ _SEABED_DEFAULTS: dict[str, Material] = {
 }
 
 #: Surface RMS height above which the coherent (mirror) fraction is zero to
-#: float precision at 450 kHz: ``exp(-(2 k sigma)^2)`` with k = 1890 rad/m is
+#: float precision at 450 kHz: ``exp(-(2 k sigma)^2)`` with k = 1885 rad/m is
 #: under 1e-16 by sigma = 1.6 mm. Every seabed material and every rough
 #: object material sits past it, so the coherent/incoherent split is exactly
 #: a no-op for them and only manufactured surfaces feel it.
@@ -128,7 +130,9 @@ _ROUGHNESS_M: dict[str, float] = {
     "plastic": 1.0e-4,     # injection-moulded
     "metal": 5.0e-5,       # rolled sheet
     "concrete": 2.0e-3,    # form-finished -- acoustically rough
-    "brickclay": 1.0e-3,
+    "brickclay": 1.0e-3,   # fired clay: just under the limit -- C = 6e-7 at
+                           # normal incidence, 0.5 at 77 deg off the normal;
+                           # a FACET object (smoke [14])
     "rope": 3.0e-3,        # fibre -- acoustically rough
     "generic": 2.0e-3,     # the rough default: keeps an unstated material
                            # behaving exactly as it did before the split

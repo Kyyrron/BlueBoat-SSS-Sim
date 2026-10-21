@@ -343,7 +343,11 @@ def _generate_with_base(cfg: WorldConfig, raw: dict[str, Any],
         **rasters.scene_kwargs(), material_id=terrain.material_id,
         material_names=terrain.material_names, objects=objects,
         walls=list(cfg.walls), seed=cfg.seed, config_snapshot=dict(raw),
-        geo_anchor=cfg.geo)
+        geo_anchor=cfg.geo,
+        # The Builder's worlds continue their edge cells outward instead of
+        # the historical phantom plain (generate_scene keeps "fill": the
+        # render fixture and the offline gates are frozen on it).
+        outside="edge")
     return scene, pre_stamp
 
 

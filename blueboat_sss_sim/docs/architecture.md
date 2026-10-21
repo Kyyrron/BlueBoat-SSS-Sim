@@ -160,7 +160,7 @@ mission bundles still load everywhere (their frozen `sonar.yaml` /
 | `objects.classes` / `objects.explicit` | world YAML / `BuilderState` | per-class scattering with clustering, or verbatim placement — matched pairs, RTK clusters, and the World Builder's hand-placed objects (`BuilderState.objects.placed` pins the scatter into the same form) |
 | plugin prefix (`gz` default / `ignition`) | `sdf_writer.py` | target Gazebo Fortress instead of Garden/Harmonic |
 | `LayerSpec` registry | `worldgen/depth/layers/` | add a seabed layer kind — fn + schema + geometry + channels + `reference`; the menu, the property form, the compositor and the bake pick it up. A kind whose parameters invert what its blend mode means can override the blend on its own result (`LayerOutput.blend`, as a dredged basin with a floor above the bed does) |
-| sonar profiles | `config/*_sonar.yaml` | one file per idea: the calibration anchor, the coverage pass, the shallow-beach paths, the fault-injection knobs. A profile carries the whole model, so a legacy frozen copy renders with the constants it was frozen with |
+| sonar profiles | `config/*_sonar.yaml` | one file per idea: the calibration anchor, the 30 m diagnostic profile (`coverage_pass_sonar`, historical name), the shallow-beach paths, the fault-injection knobs. A profile carries the whole model, so a legacy frozen copy renders with the constants it was frozen with |
 
 ## 6. Why not a Gazebo sensor plugin? (decision record)
 

@@ -190,6 +190,10 @@ class ObjectSpec:
     #: Class-specific GUI knobs, SchemaForm rows (key, label, kind, default,
     #: min, max); the builder renders them automatically.
     params_schema: tuple = ()
+    #: False for a class fixed in place (a driven pile): it has no 3-D rest
+    #: poses and keeps its upright flat stamp, whatever the resting-pose
+    #: control says.
+    rest_allowed: bool = True
 
     def solid(self, o: PlacedObject) -> Solid | None:
         """The class's 3-D primitive in its canonical frame, or None for
@@ -298,6 +302,7 @@ CATALOG: dict[str, ObjectSpec] = {
                                   "concrete", (0.0, 0.0), True,
                                   "cylinder_upright",
                                   label="mooring pile (driven)",
+                                  rest_allowed=False,
                                   params_schema=(
                                       ("diameter_m", "Diameter [m]", "float",
                                        0.4, 0.1, 1.5,
@@ -475,7 +480,9 @@ def _solid_for(spec: ObjectSpec, o: PlacedObject) -> Solid | None:
 
 def rest_poses(spec: ObjectSpec) -> tuple:
     """Stable rest poses of the class's typical instance (empty when the
-    class has no 3-D solid)."""
+    class has no 3-D solid or is fixed in place)."""
+    if not spec.rest_allowed:
+        return ()
     sol = spec.solid(typical_instance(spec))
     return stable_poses(sol) if sol is not None else ()
 
@@ -483,6 +490,8 @@ def rest_poses(spec: ObjectSpec) -> tuple:
 def rest_poses_text(spec: ObjectSpec) -> str:
     """One line for the Info dialog: how the class can lie on the seabed."""
     poses = rest_poses(spec)
+    if not spec.rest_allowed:
+        return "fixed upright (driven into the bed): no 3-D rest poses"
     if not poses:
         return "no 3-D rest poses (drawn flat on the seabed)"
     tot = sum(p.weight for p in poses) or 1.0
@@ -505,9 +514,11 @@ def draw_rest(spec: ObjectSpec, o: PlacedObject, randomness: float) -> None:
     else a draw from the class's stable poses by weight; on top, a settle
     tilt ``N(0, 4 deg * randomness)`` about both horizontal axes. The pose
     is expressed as roll/pitch of the canonical class frame; ``rest`` names
-    it (``standing``, ``lying``, ``face:+x`` ...). Classes without a solid
-    are left untouched.
+    it (``standing``, ``lying``, ``face:+x`` ...). Classes without a solid,
+    or fixed in place (``rest_allowed=False``), are left untouched.
     """
+    if not spec.rest_allowed:
+        return
     sol = spec.solid(o)
     if sol is None:
         return
@@ -908,11 +919,15 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
                            if k != "fill_fraction"}
         if "material" in item:
             inst.material = str(item["material"])
-        # The shell follows the material (a pinned entry that names one gets
-        # that material's transmission, not the class default) and the
-        # instance's construction.
-        inst.transmission = _instance_transmission(
-            materials.get(inst.material).transmission, inst.params)
+        # The shell and the surface follow the material (a pinned entry that
+        # names one gets that material's transmission and roughness, not the
+        # class default's -- roughness decides facet vs raster, NC #17) and
+        # the instance's construction. Reflectivity does not follow: it is
+        # only drawn, or pinned verbatim (see the configuration guide).
+        _mat = materials.get(inst.material)
+        inst.transmission = _instance_transmission(_mat.transmission,
+                                                   inst.params)
+        inst.roughness_m = float(max(surface_roughness_m(_mat), 0.0))
         if spec.round_footprint and "length" in item and "width" not in item:
             inst.width = inst.length
         # Verbatim 3-D rest: roll/pitch in degrees of the canonical frame.
@@ -1142,11 +1157,13 @@ def is_facet_object(o: PlacedObject) -> bool:
     **smooth** material (RMS surface height under
     ``COHERENT_ROUGHNESS_LIMIT_M`` -- a mirror at 450 kHz, where Lambert's
     law does not hold) on a **solid primitive** the layer can tessellate,
-    proud of the seabed. Everything else -- rough materials (concrete,
-    brick, rope, tyre tread), aggregates of many small members (the lattice
+    proud of the seabed. Everything else -- rough materials (concrete, rope,
+    tyre tread, generic), aggregates of many small members (the lattice
     classes, rope, chain, anchor, debris, coils) and fully buried objects --
     stays on the raster's Lambert path, which is the right physics for a
-    wavelength-rough scatterer.
+    wavelength-rough scatterer. Fired brick (1 mm) is on the smooth side of
+    the limit: its coherent fraction is 6e-7 at normal incidence but 0.5 at
+    77 deg off the normal, so it is a facet object (smoke [14]).
     """
     spec = CATALOG.get(o.type)
     if spec is None or spec.fill_fraction_range is not None:
@@ -1271,7 +1288,10 @@ def placed_to_explicit(o: PlacedObject) -> dict[str, Any]:
     in the RNG stream and a world rebuilt from the pinned list is
     object-for-object identical to the scattered one. ``object_id`` is
     positional and ``rest_z`` is recomputed by the rasteriser from the
-    terrain, so neither is stored.
+    terrain, so neither is stored. ``object_id`` also seeds the masks of
+    rope, chain, debris, the coils and the lattice classes: deleting or
+    reordering a pinned object re-draws the wiggle, outline or skeleton of
+    every later such object (never its size, burial or pose).
 
     ``roll_deg`` / ``pitch_deg`` are written **only** for an object that
     actually rested: writing them at all sends the instance down the 3-D

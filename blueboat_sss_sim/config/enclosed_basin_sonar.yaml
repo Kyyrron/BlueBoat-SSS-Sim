@@ -80,7 +80,7 @@ model:
   surface_mirror_enabled: false   # the direct-path calibration is anchored
                                   # without it; enable to add the Lloyd-mirror
                                   # image, which the vertical pattern already
-                                  # attenuates to the sidelobe floor
+                                  # attenuates (the sidelobe floor beyond 50.6 deg up)
   surface_reflectivity: 0.9
   ghost_beam_lines: 1
 

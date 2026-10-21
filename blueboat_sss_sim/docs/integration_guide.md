@@ -172,7 +172,8 @@ ros2 launch blueboat_sss_sim sss_sim_launch.py world_dir:=$HOME/worlds/<p>/<w>
 would. `sonar_config:=` names a different acquisition profile (default:
 the package `config/default_sonar.yaml`; a legacy bundle's frozen
 `sonar.yaml` wins when present); the six device parameters remain
-individually overridable (`range_length_mm:=30000 gain_index:=-1`).
+individually overridable (`gain_index:=-1`; a `range_length_mm:=30000` override
+is a diagnostic — surveys keep the 20 m default).
 
 ## 8. Measuring a run
 
@@ -206,7 +207,7 @@ in simulation that comes from `mavros_shim_node` (on by default).
 ## 9. Verifying an install
 
 `python3 -m test.smoke_test` from the package source root runs the whole
-ROS-free pipeline (434 checks — 431 + one visible SKIP without ROS; geo → world folder → render → encode →
+ROS-free pipeline (439 checks — 436 + one visible SKIP without ROS; geo → world folder → render → encode →
 decode → metrics → calibration) and writes artifacts to
 `/tmp/blueboat_sss_smoke/`. `QT_QPA_PLATFORM=offscreen python3 -m
 test.gui_smoke` exercises the GUI headless.

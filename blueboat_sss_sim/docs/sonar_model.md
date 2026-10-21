@@ -8,7 +8,7 @@ is deliberately not, and which parameter controls what. Implementation:
 
 For each ping and each side, the transducer pose is the boat's pose **at
 the ping time** (Gazebo's per-step model pose on `/sim/sea_state/boat_pose`
-since 2026-10-09, `/blueboat/odom` only as the fallback; the last sample
+since 2026-10-09, `/blueboat/odom` only as the fallback — odometry is not required while the 100 Hz pose flows; the last sample
 propagated by its own rates, `sss_sim_node` `predict_pose`, since
 2026-10-08 — §4): the
 body-frame lever arm (`mount_x_m`, ±`mount_y_abs_m`, −`sensor_depth_m`)
@@ -78,7 +78,7 @@ Per insonified sample, echo power is the product of:
 |---|---|---|
 | Backscatter | `ρ · cos(θᵢ)^p`, one global `p` — a **single-power (Lommel–Seeliger-like) law**, not Lambert's `cos²`. It was called "Lambert's law proper" here until 2026-09-18, which was simply wrong: `p` is fitted, and the two-altitude fit measures it at **1.0** over sand | material `reflectivity`, `lambert_exponent` (global; the per-material `lambert_exp` was dead code and is gone) |
 | Specular lobe | `S · (0.5+0.5ρ) · exp(−θₙ²/2σ²)`, θₙ = angle from the surface normal — dominates at/near nadir and produces the bright **first bottom return** that downstream FBR / bottom tracking locks onto. **S is 12 since 2026-09-18** (was 30), which is what puts the reported peak's *altitude slope* on the device's; it still clears the +8 dB threshold NC #4 gates. Rendered as a **separate component** from the diffuse field because its fluctuation statistics differ (§5) **and because it spreads differently**: a coherent reflection is the field of an image source over the folded path, `specular_spreading_exponent` (2.0), against the diffuse field's two-way `r⁻⁴`. Sharing one law made the FBR fall 20–27 dB per decade of altitude where the device falls 11.3 | `specular_strength` (S), `specular_width_deg` (σ), `specular_looks`, `specular_spreading_exponent` |
-| Vertical beam pattern | Gaussian in depression angle, centered on `beam_tilt_deg` + roll toward that side, FWHM = `vertical_aperture_deg` (50°, the Omniscan 450 spec beam height), floored at `beam_sidelobe_floor` (real sidelobes; without the floor, near-nadir rays ~70° off-axis at shallow altitudes would be attenuated below the water-column noise and the FBR would vanish) | mounting section |
+| Vertical beam pattern | Gaussian in depression angle, centered on `beam_tilt_deg` + roll toward that side, FWHM = `vertical_aperture_deg` (50°, the Omniscan 450 spec beam height), floored at `beam_sidelobe_floor` (real sidelobes). At the shipped geometry the nadir ray is 70° off-axis and the Gaussian tail alone gives 0.00436 (−23.6 dB), so the floor does not bind for a downward ray at level attitude; it takes over when the fan is rolled up by more than 0.55°, when the tilt is reduced or the aperture narrowed, and for upward (surface-image) paths beyond 50.6°. Without it the FBR would sink below the water-column noise in those cases | mounting section |
 | Residual range response | `(10^(−α·2R/10) / R^k)^(1−c)` — two-way absorption `α` and two-way spreading `k` (4.0 = `r⁻⁴`), partially undone by the device's TVG, fraction `c` (**0.30 since 2026-09-18**, measured on two altitudes; it was 0 on the reading that the reported stream is pre-TVG, which one altitude cannot tell apart from a steeper spreading law). The coherent channel uses the same TVG curve over its own loss | `absorption_db_per_m`, `spreading_exponent`, `tvg_compensation`, `specular_spreading_exponent` |
 | Along-track footprint | Gaussian of width `max(r·θ, array_length_m)/2.355` — the beam, floored by the aperture. `array_length_m` is **0**: the corpus says the device focuses its near field (§6) | `horizontal_aperture_deg`, `array_length_m`, `alongtrack_beam_lines` |
 
@@ -195,8 +195,8 @@ symmetric port/starboard along-track distortion of a pitching platform
 (Cobra, Oppenheim & Jaffe 1992), implemented as one refinement pass of the
 ground line in `_ping_geometry`; zero pitch is bit-identical. **The mount
 lever arm follows the attitude** (2026-10-08): a 10° roll lifts one
-transducer and dips the other by `mount_y·sin(roll)` ≈ 35 mm on the
-±0.20 m mount (the earlier "3 mm" was the horizontal term only), and pitch
+transducer and dips the other by `mount_y·sin(roll)` ≈ 49.5 mm on the
+±0.285 m mount (the earlier "3 mm" was the horizontal term only), and pitch
 swings the transducer `sensor_depth·sin(pitch)` along-track — both change
 the slant geometry of that ping. **Yaw** turns the fan, so the ground a
 ping images at range r moves `r·sin(Δψ)` along-track, in opposite
@@ -259,8 +259,11 @@ Applied in order, all configurable:
 2. **Water-column noise** — volume reverberation inside the nadir gap
    (`watercolumn_noise`, **4.68 × 10⁻⁶**). **Measured** (2026-09-02): the
    1–3 m band of the gain-4 corpus pings reads 25.3 dB reported (mean of
-   dB; 27.8 dB as a linear mean, which the constant is), 40 dB under the
-   FBR peak, so downstream bottom tracking locks with margin.
+   dB; 27.8 dB as a linear mean, which the constant is). It is a fixed
+   absolute level, so its margin under the FBR peak depends on altitude:
+   about 28 dB on the corpus at 6–9 m, about 43 dB at the smoke fixture's
+   3.5 m, growing as the altitude falls — enough for downstream bottom
+   tracking to lock.
 3. **Receiver noise floor** — additive everywhere (`noise_floor`,
    **3.39 × 10⁻⁹**). **Measured** separately: the far decile of the gain-4
    pings of the 72–126 m recordings, where nothing but noise is left, reads
@@ -289,13 +292,13 @@ Applied in order, all configurable:
    return on files that never reached the receiver floor. That value hid
    the range law beyond ~20 m: the simulated far range sat flat on a floor
    ~40 dB above the device's, the per-ping span was 32 dB against the
-   corpus's 63–69 dB, and a 30 m coverage-pass image looked nothing like a
+   corpus's 63–69 dB, and a 30 m image looked nothing like a
    field one. With the measured constants the simulated gain-4 profile at
    **matched altitude** (the corpus flies at 6–9 m) follows the real one
    within ~1 dB from 10 to 35 m on the 40 m and 72 m recordings.
 4. **Gain drift** — slow multiplicative sinusoid + random walk
    (`gain_drift_amp`, `gain_drift_period_s`). **Default 0**: radiometric
-   drift/banding is deferred to the downstream augmentation stage; set
+   drift/banding is deferred to the (optional) downstream augmentation stage; set
    > 0 to re-enable in the base model.
 5. **Dropped pings** — Bernoulli per ping (`dropped_ping_prob`,
    **default 0**, same deferral); when enabled the ping counter still
@@ -395,7 +398,7 @@ level error but a *slope* error, which no offset can fix.
 | `beam_tilt_deg` | 20.0 | **Corpus-constrained** (the BlueBoat bracket tilt is unpublished): `sss_calibration_report --fit-tilt` scans 5–40° against `diffDepthCompensation.svlog` and the residual minimum lands on 20.0° (5.88 dB RMS best of 11 scored tilts, 2026-09-01). |
 | `absorption_db_per_m` | 0.10 | **Not separated** from the spreading term. Held at the physical 450 kHz seawater value. |
 | `image_formation`, `facet_area_jacobian`, `layover_gain_max_db` | **energy**, **true**, 20.0 | **Derived, then verified** (2026-09-19, new). Not fitted: the equation of §3.1 is what energy conservation over a resolution cell gives, and the verification is that it leaves the calibration alone — the two-anchor mean offset moved **0.20 dB** (`bath3`) and **0.38 dB** (harbour), inside the 0.67 dB repeatability floor, so `calibration_db_offset` did not move with it. The cap is a judgement value: a vertical cliff folds an unbounded ground length into one bin and the device's dynamic range does not. |
-| `coherent_split`, `sonar_frequency_hz`, material `roughness_m` | **true**, 450 000, per material | **Physical, with judged inputs** (2026-09-19, new). The law is Eckart/Rayleigh, the same one `multipath.bounce_weight` applies to a wall; the frequency is the device's. The per-material RMS heights (`_ROUGHNESS_M` in `worldgen/materials.py`) are **judged from manufacture, not measured** — 0.1 mm for an injection-moulded shell, 2 mm for form-finished concrete — and the table is stated there rather than buried because it is what decides whether a target reads as a glint or a faint patch. Every seabed material is far past `COHERENT_ROUGHNESS_LIMIT_M`, so the split is exactly a no-op for the seabed and the whole calibration is untouched. |
+| `coherent_split`, `sonar_frequency_hz`, material `roughness_m` | **true**, 450 000, per material | **Physical, with judged inputs** (2026-09-19, new). The law is Eckart/Rayleigh, the same one `multipath.bounce_weight` applies to a wall; the frequency is the nominal 450 kHz (the wire field `ping_hz`, 451 127 Hz observed, is reported only and never enters the physics; the model has one wavenumber, `acoustics.wavenumber`, k = 1885 rad/m, shared by this split, the object facets and the wall bounce weight). The per-material RMS heights (`_ROUGHNESS_M` in `worldgen/materials.py`) are **judged from manufacture, not measured** — 0.1 mm for an injection-moulded shell, 2 mm for form-finished concrete — and the table is stated there rather than buried because it is what decides whether a target reads as a glint or a faint patch. Every seabed material is far past `COHERENT_ROUGHNESS_LIMIT_M`, so the split is exactly a no-op for the seabed and the whole calibration is untouched. |
 | `smooth_lobe_width_deg` | **0.0** (suppressed) | **Undetermined, and shipped off rather than guessed** (2026-09-19, new). The near-normal lobe's width is an RMS surface slope and the 8° it carries is *sand's*. A manufactured surface has none measured, so on a smooth cell the lobe is suppressed entirely. The field box's two grazing angles (+5.7 dB at 7°, +2.5 dB at 19°) would solve to ≈15° if they could be trusted to be one target's angular law, but that pair carries an unknown yaw and an unknown burial and a 30° yaw offset absorbs several dB — see §7 A10 and the capture item in `.claude/TODO.md` ([P2] "Seabed-dependent constants need a capture over a known bottom"). |
 | `reverberation_reference` | **ambient** | **Structural** (2026-09-19, new). Referencing a shadow's floor to the culled bin's *own* would-be response fails wherever the local incidence clipped to zero — a back-facing flank, a cell over land — and the floor collapses with it. That collapse is the hard black band the sim-vs-real comparison found between a simulated object and its shadow, where the real image runs continuously; it put the worst bin at **−54 dB** against the device's **−13.6**. The ambient curve (a flat bottom at the ping's own altitude, scene median reflectivity) never collapses, and the floor is the **max** of the two, so the change can only lighten a shadow. Worst bin now **−19 dB**. |
 | `volume_scattering_coeff`, `penumbra_deg`, `shore_taper_m` | **0.0** | **Implemented, shipped off, reasoned** (2026-09-19, new). Each has a defensible mechanism and no measurement that fixes its value here; see A3 for the volume term, and the capture item in `.claude/TODO.md` ([P2] "Seabed-dependent constants…"). The beach's remaining darkness past the waterline is a *world-authoring* gap — the model has no swash zone — not a model one, so a taper was not tuned to hide it. |
@@ -470,7 +473,8 @@ recordings** (2026-09-02): 50 ms at 18.4 m and 20 m, 54 ms at 38 m, 56 at
 spec sheet's "20 pings/s up to 30 m, thereafter limited by range and speed
 of sound" with ~3 ms of processing. (An earlier comment claimed a 22 ms /
 45 Hz free-run at 15 m; the corpus contradicts it and it is gone.) A 30 m
-coverage pass therefore pings at 20 Hz and a 95.6 m survey at 7.6 Hz —
+range therefore pings at 20 Hz (so does the survey default, 20 m) and a
+95.6 m survey at 7.6 Hz —
 4000 pings in 3½ min against 2800 in 6½ min is the range setting, not a
 fault. Two simulator tells remain by design: port and starboard share one
 tick (NC #3) and there is no jitter. The ping counter is per side and
@@ -530,7 +534,7 @@ spacing = v/PRF.
   so an auto-gain run reproduces the calibration anchor rather than a
   device-chosen, scene-dependent gain. A run whose real counterpart used
   auto-gain therefore has *less* radiometric variation than the real one;
-  radiometric degradations are deferred to the augmentation stage
+  radiometric degradations are deferred to the (optional) augmentation stage
   (`gain_drift_amp`, off by default). The real device's AGC is not
   incidental — it walks indices 4–7 inside every field recording — and
   `fault_gain_walk_pings` reproduces that walk on demand so the downstream
@@ -559,6 +563,19 @@ spacing = v/PRF.
   whole swath, and the corpus's own along-track texture correlation rules
   that out at 12 m (§6, `array_length_m`). Inside ~3 m nothing measures it,
   and the knob is where the answer goes.
+* **A13 — beyond the grid, the seabed is a phantom plain unless the world
+  says otherwise (2026-10-21).** `SceneModel.sample_height` answers the
+  deepest cell of the map outside the grid, and `sample_reflectivity` 0.2
+  (`outside: fill`, the historical behaviour the render fixture is frozen
+  on). A boat within the sonar range (20 m) of the world edge therefore
+  sees a step down to that level, its horizon-cull shadow band, and a
+  ρ = 0.2 plain (*e.g.* edge at 10 m, local 3 m, deepest cell 5 m: a dark
+  band from 10 to ≈ 16.7 m). The World Builder builds `outside: edge`
+  worlds, which repeat the nearest edge cell outward (the manifest key is
+  additive; absent means `fill`); `generate_scene` and every world already
+  on disk keep `fill`. Either way, keep the survey at least `range_max`
+  inside the limits when the edge matters; an object on the edge row
+  extends outward as a strip under `edge`.
 * **A9 — closed (2026-09-02, re-anchored 2026-09-03).** Walls reflect,
   echo *and* occlude, quays and pontoons differently: §11. What remains
   assumed is the face model itself — a uniform vertical plane with one
@@ -589,11 +606,12 @@ At the 1–3 m altitudes of the shallow regime the FBR sits within the
 first 60–180 of the default 1200 bins (16.7 mm/bin at 20 m). The rendered
 ping guarantees the structure bottom-tracking bootstraps assume: a quiet
 water column (the transmit ringing decaying from 55 dB over the first
-metre, then the measured `watercolumn_noise` level, ~40 dB under the FBR
-peak — §5), a sharp bright ramp at slant range = altitude (specular lobe ×
-sidelobe floor), then the Lambert-shaded seabed decay. Smoke `[2b]` gates
+metre, then the measured `watercolumn_noise` level, 25.3 dB reported and
+28–43 dB under the FBR peak depending on altitude — §5), a sharp bright ramp
+at slant range = altitude (the specular lobe on the beam pattern), then the Lambert-shaded seabed decay. Smoke `[2b]` gates
 the gap→peak contrast at 24–44 dB (~31 dB with the ringing bins averaged
-in; the corpus, excluding them, reads 30–36 dB — `[2f]`); a simple "first bin > 3× water-column median" detector
+in; the corpus reads a median of about 32 dB, 10–90 % 25–42, on the `[2f]`
+statistic — bins 10 to FBR−8, ringing tail included); a simple "first bin > 3× water-column median" detector
 locks on the exact FBR bin. If an FBR bootstrap tuned for deeper AUV
 altitudes still fails to lock, tune its minimum-altitude window and ramp
 length to this bin range rather than the renderer.
@@ -632,7 +650,7 @@ Four details decide whether this is a model or a picture:
 | Detail | Why |
 |---|---|
 | The look direction is **reflected**, not re-derived from a mirrored yaw | Reflection in a vertical plane flips handedness; `yaw + side.sign·90°` would pick the wrong side. The roll term, which tilts the fan toward the look direction, flips with it. |
-| The surface image is evaluated at **−depression** | That path leaves the transducer *upward*. The main lobe sits 20° below horizontal, so it passes only through the sidelobe floor — which is why a near-perfect reflector does not swamp the calibrated direct field. |
+| The surface image is evaluated at **−depression** | That path leaves the transducer *upward*. The main lobe sits 20° below horizontal (FWHM 50°), so it is attenuated by 8 dB at 20° up, 17 dB at 40° up, and held at the sidelobe floor (−24 dB) beyond 50.6° — which is why a near-perfect reflector does not swamp the calibrated direct field. |
 | Walls are **finite** | A sample counts only if the segment from the mirror crosses that wall's plan extent, below its top. Without it, ghosts appear on the wrong side of the basin. |
 | Sources are **culled** before rendering | A wall further than the receive window cannot put anything in it (the shortest folded path is the perpendicular distance to the plane), and a fan pointing away from a wall never bounces off it — on a wall-parallel leg that is the outboard side, half the sources. |
 
@@ -705,7 +723,7 @@ raster:
   image-source path meets the face **twice** (out and back), so a ghost
   carries `reflectivity²`; on top, each bounce keeps only the coherent
   fraction `exp(−Γ²)` of the Rayleigh roughness law, `Γ = 2 k σ_h cos θ_face`
-  (Eckart 1953, Urick 1983 ch. 5; `k ≈ 1900 rad/m` at 450 kHz, per-wall
+  (Eckart 1953, Urick 1983 ch. 5; `k = 1885 rad/m` at 450 kHz, the model's `acoustics.wavenumber`, per-wall
   `roughness_m`, 3 mm concrete), plus the lumped share
   `wall_diffuse_fraction` (0.04) of the incoherently scattered energy that
   still reaches the mirror geometry. Near grazing (the mirrored near-wall
@@ -787,7 +805,10 @@ from a per-object gain:
   lattice classes, rope, chain, anchor, debris, coils): the raster's Lambert
   path, unchanged and bit-identical.
 * **Smooth solid primitives** (smooth material on a box, cylinder, capsule,
-  cone or annulus `Solid`, proud of the seabed — `objects.is_facet_object`):
+  cone or annulus `Solid`, proud of the seabed — `objects.is_facet_object`;
+  plastic, PVC, metal, glass, wood and fired brick, which at 1 mm is just
+  under the limit: coherent fraction 6·10⁻⁷ at normal incidence but 0.5 at
+  77° off its normal, so smoke `[14]` expects it here):
   the **facet layer** (`sonar/facets.py`). In the raster they only occlude.
 
 **The facet layer.** The exposed surface is tessellated into patches
@@ -835,6 +856,16 @@ show the seabed beneath, dimmed). A shell's transmission is stamped over its
 footprint grown by one cell, or the bilinear up-ramp would set the horizon
 at 0 and leave a dark seam. Ground truth reads `visible` on the occluder
 surface (`occ_lit`). A line with no facet object runs exactly as before.
+
+For a class drawn as a lying cylinder or capsule (`pipe_pvc`, `can`,
+`cylinder_metal`, `fire_extinguisher`, `bottle_plastic`, `bottle_glass`),
+`proud_height` and `width` are drawn independently, but the solid the facet
+layer scatters from is a cylinder of diameter `width`. On the flat stamp its
+top is `min(effective_height, width)` above the seabed (`facets.object_patches`:
+it never floats, and is cut by the seabed when lower), while the raster bump
+that occludes is `effective_height` tall: a height above the diameter
+lengthens the shadow but not the echo, and a rested (3-D) object ignores
+`proud_height` altogether.
 
 **Materials** (`worldgen/materials.py`, `_ACOUSTIC`; Selfridge 1985 Table I,
 Kinsler et al. App. A10): density and longitudinal speed give the impedance

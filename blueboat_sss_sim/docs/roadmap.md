@@ -7,7 +7,8 @@ rework is done and tracked in `.claude/TODO.md`, not here.)
 ## 1. Sound-speed profile & ray bending (low effort)
 Replace straight-ray `slant = hypot(y, dz)` with a two-layer SVP ray step
 in `GeometricRenderer._ping_geometry`. Mostly relevant beyond ~30 m range
-or strong thermoclines; low priority for the 15 m shallow regime.
+or strong thermoclines; low priority for the 20 m shallow regime (the project's
+survey range, every condition).
 
 ## 2. Wall / surface multipath — **shipped**, re-anchored 2026-09-03
 Implemented in `sonar/multipath.py` and `renderer._face_echo_into`, on by
@@ -25,8 +26,8 @@ no wind at all); spatially varying current beyond the weak eddies shipped
 wave diffraction/reflection off the quays (the wave field is open-water
 JONSWAP even inside a basin); a hydrodynamic identification of the
 BlueBoat itself (the damping coefficients Gazebo applies are BlueROV2's,
-named as such in `hydrodynamics.xacro` — a post-v1.0 BlueBoat-Control
-item). The live Gazebo acceptance pass is done (2026-10-08/09,
+named as such in `hydrodynamics.xacro` — a request to BlueBoat-Control,
+which is updated by additions only). The live Gazebo acceptance pass is done (2026-10-08/09,
 `test/gazebo_sea_test.py`, `docs/sea_state_validation.md`).
 
 ## 3. Mesh-accurate targets (medium)
@@ -38,8 +39,9 @@ is hit; the heightfield remains the fast path everywhere else.
 ## 4. Intra-ping motion & yaw smear (medium)
 Sample the pose at per-bin receive times instead of once per ping;
 convolve along-track with the horizontal beam footprint. Makes turns
-smear realistically — relevant for adaptive-replanning imagery where the
-vehicle images while maneuvering.
+smear realistically — relevant for imagery taken while the vehicle
+maneuvers (turns, and the revisit passes of an adaptive replanner, which is
+planned, not built).
 
 ## 5. Bottom-type speckle spectra (low)
 Correlated speckle shipped 2026-09-02: `Exp(1)` comes from the coherent
