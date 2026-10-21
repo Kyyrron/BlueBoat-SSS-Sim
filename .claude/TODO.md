@@ -332,6 +332,11 @@ agree, but neither number is measured. `blueboat_description` ships a
 
 Measure on the hull, then set both repositories (the `BlueBoat-SSS` half is that repo's
 change, CM-3). Record who measured it, on which hull, from which reference point.
+Since 2026-10-21 `sensor_depth_m` is unambiguously depth below the **still waterline**
+(the Gazebo base_link datum is removed by the node, `base_link_rest_z_m`); measure it
+that way, and put the value in a calibration artifact (`installation` class, per session
+if the transducers are re-mounted), not in `default_sonar.yaml`
+(`docs/engineering/validation_and_experiment_plan.md` stage 1).
 
 ### [x] The simulator never exercised the downstream degradation paths — closed 2026-09-18
 CM-2 promises the real stack runs unmodified against simulated data, and a
@@ -610,10 +615,35 @@ would separate the fill they produce from the TVG.
 
 ---
 
+## 2026-10-21 audit — open follow-ups (`docs/engineering/issue_triage.md`)
+
+### [P1] Staged field calibration on session-split data
+The scaffolding exists (`blueboat_sss_sim/calibration/`, `docs/engineering/`); the
+fits do not. Next: write the manifest of the existing corpus (roles: the two NC #6
+anchors are calibration data), run `sss_calibration quality` on it, then stages 1-4 of
+`validation_and_experiment_plan.md` in order. Blocked on the private corpus.
+
+### [P2] `objects.classes.<class>` ignores unknown keys
+`count: 3` (instead of `amount: {kind: count, value: 3}`) silently places nothing.
+Make class entries strict in a deliberate change (it would reject old hand-written
+configs that carry stray keys).
+
+### [P2] Bin-centre convention differs across analysis tools
+`i·L/N` (calibration.py, svlog_digest.py), `(i+½)·L/N` (renderer, calibration package),
+`i·L/(N−1)` (bathymetry.py). Up to half a bin. Settle on the device's convention once a
+target at surveyed range measures it.
+
+### [P2] One noise RNG for both sides
+A dropped ping on one side shifts the other side's noise realisation. Split per side
+(`SeedSequence.spawn`) when per-side reproducibility matters to augmentation.
+
+### [P2] `[4d]` ghost-lab objects are never stamped; `block_concrete` is not a class
+Test-quality fix for the next time `[4d]` is touched.
+
 ## Known limitations (accepted, not bugs)
 
 Recorded so they are not "rediscovered" as defects. These match the explicit
-assumption list A1–A12 in `docs/sonar_model.md` §7:
+assumption list A1–A13 in `docs/sonar_model.md` §7:
 
 - Static acoustic scene during a run; no intra-ping motion (stop-and-hop pings).
 - Straight rays, no refraction. Reflections are first order only: the direct

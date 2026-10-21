@@ -103,6 +103,12 @@ class Ping:
     # local incidence clipped to zero. The noise stage floors a shadow on the
     # larger of the two, which is what keeps an object's back flank from
     # going black. None -> `unoccluded` alone (the pre-2026-09-19 floor).
+    out_of_map_from_m: float | None = None
+    # Horizontal distance along the centre ground line at which this ping's
+    # swath leaves the scene grid; None while it stays inside. Beyond it the
+    # seabed is the scene's `outside` rule (a phantom plain under "fill",
+    # the repeated edge under "edge"), not authored terrain -- diagnostics
+    # only, the render is unchanged (2026-10-21; sonar_model.md A13).
 
 
 @dataclass

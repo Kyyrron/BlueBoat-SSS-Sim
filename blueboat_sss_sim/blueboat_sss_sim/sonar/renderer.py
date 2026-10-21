@@ -133,6 +133,9 @@ class _PingGeometry:
                                          # what faces the sonar there. None
                                          # when the line crosses no facet
                                          # object, where it equals `visible`
+    out_of_map_m: float | None = None    # ground distance where the line
+                                         # leaves the scene grid (direct
+                                         # pass only); None = stays inside
 
 
 @dataclass
@@ -496,10 +499,20 @@ class GeometricRenderer(SonarRenderer):
         if self._facets is not None:
             # Smooth solid objects (NC #17), already weighted by the pulse
             # envelope: the coherent part joins the steady (low-CV) channel,
-            # the incoherent residual the seabed's speckled one.
+            # the incoherent residual the seabed's speckled one. Walls hide
+            # them exactly as they hide the seabed (the direct path's band
+            # rule, per patch): the centre-line horizon carries terrain and
+            # objects only, so without this a glint was painted behind a
+            # quay while its ground truth said "not visible" (2026-10-21).
+            walls = getattr(self._scene, "walls", None) or []
+            occluded = None
+            if walls and self._cfg.wall_echo_enabled:
+                def occluded(pts: np.ndarray, _s=sensor, _w=walls):
+                    return segment_blocked(_w, _s.x, _s.y, _s.z, pts[:, 0],
+                                           pts[:, 1], pts[:, 2])
             fac_d, fac_s, _ = self._facets.render(
                 sensor, look, sensor.yaw, roll_toward, center_geom.horizon,
-                center_geom.ground_m)
+                center_geom.ground_m, occluded=occluded)
             power = power + fac_d
             specular = specular + fac_s
         # The second-bottom-echo ghost images the *direct* response only, so
@@ -529,6 +542,7 @@ class GeometricRenderer(SonarRenderer):
             start_mm=acq.range_start_mm,
             length_mm=acq.range_length_mm,
             texture=texture,
+            out_of_map_from_m=center_geom.out_of_map_m,
         )
         return RenderedPing(ping=ping, contacts=contacts)
 
@@ -561,7 +575,8 @@ class GeometricRenderer(SonarRenderer):
         best = np.inf
         for u in line_offsets:
             geom = self._ping_geometry(origin, look, fwd,
-                                       along_offset=float(u), direct=direct)
+                                       along_offset=float(u), direct=direct,
+                                       mirror_wall=None if direct else wall)
             if abs(float(u)) < best:
                 best, center_geom = abs(float(u)), geom
             self._shade_into(geom, origin, roll_toward, depression_sign,
@@ -609,7 +624,8 @@ class GeometricRenderer(SonarRenderer):
     # --------------------------------------------------------- geometry pass
     def _ping_geometry(self, sensor: Pose3D, look: float, fwd: float,
                        along_offset: float = 0.0,
-                       direct: bool = False) -> _PingGeometry:
+                       direct: bool = False,
+                       mirror_wall: Wall | None = None) -> _PingGeometry:
         acq = self._acq
         r_max = acq.range_max_m
 
@@ -627,7 +643,28 @@ class GeometricRenderer(SonarRenderer):
         px = sensor.x + dx * y_k + fx * along_offset
         py = sensor.y + dy * y_k + fy * along_offset
 
-        z_k = self._scene.sample_height(px, py)
+        # A wall ghost is rendered from the mirror source, so the stretch of
+        # its line before the wall plane lies BEHIND the wall -- but the real
+        # first leg of the folded path is the transducer -> face path on the
+        # near side, of which that stretch is the mirror image. Occlusion
+        # along it (heights, facet occluders, transmission) is therefore read
+        # at the reflected point; land or a high apron behind a quay used to
+        # raise the horizon there and delete the ghost outright (2026-10-21).
+        # Shading of those samples is zeroed by `crossing_mask` either way,
+        # and a flat basin -- every [4d] check -- reads identical heights.
+        def _occ_xy(x, y):
+            if mirror_wall is None:
+                return x, y
+            nx_, ny_ = mirror_wall.normal
+            d_o = ((sensor.x - mirror_wall.x0) * nx_
+                   + (sensor.y - mirror_wall.y0) * ny_)
+            d_s = (x - mirror_wall.x0) * nx_ + (y - mirror_wall.y0) * ny_
+            behind = (d_s * d_o) > 0.0      # on the mirror source's side
+            return (np.where(behind, x - 2.0 * d_s * nx_, x),
+                    np.where(behind, y - 2.0 * d_s * ny_, y))
+
+        hx, hy = _occ_xy(px, py)
+        z_k = self._scene.sample_height(hx, hy)
         if sensor.pitch != 0.0:
             # Pitch rotates the fan plane about the body y axis, so a ground
             # sample `dz` below the transducer is imaged `dz·tan(pitch)`
@@ -639,7 +676,8 @@ class GeometricRenderer(SonarRenderer):
             shift = (sensor.z - z_k) * np.tan(sensor.pitch)
             px = px + fx * shift
             py = py + fy * shift
-            z_k = self._scene.sample_height(px, py)
+            hx, hy = _occ_xy(px, py)
+            z_k = self._scene.sample_height(hx, hy)
         # Facet objects (NC #17) scatter from their own geometry in the facet
         # layer (sonar/facets.py); in the raster they only OCCLUDE. The
         # surface the beam meets is the seabed beneath them, `z - facet_bump`,
@@ -649,7 +687,7 @@ class GeometricRenderer(SonarRenderer):
         z_occ = fb = None
         sample_fb = getattr(self._scene, "sample_facet_bump", None)
         if sample_fb is not None:
-            fb = sample_fb(px, py)
+            fb = sample_fb(hx, hy)
             if float(np.max(fb)) > 0.0:
                 z_occ = z_k
                 z_k = z_k - fb
@@ -680,7 +718,7 @@ class GeometricRenderer(SonarRenderer):
         # what the shadow behind it keeps. A scene of opaque objects gives
         # exactly zero here and renders bit-identically.
         sample_trans = getattr(self._scene, "sample_transmission", None)
-        trans = (sample_trans(px, py) if sample_trans is not None
+        trans = (sample_trans(hx, hy) if sample_trans is not None
                  else np.zeros_like(px))
         shade = None
         if float(np.max(trans)) > 0.0 and not visible.all():
@@ -789,13 +827,25 @@ class GeometricRenderer(SonarRenderer):
             e0 = np.concatenate(([slant[0] - (midp[0] - slant[0])], midp))
             e1 = np.concatenate((midp, [slant[-1] + (slant[-1] - midp[-1])]))
             lo, hi = np.minimum(e0, e1), np.maximum(e0, e1)
+        out_of_map = None
+        extent = getattr(getattr(self._scene, "grid", None), "extent", None)
+        if direct and extent is not None:
+            # Where the swath leaves the authored map: beyond it the seabed
+            # is the scene's `outside` rule, not terrain (A13). Reported,
+            # never rendered differently. (Stub scenes without a grid
+            # extent report nothing.)
+            xmin, ymin, xmax, ymax = extent
+            off = (px < xmin) | (px > xmax) | (py < ymin) | (py > ymax)
+            if off.any():
+                out_of_map = float(y_k[int(np.argmax(off))])
         return _PingGeometry(slant=slant, visible=visible,
                              depression=depression, cos_incidence=cos_inc,
                              reflectivity=rho, altitude=max(altitude, 0.05),
                              px=px, py=py, seabed_z=z_k, ground_m=y_k,
                              horizon=horizon, wall_hits=hits,
                              roughness=rough, jacobian=jac,
-                             slant_lo=lo, slant_hi=hi, occ_lit=occ_lit)
+                             slant_lo=lo, slant_hi=hi, occ_lit=occ_lit,
+                             out_of_map_m=out_of_map)
 
     # ----------------------------------------------------------- shading pass
     def _shade_into(self, g: _PingGeometry, origin: Pose3D,

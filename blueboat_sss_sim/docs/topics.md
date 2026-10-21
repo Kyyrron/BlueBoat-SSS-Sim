@@ -14,7 +14,7 @@ Namespace: node name `side_scan_sonar` → private topics resolve under
 | `/side_scan_sonar/starboard/raw` | 〃 | pub | 〃 (rebuildable into `.svlog`) |
 | `/side_scan_sonar/ping/enable` | `std_msgs/Bool` | sub | `true` start / `false` stop; params re-read on every enable |
 | `/side_scan_sonar/ground_truth/contacts` | `std_msgs/String` (JSON) | pub | **simulation-only extra**, additive |
-| `/side_scan_sonar/ground_truth/sensor` | `std_msgs/String` (JSON) | pub | **simulation-only extra**, additive (2026-10-08): every ping cycle, `{t_sim, stamp, pose_age_ms, predicted, pose_source: pose_100hz|odom, boat[x,y,z,roll,pitch,yaw], sensors{port|starboard: {pose[6], altitude_m, ping_number|null, dropped}}}` — the vehicle pose at the ping time and the exact transducer pose each side was rendered from (world ENU, m / rad). Read by `analysis/sea_validation.py` |
+| `/side_scan_sonar/ground_truth/sensor` | `std_msgs/String` (JSON) | pub | **simulation-only extra**, additive (2026-10-08): every ping cycle, `{t_sim, stamp, pose_age_ms, predicted, pose_source: pose_100hz|odom, boat[x,y,z,roll,pitch,yaw], base_link_rest_z_m, noise_seed, sensors{port|starboard: {pose[6], altitude_m, ping_number|null, dropped, out_of_map_from_m|null}}}` — the vehicle pose at the ping time **as received** (Gazebo base_link) and the exact transducer pose each side was rendered from, on the waterline datum `base_link_rest_z_m` below it (world ENU, m / rad). Additive keys since 2026-10-21: `base_link_rest_z_m`, `noise_seed` (the node's effective sensor-noise seed — replay with `seed:=<it>`), `out_of_map_from_m` (where that side's swath leaves the world map; null inside it). Read by `analysis/sea_validation.py` |
 | `/sim/sea_state/boat_pose` | `geometry_msgs/TransformStamped` | sub (depth 50) | primary pose source since 2026-10-09: Gazebo's per-step model pose (parameter `pose_topic`; `""` = odometry only) |
 | `/blueboat/odom` | `nav_msgs/Odometry` | sub | fallback pose source (parameter `odom_topic`); optional while the 100 Hz pose is flowing, required otherwise |
 
@@ -89,11 +89,18 @@ auto-gain uses all four inside every recording, so a shorter ladder could not
 express most real acquisitions; 0–3 are unmeasured estimates.
 
 Simulation-only: `scene_dir` (required), `sonar_config`, `odom_topic`,
-`publish_ground_truth` (also gates `~/ground_truth/sensor`), `seed`,
+`publish_ground_truth` (also gates `~/ground_truth/sensor`), `seed` (0 =
+a fresh seed from OS entropy, logged and reported as `noise_seed`; any
+other value reproduces a run's noise; launch argument `sonar_seed`),
 `predict_pose` (default true: each ping rendered at the boat's pose
 propagated to the ping time with its own rates; false = the newest sample
 as-is), `pose_topic` (default `/sim/sea_state/boat_pose`, the 100 Hz
-stamped pose; the 20 Hz odometry is the fallback).
+stamped pose; the 20 Hz odometry is the fallback), `base_link_rest_z_m`
+(2026-10-21; default `sea.motion.GAZEBO_BASE_REST_Z_M` = −0.111 m, the
+Gazebo base_link's height above the still waterline at rest; every
+received pose is moved onto the waterline datum before rendering, so the
+transducers sit `sensor_depth_m` below the water as in every offline and
+calibration render; `0.0` restores the pre-fix ~0.26 m submersion).
 
 `sea_state_node` parameters: `current`, `current_from_deg`, `waves`,
 `waves_from_deg` (preset names from `config/sea_states.yaml` + compass

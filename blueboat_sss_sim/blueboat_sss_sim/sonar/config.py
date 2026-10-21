@@ -164,8 +164,12 @@ class AcquisitionParams:
 class SonarModelConfig:
     """Simulation-only sensor/acoustics/noise parameters."""
 
-    # Mounting geometry (vehicle frame; z below waterline).
-    sensor_depth_m: float = 0.15           # transducer below surface
+    # Mounting geometry: a body-frame lever arm [mount_x, +-mount_y,
+    # -sensor_depth] from the vehicle pose, whose z = 0 is the boat floating
+    # level at rest on the still waterline (the sonar node moves Gazebo's
+    # base_link pose onto that datum first, `base_link_rest_z_m`).
+    sensor_depth_m: float = 0.15           # transducer below still water
+                                           # (JUDGED estimate, unmeasured)
     mount_x_m: float = 0.0                 # fore/aft offset from base_link
     mount_y_abs_m: float = 0.285           # lateral offset magnitude per side
     beam_tilt_deg: float = 20.0            # pattern centre below horizontal

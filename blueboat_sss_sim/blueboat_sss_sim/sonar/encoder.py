@@ -177,6 +177,21 @@ class PingEncoder:
         counts = np.rint(
             np.clip((db - min_db) / span, 0.0, 1.0) * 65535.0
         ).astype(np.uint16)
+        # Both endpoints travel as float32 (the frame's `f` fields, the
+        # profile's float32). Rounded independently, a clamped pair could
+        # read up to ~4e-6 dB WIDER than max_span_db -- which the device's
+        # never does (0 pings in the field logs; 26 % of clamped simulated
+        # pings, 2026-10-21) and which `normalisation_invariants` reports.
+        # Nudge the wire minimum up by float32 ulps until it holds; the
+        # counts and every unclamped ping are untouched.
+        min_wire = min_db
+        hi32, m32 = float(np.float32(max_db)), np.float32(min_db)
+        if hi32 - float(m32) > cfg.max_span_db:
+            for _ in range(64):
+                m32 = np.nextafter(m32, np.float32(np.inf))
+                if hi32 - float(m32) <= cfg.max_span_db:
+                    break
+            min_wire = float(m32)
 
         vehicle_heading = enu_yaw_to_compass_deg(ping.pose.yaw)
         # `transducer_heading_deg` is the transducer's MOUNTING angle
@@ -204,7 +219,7 @@ class PingEncoder:
             pulse_duration_sec=acq.pulse_duration_s(cfg.max_ping_rate_hz),
             analog_gain=ANALOG_GAIN_TABLE[gain_index],
             max_pwr_db=float(max_db),
-            min_pwr_db=float(min_db),
+            min_pwr_db=float(min_wire),
             transducer_heading_deg=float(transducer_heading),
             vehicle_heading_deg=float(vehicle_heading),
             pwr_results=counts,

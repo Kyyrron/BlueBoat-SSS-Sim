@@ -19,6 +19,10 @@ sim_origin_lat  geographic latitude of the ENU world origin (default "":
                 taken from the world's own geo anchor; the legacy
                 43.6961 fallback applies only to unanchored worlds)
 sim_origin_lon  geographic longitude, same resolution as the latitude
+sonar_seed      sensor-noise seed for the node (default 0: a fresh seed from
+                OS entropy, which the node logs and reports as
+                ``noise_seed`` on ~/ground_truth/sensor, so any run can be
+                replayed by passing that value here)
 auto_ping       enable pinging automatically at startup       (default true)
 quiet           route helper one-shot output to log           (default true)
 
@@ -65,6 +69,9 @@ LEGACY_ORIGIN = (43.6961, 7.3080)
 if sl is not None:
     sl.declare_arg("world_dir", default_value="")
     sl.declare_arg("sonar_config", default_value="")
+    sl.declare_arg("sonar_seed", default_value="0",
+                   description="sensor-noise seed; 0 = fresh, logged and "
+                               "reported as noise_seed")
     sl.declare_arg("with_mavros_shim", default_value=True)
     sl.declare_arg("sim_origin_lat", default_value="")
     sl.declare_arg("sim_origin_lon", default_value="")
@@ -153,6 +160,7 @@ def launch_setup():
                 "sonar_config": sonar_yaml,
                 "odom_topic": "/blueboat/odom",
                 "publish_ground_truth": True,
+                "seed": int(str(sl.arg("sonar_seed") or 0)),
                 **acquisition,
             })
 

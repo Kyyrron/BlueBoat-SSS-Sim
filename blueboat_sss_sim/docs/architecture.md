@@ -98,6 +98,12 @@ blueboat_sss_sim/
 │   │                .svlog → track / attitude / footprint / coverage /
 │   │                waterfall / mosaic metrics; sss_sea_validation CLI)
 │   │                wall_contrast.py (quay face / beyond / far contrasts)
+│   ├── calibration/ registry.py (config/parameter_registry.yaml, drift check)
+│   │                manifest.py (session manifests, whole-session splits)
+│   │                quality.py (.svlog quality flags) / identifiability.py
+│   │                artifact.py (versioned calibration artifacts,
+│   │                effective profile) / __main__.py (sss_calibration CLI)
+│   │                → docs/engineering/
 │   └── ros/         sss_sim_node.py       ← replaces sss_node.py
 │                    mavros_shim_node.py   (GPS/heading/IMU under MAVROS names)
 │                    sea_state_node.py     (current → gz /ocean_current, wave

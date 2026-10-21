@@ -1,0 +1,996 @@
+# Parameter registry -- what every important simulator constant IS, where it
+# comes from, and whether a field calibration may move it.
+#
+# Machine-readable on purpose: `python3 -m blueboat_sss_sim.calibration
+# registry --check` (and smoke section [16]) verifies that every `default`
+# below equals the value the code actually uses (the dataclass default, the
+# shipped profile, the module constant or the YAML key named by `source`), so
+# this file cannot silently drift from the model. It is NOT a configuration
+# file: nothing reads a value from here at run time. Values change in the
+# code / profile first (a deliberate, documented model change, NC #6), and
+# the registry is updated in the same change or the check fails.
+#
+# Calibration artifacts (calibration/artifact.py,
+# `blueboat_calibration_artifact/1`) may only set parameters marked
+# `tunable: true`, inside `bounds`, in the stated `unit`; a per-session value
+# is accepted only for the classes listed under `session_classes`.
+#
+# Human view, precedence rules and the identification plan:
+# docs/engineering/parameter_registry.md and
+# docs/engineering/field_calibration_architecture.md. The evidence behind
+# each status: docs/sonar_model.md §6 (`doc_label` quotes that table's own
+# wording where it differs from the registry's stricter vocabulary).
+format: blueboat_parameter_registry/1
+
+statuses:
+  physical: a physical constant or closed-form law, held, not fitted
+  spec: manufacturer specification or drawing, not measured on this boat
+  measured: read directly off field data by a stated reduction
+  joint: estimated together with other constants in one fit; only the set is identified
+  estimated: fitted or inferred from limited data (one recording, one target, a scan)
+  literature: taken from a cited source, site spread stated
+  derived: follows from other constants or from the model's own equations
+  judged: a judgement value; no data constrains it
+  undetermined: held at a gated value or shipped off; the data cannot fix it yet
+  structural: a model switch or numerical setting, not a physical quantity
+  run_setting: chosen per run (acquisition, seeds, test injection), never calibrated
+
+classes:
+  hardware_fixed: fixed physical/hardware values (specification, physics)
+  installation: transducer lever arm, vertical datum, mounting tilt, timing latency
+  device: beam pattern, pulse/range response, ringing, gain, floors, output normalisation
+  environment: seabed, materials, roughness, walls, water
+  vehicle_control: hull, damping, low-speed manoeuvring and controller response
+  session_nuisance: per-session effects justified by data (none implemented yet)
+  augmentation: controlled randomisation for training diversity, never calibrated
+  acquisition: the six real-driver run parameters
+  model_structure: switches and numerics of the model itself
+  test_injection: fault-injection knobs (CM-2 corollary); test profiles only
+
+# Classes whose value may differ per session inside one calibration artifact
+# (a transducer re-mounted on a field day is a real per-session change; a
+# seabed law is not -- a session-level device term would hide a global error).
+session_classes: [installation, session_nuisance]
+
+parameters:
+  # ------------------------------------------------------------ installation
+  - name: model.sensor_depth_m
+    unit: m
+    class: installation
+    status: judged
+    default: 0.15
+    bounds: [0.0, 0.6]
+    tunable: true
+    meaning: Transducer face below the STILL WATERLINE when the boat floats level at rest (body-frame lever-arm z, sign flipped).
+    identified_by: tape measure at the dock (face to waterline), cross-checked by FBR slant at nadir against an independent depth
+    metric: FBR altitude vs independent depth, per session
+    uncertainty: unmeasured; estimate only
+    confounders: [node.base_link_rest_z_m, bathymetry.datum_offset_m]
+    experiment: dock measurement of both transducers at rest, loaded as for survey; repeat after every re-mount
+    owner: sonar/renderer.py (_sensor_pose); analysis/bathymetry.py (inversion)
+  - name: model.mount_x_m
+    unit: m
+    class: installation
+    status: judged
+    default: 0.0
+    bounds: [-0.6, 0.6]
+    tunable: true
+    meaning: Fore/aft transducer offset from base_link (amidships assumed)
+    identified_by: tape measure; along-track position of a surveyed point target on reciprocal headings
+    metric: along-track position error of a known target, reciprocal passes
+    uncertainty: unmeasured
+    confounders: [installation.timing_latency_s]
+    experiment: reciprocal passes over a surveyed point target at constant speed
+    owner: sonar/renderer.py (_sensor_pose)
+  - name: model.mount_y_abs_m
+    unit: m
+    class: installation
+    status: spec
+    default: 0.285
+    bounds: [0.0, 0.5]
+    tunable: true
+    meaning: Lateral transducer offset from the centreline (half the BR-101447 hull spacing); shared with sss_processor_node and the GCS
+    identified_by: drawing (570 mm / 2); confirm with a tape measure
+    metric: across-track position error of a known target, port vs starboard
+    uncertainty: drawing value; mounting tolerance unknown
+    confounders: []
+    experiment: tape measure; target imaged by both sides on reciprocal lines
+    owner: sonar/renderer.py; mirrored in BlueBoat-SSS processor and GCS (cross-module value)
+  - name: model.beam_tilt_deg
+    unit: deg
+    class: installation
+    status: estimated
+    doc_label: Corpus-constrained
+    default: 20.0
+    bounds: [5.0, 40.0]
+    tunable: true
+    meaning: Depression of the vertical beam axis below horizontal (bracket tilt, unpublished)
+    identified_by: sss_calibration_report --fit-tilt over one recording (diffDepthCompensation), 5.88 dB RMS minimum of 11 scored tilts
+    metric: near-range dB profile shape vs slant, several altitudes
+    uncertainty: scan step 3.5 deg; single recording
+    confounders: [model.vertical_aperture_deg, model.beam_sidelobe_floor, model.specular_strength]
+    experiment: inclinometer on the bracket; multi-altitude passes over flat sand
+    owner: sonar/acoustics.py (beam_weight)
+  - name: node.base_link_rest_z_m
+    unit: m
+    class: installation
+    status: derived
+    default: -0.11078
+    tolerance: 1.0e-4
+    bounds: [-0.5, 0.5]
+    tunable: false
+    meaning: Height of the Gazebo base_link origin above the still waterline at rest; subtracted from Gazebo poses so the renderer's z=0 is the waterline (2026-10-21 datum fix)
+    identified_by: HullBoxes.gazebo_box().equilibrium_z() from the BlueBoat xacro buoyancy box
+    metric: rendered transducer z at rest = -sensor_depth_m
+    uncertainty: exact for the URDF box; the real boat's trim is a separate, unmeasured quantity
+    confounders: [model.sensor_depth_m]
+    experiment: none (simulation datum); the real-boat counterpart is the dock measurement of sensor_depth_m
+    owner: sea/motion.py (GAZEBO_BASE_REST_Z_M); ros/sss_sim_node.py
+    source: {python: "blueboat_sss_sim.sea.motion:GAZEBO_BASE_REST_Z_M"}
+
+  # ------------------------------------------------------------------ device
+  - name: model.calibration_db_offset
+    unit: dB
+    class: device
+    status: joint
+    doc_label: Re-fitted with the range law
+    default: 81.1
+    bounds: [60.0, 110.0]
+    tunable: true
+    meaning: The only level constant -- linear renderer power to the device's reported dB at the calibration gain index 4
+    identified_by: two-altitude fit (bath3 1.40 m + reflectionEvidenceFullharbour 7.33 m), seabed tail past 1.4 x altitude
+    metric: seabed absolute dB vs slant per altitude band (analysis/calibration.py reduce_profiles)
+    uncertainty: per-anchor mean error -0.08 / +0.57 dB; reduction repeatability floor 0.67 dB RMS; pass-to-pass 1.8-3.1 dB RMS
+    confounders: [model.tvg_compensation, model.lambert_exponent, model.spreading_exponent]
+    experiment: "at least 3 altitudes over one independently classified flat bottom, reciprocal headings, fixed gain"
+    owner: sonar/encoder.py
+  - name: model.tvg_compensation
+    unit: fraction
+    class: device
+    status: joint
+    doc_label: Measured on two altitudes at once
+    default: 0.30
+    bounds: [0.0, 1.0]
+    tunable: true
+    meaning: Fraction of the range loss the device's own TVG removes
+    identified_by: same two-altitude fit; only spreading_exponent*(1-tvg) enters the diffuse curve
+    metric: dB-vs-slant slope across two or more altitudes
+    uncertainty: not reported by the fit; single-altitude ridge with lambert_exponent (smoke [2e])
+    confounders: [model.lambert_exponent, model.spreading_exponent, model.calibration_db_offset]
+    experiment: altitude sweep (>=3 altitudes, factor >=5 apart) over one bottom
+    owner: sonar/acoustics.py (net_range_response)
+  - name: model.lambert_exponent
+    unit: "1"
+    class: environment
+    status: joint
+    doc_label: Measured (two altitudes)
+    default: 1.0
+    bounds: [0.5, 2.5]
+    tunable: true
+    meaning: Angular law exponent of diffuse seabed backscatter (single-power, Lommel-Seeliger-like); measured over sand only
+    identified_by: two-altitude fit; 0.75 and 1.25 scored worse (RMS 1.29, 0.94 vs 0.92)
+    metric: dB vs grazing angle at equal slant from two altitudes
+    uncertainty: coarse 0.25 grid; sand only
+    confounders: [model.tvg_compensation, model.calibration_db_offset, model.beam_tilt_deg]
+    experiment: same bottom at several altitudes; repeat per bottom class
+    owner: sonar/acoustics.py (surface_response)
+  - name: model.spreading_exponent
+    unit: "1"
+    class: hardware_fixed
+    status: physical
+    default: 4.0
+    bounds: [3.0, 5.0]
+    tunable: false
+    meaning: Two-way intensity spreading of the diffuse field (r^-4); held at the physical value so tvg_compensation carries the fitted slope
+    identified_by: physics (not separable from tvg_compensation)
+    metric: n/a
+    uncertainty: n/a
+    confounders: [model.tvg_compensation]
+    experiment: n/a
+    owner: sonar/acoustics.py
+  - name: model.specular_spreading_exponent
+    unit: "1"
+    class: device
+    status: joint
+    doc_label: Measured
+    default: 2.0
+    bounds: [1.0, 4.0]
+    tunable: true
+    meaning: Range law of the coherent (image-source) channel; sets the first-bottom-return altitude slope
+    identified_by: reported-peak altitude law over 19 gain-4 recordings (device 66.60 - 11.28 log10 alt)
+    metric: FBR peak dB vs log10 altitude (slope and intercept)
+    uncertainty: simulated slope -11.5 vs -11.28 dB/decade; intercept still +4..7 dB hot
+    confounders: [model.specular_strength, model.specular_width_deg, model.beam_tilt_deg]
+    experiment: FBR peak at >=5 altitudes, fixed gain
+    owner: sonar/acoustics.py (NC #4 item 5)
+  - name: model.specular_strength
+    unit: "1"
+    class: device
+    status: joint
+    doc_label: Strength constrained
+    default: 12.0
+    bounds: [0.0, 60.0]
+    tunable: true
+    meaning: Strength of the near-normal specular lobe (the FBR downstream tracking locks on)
+    identified_by: reported-peak slope with specular_spreading_exponent
+    metric: FBR peak level and altitude slope
+    uncertainty: peak still +4..7 dB hot (documented residual)
+    confounders: [model.specular_width_deg, model.specular_spreading_exponent, model.beam_sidelobe_floor]
+    experiment: nadir peak vs altitude over one bottom; keep NC #4 lock gates green
+    owner: sonar/acoustics.py
+  - name: model.specular_width_deg
+    unit: deg
+    class: environment
+    status: undetermined
+    default: 8.0
+    bounds: [2.0, 30.0]
+    tunable: true
+    meaning: RMS-slope width of the near-normal lobe (sand's fitted RMS slope)
+    identified_by: not determined by the corpus; held at the NC #4-gated value
+    metric: FBR onset width and peak level vs altitude
+    uncertainty: undetermined
+    confounders: [model.specular_strength, model.beam_tilt_deg]
+    experiment: nadir return at several altitudes over a classified flat bottom
+    owner: sonar/acoustics.py
+  - name: model.specular_looks
+    unit: "1"
+    class: device
+    status: undetermined
+    default: 25
+    bounds: [1, 200]
+    tunable: true
+    meaning: Gamma looks of the coherent channel (CV ~0.2; real nadir echo Rician, high K)
+    identified_by: not determined; held at the NC #4-gated value
+    metric: CV of the FBR peak ping to ping on a straight, level line
+    uncertainty: undetermined
+    confounders: [vehicle heave/roll statistics]
+    experiment: calm straight line, FBR peak distribution
+    owner: sonar/noise.py
+  - name: model.beam_sidelobe_floor
+    unit: fraction
+    class: device
+    status: judged
+    default: 0.004
+    bounds: [0.0, 0.05]
+    tunable: true
+    meaning: Floor of the vertical beam weight (~ -24 dB sidelobes); guards the FBR under roll (NC #4 item 1)
+    identified_by: judgement (spec-like sidelobe level)
+    metric: FBR presence and nadir level under roll
+    uncertainty: unmeasured
+    confounders: [model.beam_tilt_deg, model.vertical_aperture_deg]
+    experiment: beam-pattern measurement in a tank, or rolled passes
+    owner: sonar/acoustics.py (beam_weight)
+  - name: model.vertical_aperture_deg
+    unit: deg
+    class: hardware_fixed
+    status: spec
+    default: 50.0
+    bounds: [20.0, 90.0]
+    tunable: false
+    meaning: Vertical beam width (FWHM), Omniscan 450 specification
+    identified_by: specification; widening did not improve the fit
+    metric: n/a
+    uncertainty: spec
+    confounders: [model.beam_tilt_deg]
+    experiment: tank beam-pattern measurement if ever needed
+    owner: sonar/acoustics.py
+  - name: model.horizontal_aperture_deg
+    unit: deg
+    class: hardware_fixed
+    status: spec
+    default: 0.5
+    bounds: [0.1, 5.0]
+    tunable: false
+    meaning: Along-track (azimuth) beam width, specification
+    identified_by: specification
+    metric: along-track spread of a point target vs range
+    uncertainty: spec
+    confounders: [model.array_length_m]
+    experiment: point target at 3 and 12 m
+    owner: sonar/renderer.py
+  - name: model.array_length_m
+    unit: m
+    class: device
+    status: estimated
+    doc_label: Measured off
+    default: 0.0
+    bounds: [0.0, 0.5]
+    tunable: true
+    meaning: Near-field along-track footprint floor; 0 = focused (r*theta law holds)
+    identified_by: corpus along-track texture lag-1 correlation (0.36-0.66); inside ~3 m undetermined
+    metric: along-track lag-1 texture correlation vs range; point-target along-track width
+    uncertainty: undetermined inside ~3 m
+    confounders: [model.horizontal_aperture_deg, vehicle speed]
+    experiment: point target at 3 and 12 m
+    owner: sonar/renderer.py
+  - name: model.max_span_db
+    unit: dB
+    class: device
+    status: measured
+    default: 90.0
+    bounds: [60.0, 120.0]
+    tunable: false
+    meaning: Per-ping dB span clamp of the device's normalisation (68 948 / 68 948 corpus pings)
+    identified_by: direct reading of min/max_pwr_db
+    metric: max_pwr_db - min_pwr_db distribution
+    uncertainty: exact
+    confounders: []
+    experiment: none needed
+    owner: sonar/encoder.py
+  - name: model.ringing_level_db
+    unit: dB
+    class: device
+    status: measured
+    default: 55.0
+    bounds: [0.0, 80.0]
+    tunable: true
+    meaning: Transmit ringing reported level at the transducer (gain 4)
+    identified_by: diffDepthCompensation.svlog (one recording); real 54.4 dB at bin 0 vs simulated 51.8
+    metric: near-range reported dB, bins 0..1 m
+    uncertainty: one recording
+    confounders: [model.watercolumn_noise]
+    experiment: pings in deep water (bottom beyond range) at fixed gain
+    owner: sonar/config.py (ringing)
+  - name: model.ringing_decay_db_per_m
+    unit: dB/m
+    class: device
+    status: measured
+    default: 22.0
+    bounds: [0.0, 100.0]
+    tunable: true
+    meaning: Decay of the transmit ringing over the first metre
+    identified_by: diffDepthCompensation.svlog (55 -> 33 dB over 1 m)
+    metric: near-range reported dB slope
+    uncertainty: one recording
+    confounders: [model.watercolumn_noise]
+    experiment: as ringing_level_db
+    owner: sonar/config.py
+  - name: model.filter_duration_percent
+    unit: fraction
+    class: device
+    status: spec
+    doc_label: as the real driver pins it
+    default: 0.0015
+    bounds: [0.0, 0.01]
+    tunable: false
+    meaning: Receive filter length as a fraction of num_results (range smear)
+    identified_by: real driver setting (Cerulean typical)
+    metric: along-range lag-1 texture correlation, FBR onset ramp
+    uncertainty: driver value
+    confounders: [acquisition.pulse_len_percent]
+    experiment: none
+    owner: sonar/renderer.py (smear_bins)
+  - name: model.max_ping_rate_hz
+    unit: Hz
+    class: device
+    status: measured
+    default: 20.0
+    bounds: [1.0, 50.0]
+    tunable: false
+    meaning: Ping-rate cap of the device law max(50 ms, 2R/c + 3 ms)
+    identified_by: ping period on seven corpus recordings
+    metric: ping period vs range
+    uncertainty: exact at the measured ranges
+    confounders: []
+    experiment: none
+    owner: sonar/config.py (ping_period_s)
+  - name: model.noise_floor
+    unit: linear power (renderer units)
+    class: device
+    status: measured
+    default: 3.39e-9
+    bounds: [0.0, 1.0e-6]
+    tunable: true
+    meaning: Receiver floor (-3.6 dB reported at gain 4), far decile of 72-126 m gain-4 pings
+    identified_by: far-decile reported dB, re-expressed at the current offset
+    metric: far-range reported dB at fixed gain where the bottom is out of range
+    uncertainty: corpus-specific
+    confounders: [model.calibration_db_offset]
+    experiment: long-range pings at fixed gain
+    owner: sonar/noise.py
+  - name: model.watercolumn_noise
+    unit: linear power (renderer units)
+    class: device
+    status: measured
+    default: 4.68e-6
+    bounds: [0.0, 1.0e-3]
+    tunable: true
+    meaning: Water-column level (+27.8 dB reported), 1-3 m band of gain-4 pings
+    identified_by: corpus water-column band, re-expressed at the current offset
+    metric: reported dB between ringing settle and FBR
+    uncertainty: site-dependent (this log's water column louder than diffDepthCompensation's)
+    confounders: [model.ringing_level_db, model.calibration_db_offset]
+    experiment: fixed-gain pings at several altitudes
+    owner: sonar/noise.py
+  - name: model.reverberation_db
+    unit: dB
+    class: device
+    status: measured
+    default: 18.0
+    bounds: [0.0, 40.0]
+    tunable: true
+    meaning: Shadow floor below the lit seabed at the same range (0 = white receiver floor)
+    identified_by: corpus quay deep shadow 6-12 m behind the face (17-25 dB under the seabed)
+    metric: shadow depth behind a tall occluder vs seabed at equal slant
+    uncertainty: 17-25 dB spread on one quay
+    confounders: [environment.wall geometry, model.noise_floor]
+    experiment: shadow behind a surveyed tall target at several ranges
+    owner: sonar/noise.py
+  - name: encoder.analog_gain_4
+    unit: linear
+    class: device
+    status: measured
+    default: 74.55
+    bounds: [1.0, 1000.0]
+    tunable: false
+    meaning: Analog gain at index 4 (the calibration anchor); level steps are 20 log10 ratios
+    identified_by: receiver-floor steps across indices 4-7 (+5.6/+4.6/+5.7 dB)
+    metric: receiver floor per gain index
+    uncertainty: steps within 0.1 dB of the table
+    confounders: []
+    experiment: none needed for 4-7
+    owner: sonar/encoder.py
+    source: {python: "blueboat_sss_sim.sonar.encoder:ANALOG_GAIN_TABLE[4]"}
+  - name: encoder.analog_gain_7
+    unit: linear
+    class: device
+    status: measured
+    default: 464.625
+    bounds: [1.0, 2000.0]
+    tunable: false
+    meaning: Analog gain at index 7 (highest measured)
+    identified_by: receiver-floor steps
+    metric: receiver floor per gain index
+    uncertainty: within 0.1 dB
+    confounders: []
+    experiment: none
+    owner: sonar/encoder.py
+    source: {python: "blueboat_sss_sim.sonar.encoder:ANALOG_GAIN_TABLE[7]"}
+  - name: encoder.analog_gain_0
+    unit: linear
+    class: device
+    status: estimated
+    default: 20.0
+    bounds: [1.0, 1000.0]
+    tunable: false
+    meaning: Analog gain at index 0; indices 0-3 are unmeasured estimates the device never used in the corpus
+    identified_by: none (estimate)
+    metric: receiver floor at fixed gain index 0..3
+    uncertainty: unmeasured
+    confounders: []
+    experiment: force gain indices 0-3 for a minute each over deep water
+    owner: sonar/encoder.py
+    source: {python: "blueboat_sss_sim.sonar.encoder:ANALOG_GAIN_TABLE[0]"}
+  - name: device.pulse_min_s
+    unit: s
+    class: device
+    status: measured
+    default: 44.3e-6
+    tolerance: 1.0e-9
+    bounds: [1.0e-6, 1.0e-3]
+    tunable: false
+    meaning: Shortest transmit pulse; pulse = max(this, pulse_len_percent * 2R/c)
+    identified_by: every corpus recording, 13 settings, within 1 us
+    metric: pulse_duration_sec field
+    uncertainty: 1 us
+    confounders: []
+    experiment: none
+    owner: sonar/config.py
+    source: {python: "blueboat_sss_sim.sonar.config:PULSE_MIN_S"}
+  - name: device.speed_of_sound_mps
+    unit: m/s
+    class: hardware_fixed
+    status: physical
+    doc_label: nominal, no sound-speed profile (A1)
+    default: 1500.0
+    bounds: [1400.0, 1600.0]
+    tunable: false
+    meaning: Constant sound speed used by the ping period, the pulse law and sos_dmps
+    identified_by: nominal; the device reports 1500 m/s too
+    metric: n/a
+    uncertainty: site sound speed unmeasured (CTD would bound it)
+    confounders: []
+    experiment: CTD cast per session if refraction or range scale matters
+    owner: sonar/config.py
+    source: {python: "blueboat_sss_sim.sonar.config:SPEED_OF_SOUND_MPS"}
+  - name: model.sonar_frequency_hz
+    unit: Hz
+    class: hardware_fixed
+    status: spec
+    default: 450000.0
+    bounds: [400000.0, 500000.0]
+    tunable: false
+    meaning: The model's one acoustic frequency (wavenumber for coherent split, facets, wall bounce)
+    identified_by: nominal 450 kHz (the wire reports 451 127 Hz, never used in physics)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/acoustics.py (wavenumber)
+
+  # ------------------------------------------------------------- environment
+  - name: model.absorption_db_per_m
+    unit: dB/m
+    class: environment
+    status: physical
+    doc_label: Not separated
+    default: 0.10
+    bounds: [0.0, 0.3]
+    tunable: false
+    meaning: One-way seawater absorption at 450 kHz (two-way applied); held, not separable from spreading by the corpus
+    identified_by: nominal physical value; check against a temperature/salinity model for the site
+    metric: n/a
+    uncertainty: site T/S unmeasured
+    confounders: [model.tvg_compensation]
+    experiment: CTD per session
+    owner: sonar/acoustics.py
+  - name: model.sand_lambert_mu_db
+    unit: dB
+    class: environment
+    status: literature
+    default: -12.0
+    bounds: [-30.0, 0.0]
+    tunable: true
+    meaning: Sand Lambert parameter at 450 kHz tying object cross-sections to the calibrated seabed (J&R 2007 Fig. 12.3 + 7 dB/decade)
+    identified_by: literature; site spread +-5 dB
+    metric: object-to-seabed contrast of a target with known cross-section
+    uncertainty: +-5 dB
+    confounders: [material reflection coefficients]
+    experiment: reference target (sphere or plate) of known size on classified sand
+    owner: sonar/facets.py
+  - name: material.sand.reflectivity
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.55
+    bounds: [0.02, 1.0]
+    tunable: true
+    meaning: Nominal sand backscatter coefficient in the raster (the calibration was done over sand)
+    identified_by: judged nominal; level absorbed by calibration_db_offset
+    metric: seabed dB vs slant over classified sand
+    uncertainty: absorbed into the offset; relative spread to other bottoms unmeasured
+    confounders: [model.calibration_db_offset]
+    experiment: classified bottoms (grab samples) on one line at one altitude
+    owner: worldgen/materials.py
+    source: {material: sand.reflectivity}
+  - name: material.mud.reflectivity
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.30
+    bounds: [0.02, 1.0]
+    tunable: true
+    meaning: Nominal mud backscatter coefficient (-2.6 dB vs sand; literature spread larger)
+    identified_by: judged
+    metric: dB contrast to sand at equal slant and altitude
+    uncertainty: literature spans ~15 dB across bottom types vs 5.9 dB here
+    confounders: [material.sand.reflectivity]
+    experiment: classified bottoms on one line
+    owner: worldgen/materials.py
+    source: {material: mud.reflectivity}
+  - name: material.gravel.reflectivity
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.70
+    bounds: [0.02, 1.0]
+    tunable: true
+    meaning: Nominal gravel backscatter coefficient
+    identified_by: judged
+    metric: dB contrast to sand
+    uncertainty: unmeasured
+    confounders: [material.sand.reflectivity]
+    experiment: classified bottoms on one line
+    owner: worldgen/materials.py
+    source: {material: gravel.reflectivity}
+  - name: material.rocks.reflectivity
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.85
+    bounds: [0.02, 1.0]
+    tunable: true
+    meaning: Nominal rock backscatter coefficient
+    identified_by: judged
+    metric: dB contrast to sand
+    uncertainty: unmeasured
+    confounders: [material.sand.reflectivity]
+    experiment: classified bottoms on one line
+    owner: worldgen/materials.py
+    source: {material: rocks.reflectivity}
+  - name: material.seagrass.reflectivity
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.22
+    bounds: [0.02, 1.0]
+    tunable: true
+    meaning: Nominal seagrass backscatter coefficient
+    identified_by: judged
+    metric: dB contrast to sand
+    uncertainty: unmeasured
+    confounders: [material.sand.reflectivity]
+    experiment: classified bottoms on one line
+    owner: worldgen/materials.py
+    source: {material: seagrass.reflectivity}
+  - name: material.pp_shell.transmission
+    unit: fraction (two-way)
+    class: environment
+    status: measured
+    default: 0.11
+    bounds: [0.0, 1.0]
+    tunable: true
+    meaning: Two-way transmission through the flooded 2 mm PP field box (its shadow 9.6 dB under the sand)
+    identified_by: field box shadow, re-measured through the facet renderer within 0.25 dB
+    metric: shadow depth behind the box vs surrounding seabed
+    uncertainty: one target, unknown yaw and burial
+    confounders: [model.reverberation_db]
+    experiment: the same box at surveyed yaw on classified sand, several ranges
+    owner: worldgen/materials.py
+    source: {material: pp_shell.transmission}
+  - name: material.pp_shell.roughness_m
+    unit: m
+    class: environment
+    status: judged
+    default: 1.0e-4
+    tolerance: 1.0e-12
+    bounds: [0.0, 0.01]
+    tunable: true
+    meaning: RMS surface height of an injection-moulded shell (decides glint vs faint patch via the Eckart split)
+    identified_by: judged from manufacture
+    metric: object aspect response (glint width and level)
+    uncertainty: unmeasured
+    confounders: [model.smooth_lobe_width_deg]
+    experiment: profilometer on the target, or an aspect sweep of the box
+    owner: worldgen/materials.py (_ROUGHNESS_M)
+    source: {material: pp_shell.roughness_m}
+  - name: model.smooth_lobe_width_deg
+    unit: deg
+    class: environment
+    status: undetermined
+    default: 0.0
+    bounds: [0.0, 30.0]
+    tunable: true
+    meaning: Near-normal lobe width on smooth raster cells; 0 = suppressed (shipped off)
+    identified_by: undetermined (field box pair carries unknown yaw and burial)
+    metric: smooth-aggregate highlight vs incidence
+    uncertainty: undetermined
+    confounders: [material roughness table]
+    experiment: aspect sweep of a smooth target at surveyed yaw
+    owner: sonar/acoustics.py
+  - name: model.volume_scattering_coeff
+    unit: "1"
+    class: environment
+    status: undetermined
+    default: 0.0
+    bounds: [0.0, 1.0]
+    tunable: false
+    meaning: Separated sediment volume scattering (shipped off -- would widen the identifiability ridge from 2 to 3)
+    identified_by: undetermined
+    metric: n/a
+    uncertainty: n/a
+    confounders: [model.lambert_exponent, model.calibration_db_offset]
+    experiment: multi-altitude, multi-bottom data first
+    owner: sonar/acoustics.py
+  - name: model.wall_echo_strength
+    unit: "1"
+    class: environment
+    status: estimated
+    default: 30.0
+    bounds: [0.0, 200.0]
+    tunable: true
+    meaning: Wall face echo scale, set on the corpus quay anchor
+    identified_by: fullHarbourCleanExample quay (face +22.8/+18.9 dB vs model +21.8)
+    metric: wall_contrast face dB over the seabed in front
+    uncertainty: one quay, unknown construction
+    confounders: [model.wall_face_diffuse, wall.reflectivity]
+    experiment: survey a second quay of known construction at known distance
+    owner: sonar/renderer.py (_face_echo_into)
+  - name: model.wall_face_diffuse
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.5
+    bounds: [0.0, 2.0]
+    tunable: true
+    meaning: Diffuse share of the face echo
+    identified_by: judged
+    metric: face echo vs obliquity
+    uncertainty: unmeasured
+    confounders: [model.wall_echo_strength]
+    experiment: quay imaged at several obliquities
+    owner: sonar/renderer.py
+  - name: model.wall_pontoon_specular
+    unit: "1"
+    class: environment
+    status: judged
+    default: 0.15
+    bounds: [0.0, 1.0]
+    tunable: true
+    meaning: Specular fraction of a pontoon face (no field anchor)
+    identified_by: judged
+    metric: pontoon face dB at known distance
+    uncertainty: unmeasured
+    confounders: [model.wall_echo_strength]
+    experiment: recording next to a known pontoon at known distance
+    owner: sonar/renderer.py
+  - name: model.wall_diffuse_fraction
+    unit: fraction
+    class: environment
+    status: estimated
+    default: 0.04
+    bounds: [0.0, 1.0]
+    tunable: true
+    meaning: Lumped diffuse share of a wall bounce that still reaches the mirror geometry
+    identified_by: set against the corpus far-ghost level
+    metric: ghost level beyond the face
+    uncertainty: one quay
+    confounders: [wall.roughness_m, wall.reflectivity]
+    experiment: second quay of known construction
+    owner: sonar/multipath.py
+  - name: wall.roughness_m
+    unit: m
+    class: environment
+    status: judged
+    default: 0.003
+    tolerance: 1.0e-12
+    bounds: [0.0, 0.1]
+    tunable: true
+    meaning: Default RMS roughness of a wall face (concrete ~3 mm)
+    identified_by: judged; fitted only through the far-ghost level
+    metric: ghost level vs grazing angle
+    uncertainty: unmeasured
+    confounders: [model.wall_diffuse_fraction]
+    experiment: second quay of known construction
+    owner: core/types.py (Wall)
+    source: {python: "blueboat_sss_sim.core.types:Wall.roughness_m"}
+  - name: model.layover_gain_max_db
+    unit: dB
+    class: model_structure
+    status: judged
+    default: 20.0
+    bounds: [0.0, 60.0]
+    tunable: false
+    meaning: Cap on energy folded into one bin by layover
+    identified_by: judged (device dynamic range)
+    metric: brightest layover bin vs seabed
+    uncertainty: n/a
+    confounders: []
+    experiment: quay face / steep bank recordings
+    owner: sonar/renderer.py
+
+  # ----------------------------------------------------------- vehicle_control
+  - name: sea.hull.mass_kg
+    unit: kg
+    class: vehicle_control
+    status: spec
+    default: 16.15
+    bounds: [10.0, 40.0]
+    tunable: true
+    meaning: Displacement mass of the hydrostatic hull (URDF hull + two propellers); real payload unmeasured
+    identified_by: URDF value; weigh the boat as surveyed
+    metric: heave natural period, draft at rest
+    uncertainty: payload (sonars, battery) not weighed
+    confounders: [sea.hull.damping.heave_ns_per_m]
+    experiment: weigh; heave free-decay test
+    owner: sea/hull.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.mass_kg}}
+  - name: sea.hull.damping.heave_ns_per_m
+    unit: N s/m
+    class: vehicle_control
+    status: judged
+    default: 245.0
+    bounds: [0.0, 2000.0]
+    tunable: true
+    meaning: Extra heave damping carried by the wave wrench (zeta ~0.4)
+    identified_by: judged
+    metric: heave free-decay envelope
+    uncertainty: unmeasured
+    confounders: [sea.hull.mass_kg]
+    experiment: heave free-decay test at the dock
+    owner: sea/motion.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.damping.heave_ns_per_m}}
+  - name: sea.hull.damping.roll_nms_per_rad
+    unit: N m s/rad
+    class: vehicle_control
+    status: judged
+    default: 20.0
+    bounds: [0.0, 500.0]
+    tunable: true
+    meaning: Extra roll damping (zeta ~0.4)
+    identified_by: judged
+    metric: roll free-decay; field roll std 0.9-1.3 deg
+    uncertainty: unmeasured
+    confounders: []
+    experiment: roll free-decay test
+    owner: sea/motion.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.damping.roll_nms_per_rad}}
+  - name: sea.hull.damping.pitch_nms_per_rad
+    unit: N m s/rad
+    class: vehicle_control
+    status: judged
+    default: 13.0
+    bounds: [0.0, 500.0]
+    tunable: true
+    meaning: Extra pitch damping (zeta ~0.4)
+    identified_by: judged
+    metric: pitch free-decay; field pitch std 0.8-1.5 deg
+    uncertainty: unmeasured
+    confounders: []
+    experiment: pitch free-decay test
+    owner: sea/motion.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.damping.pitch_nms_per_rad}}
+
+  # ------------------------------------------------------------- acquisition
+  - name: acquisition.range_length_mm
+    unit: mm
+    class: acquisition
+    status: run_setting
+    default: 20000
+    bounds: [1000, 200000]
+    tunable: false
+    meaning: Swath slant extent (20 m per side for every survey condition)
+    identified_by: run setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/config.py (AcquisitionParams)
+  - name: acquisition.num_results
+    unit: bins
+    class: acquisition
+    status: run_setting
+    default: 1200
+    bounds: [200, 1200]
+    tunable: false
+    meaning: Bins per ping (device maximum)
+    identified_by: run setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/config.py
+  - name: acquisition.pulse_len_percent
+    unit: fraction
+    class: acquisition
+    status: run_setting
+    default: 0.00125
+    bounds: [0.0, 0.01]
+    tunable: false
+    meaning: Pulse length as a fraction of 2R/c (floored at 44.3 us)
+    identified_by: run setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/config.py
+  - name: acquisition.gain_index
+    unit: index
+    class: acquisition
+    status: run_setting
+    default: -1
+    bounds: [-1, 7]
+    tunable: false
+    meaning: Gain index; -1 = device auto (the simulator resolves to its calibrated 4; no AGC)
+    identified_by: run setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/config.py
+
+  # ------------------------------------------------------------ augmentation
+  - name: model.scatterer_seed
+    unit: "1"
+    class: augmentation
+    status: run_setting
+    default: 0
+    bounds: [0, 4294967295]
+    tunable: false
+    meaning: Extra salt on the world seed for the coherent scatterer phase field (texture realisation)
+    identified_by: run setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py
+  - name: model.gain_drift_amp
+    unit: fraction
+    class: augmentation
+    status: run_setting
+    default: 0.0
+    bounds: [0.0, 1.0]
+    tunable: false
+    meaning: Slow multiplicative gain drift (deferred to augmentation)
+    identified_by: n/a
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/noise.py
+  - name: model.dropped_ping_prob
+    unit: probability
+    class: augmentation
+    status: run_setting
+    default: 0.0
+    bounds: [0.0, 1.0]
+    tunable: false
+    meaning: Per-side dropped-ping probability (real device loses ~8 %, unrelated cause)
+    identified_by: n/a
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/noise.py
+
+  # --------------------------------------------------------- model_structure
+  - name: model.image_formation
+    unit: enum
+    class: model_structure
+    status: derived
+    default: energy
+    choices: [energy, mean]
+    tunable: false
+    meaning: How ground samples deposit into slant bins (energy conservation over a resolution cell)
+    identified_by: derived, verified to leave the calibration within 0.67 dB
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py
+  - name: model.reverberation_reference
+    unit: enum
+    class: model_structure
+    status: structural
+    default: ambient
+    choices: [ambient, unoccluded]
+    tunable: false
+    meaning: Reference level of the shadow floor
+    identified_by: structural
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/noise.py
+  - name: model.alongtrack_beam_lines
+    unit: lines
+    class: model_structure
+    status: structural
+    default: 5
+    bounds: [1, 15]
+    tunable: false
+    meaning: Ground lines integrating the azimuth beam
+    identified_by: structural
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py
+  - name: model.scatterer_cell_m
+    unit: m
+    class: model_structure
+    status: structural
+    default: 0.01
+    bounds: [0.002, 0.1]
+    tunable: false
+    meaning: Coherent scatterer cell (seed-class -- changing it changes every image)
+    identified_by: structural
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py
+  - name: model.speckle_looks
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: 1
+    bounds: [1, 100]
+    tunable: false
+    meaning: Diffuse speckle looks (1 = fully developed Exp(1), correlated texture on)
+    identified_by: corpus single-look contrast 5.5-6.7 dB (gate [2g])
+    metric: dB std of the seabed texture
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/noise.py

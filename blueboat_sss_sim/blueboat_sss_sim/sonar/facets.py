@@ -251,7 +251,7 @@ class FacetLayer:
 
     def render(self, sensor: Pose3D, look: float, fwd: float,
                roll_toward: float, horizon: np.ndarray | None,
-               ground_m: np.ndarray | None
+               ground_m: np.ndarray | None, occluded=None
                ) -> tuple[np.ndarray, np.ndarray, list[int]]:
         """One side's facet returns: ``(diffuse, coherent, lit)``.
 
@@ -262,7 +262,11 @@ class FacetLayer:
         steady reflection, like the first bottom return).
         ``horizon`` / ``ground_m`` are the centre line's occluder horizon
         (terrain and every object): a patch below it, in front of its
-        object, is hidden. ``lit`` lists the objects that returned anything.
+        object, is hidden. ``occluded``, when given, maps patch centres
+        ``(n, 3)`` to a boolean mask of the ones a wall hides (the renderer
+        passes the direct path's wall rule); ``None`` -- a scene without
+        walls -- changes nothing. ``lit`` lists the objects that returned
+        anything.
         """
         acq, cfg = self._acq, self._cfg
         n = acq.num_results
@@ -326,6 +330,8 @@ class FacetLayer:
                 if i_f > 0:
                     elev = -np.arctan2(s[2] - q.centre[:, 2], ac)
                     front &= elev >= float(horizon[i_f - 1]) - 1e-9
+            if occluded is not None and front.any():
+                front &= ~np.asarray(occluded(q.centre), dtype=bool)
             if not front.any():
                 continue
             lit.append(int(i))

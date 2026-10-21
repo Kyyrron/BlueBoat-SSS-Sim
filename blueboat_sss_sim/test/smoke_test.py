@@ -6226,6 +6226,8 @@ def main() -> None:
               and abs(odom13[0].x - 5.0) < 1e-9)
 
     _section_object_physics()
+    _section_consistency()
+    _section_calibration()
 
     print("\nALL CHECKS PASSED")
 
@@ -6541,6 +6543,469 @@ def _section_object_physics() -> None:
           "at once cost <= 4x a bare ping-side (25 ms, the 20 Hz two-side "
           "budget, at this machine's bare cost)",
           ms10 < 4.0 * ms0, f"{ms10:.1f} vs {ms0:.1f} ms")
+
+
+def _section_consistency() -> None:
+    """[15] image <-> label <-> geometry consistency (2026-10-21 audit).
+
+    Each check pins a defect reproduced on the pre-fix tree and the fix
+    that closed it (docs/engineering/issue_triage.md): a smooth object
+    behind a quay was rendered while its label said "not visible"; land
+    behind a quay deleted that quay's ghost; Gazebo poses put the
+    transducers 0.111 m below the calibrated depth; a swath leaving the map
+    said nothing; a hand-written entry naming a material kept the class
+    default's drawn reflectivity and ignored its size knobs.
+    """
+    from blueboat_sss_sim.sea.hull import HullBoxes
+    from blueboat_sss_sim.sea.motion import (GAZEBO_BASE_REST_Z_M,
+                                             waterline_pose)
+    from blueboat_sss_sim.worldgen.materials import MaterialLibrary
+    from blueboat_sss_sim.worldgen.objects import (ObjectFieldConfig,
+                                                   is_facet_object,
+                                                   place_objects_v2)
+    from blueboat_sss_sim.worldgen.scene import stamp_objects
+
+    print("[15] consistency: facets behind walls, ghost first leg, sensor "
+          "datum, out-of-map, explicit entries")
+    cfg = _cal_config()
+    acq, model = cfg.acquisition, cfg.model
+    bins = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+
+    def _scene15(objs, walls, size=(401, 401), res=0.05, origin=(-10.0, -2.0),
+                 land_y=None, outside="fill"):
+        g = GridSpec(origin_x=origin[0], origin_y=origin[1], resolution=res,
+                     nx=size[0], ny=size[1])
+        h = np.full((size[1], size[0]), -3.0)
+        if land_y is not None:
+            ys = origin[1] + np.arange(size[1]) * res
+            h[ys > land_y, :] = 0.5
+        r = np.full((size[1], size[0]), 0.55)
+        ras = stamp_objects(list(objs), g, h, r)
+        return SceneModel(grid=g, height=h, reflectivity=r,
+                          **ras.scene_kwargs(),
+                          material_id=np.zeros((size[1], size[0]),
+                                               dtype=np.uint8),
+                          material_names=["sand"], objects=list(objs),
+                          walls=list(walls), seed=0, config_snapshot={},
+                          outside=outside)
+
+    # ---- a smooth object behind a wall: image and label agree ------------
+    cyl = PlacedObject(0, "cylinder_metal", 0.0, 9.0, 0.0, 0.6, 0.2, 0.2,
+                       0.0, 0.9, "metal", roughness_m=5e-5)
+    quay = Wall(name="q", x0=-10.0, y0=6.0, x1=10.0, y1=6.0, top_z=1.0,
+                reflectivity=0.65)
+    pont = Wall(name="p", x0=-10.0, y0=6.0, x1=10.0, y1=6.0, top_z=0.3,
+                reflectivity=0.65, kind="pontoon", draft_m=0.4)
+    pose15 = Pose3D(0.0, 0.0, 0.0)
+    win = (bins > 8.5) & (bins < 9.8)
+
+    def _echo(walls, mdl=model):
+        a = GeometricRenderer(_scene15([cyl], walls), acq, mdl).render(
+            Side.PORT, pose15, 0.0)
+        b = GeometricRenderer(_scene15([], walls), acq, mdl).render(
+            Side.PORT, pose15, 0.0)
+        extra = float(((a.ping.power + a.ping.specular)
+                       - (b.ping.power + b.ping.specular))[win].sum())
+        ct = [c for c in a.contacts if c.object_id == 0 and not c.ghost]
+        return extra, (ct[0].visible if ct else None)
+    e_open, v_open = _echo([])
+    e_quay, v_quay = _echo([quay])
+    e_pont, v_pont = _echo([pont])
+    check("a smooth (facet) object behind a quay returns nothing and is "
+          "labelled unseen; in the open, or beyond a pontoon whose draft the "
+          "ray passes under, it is imaged and labelled seen (image <-> label)",
+          is_facet_object(cyl) and e_open > 1.0 and v_open is True
+          and e_quay == 0.0 and v_quay is False
+          and abs(e_pont - e_open) <= 1e-9 * e_open and v_pont is True,
+          f"echo open {e_open:.3g} / quay {e_quay:.3g} / pontoon "
+          f"{e_pont:.3g}; visible {v_open}/{v_quay}/{v_pont}")
+    m_noecho = dataclasses.replace(model, wall_echo_enabled=False)
+    e_off, v_off = _echo([quay], m_noecho)
+    check("with wall_echo_enabled false a wall occludes nothing, for the "
+          "facet layer exactly as for the seabed and the label",
+          abs(e_off - e_open) <= 1e-9 * e_open and v_off is True,
+          f"echo {e_off:.3g} vs open {e_open:.3g}, visible {v_off}")
+
+    # ---- the wall ghost's first leg is the near-side path ----------------
+    def _basin(land):
+        g = GridSpec(origin_x=-50.0, origin_y=-50.0, resolution=0.25,
+                     nx=401, ny=401)
+        h = np.full((401, 401), -4.0)
+        if land:
+            h[(-50.0 + np.arange(401) * 0.25) > 10.5, :] = 0.5
+        return SceneModel(grid=g, height=h, reflectivity=np.full((401, 401),
+                                                                 0.5),
+                          material_id=np.zeros((401, 401), dtype=np.uint8),
+                          material_names=["sand"], objects=[],
+                          walls=[Wall(name="q", x0=-50.0, y0=10.0, x1=50.0,
+                                      y1=10.0, top_z=1.0, reflectivity=0.65)],
+                          seed=0, config_snapshot={})
+    m_nomp = dataclasses.replace(model, wall_multipath_enabled=False)
+    veh15 = Pose3D(0.0, 4.0, 0.0)
+    ghost = {}
+    for land in (False, True):
+        sc = _basin(land)
+        on_ = GeometricRenderer(sc, acq, model).render(Side.PORT, veh15, 0.0)
+        of_ = GeometricRenderer(sc, acq, m_nomp).render(Side.PORT, veh15, 0.0)
+        ghost[land] = on_.ping.power - of_.ping.power
+    gw, gl = float(ghost[False].sum()), float(ghost[True].sum())
+    check("land behind a quay no longer deletes its ghost: the folded path's "
+          "first leg is read on the near side (mirror image), so the ghost "
+          "equals the water-behind case",
+          gw > 0.0 and np.allclose(ghost[True], ghost[False], rtol=1e-12,
+                                   atol=1e-15 * max(gw, 1e-30)),
+          f"ghost energy water {gw:.6g}, land {gl:.6g}")
+
+    # ---- vertical datum: Gazebo base_link -> waterline -------------------
+    z_eq = HullBoxes.gazebo_box().equilibrium_z()
+    rest = Pose3D(3.0, -2.0, GAZEBO_BASE_REST_Z_M, roll=0.0, pitch=0.0,
+                  yaw=0.4)
+    wl = waterline_pose(rest, GAZEBO_BASE_REST_Z_M)
+    sp = GeometricRenderer(_baseline_scene(), acq, model).sensor_pose(
+        Side.PORT, wl)
+    same = waterline_pose(rest, 0.0)
+    check("a Gazebo pose at the URDF box's rest trim renders the transducer "
+          "sensor_depth_m below the still waterline (the calibration's "
+          "datum); base_link_rest_z_m 0 is the identity (pre-fix behaviour)",
+          abs(GAZEBO_BASE_REST_Z_M - z_eq) < 1e-12
+          and -0.13 < GAZEBO_BASE_REST_Z_M < -0.09
+          and abs(wl.z) < 1e-12
+          and abs(sp.z + model.sensor_depth_m) < 1e-12 and same is rest,
+          f"rest z {GAZEBO_BASE_REST_Z_M:+.4f} m -> transducer "
+          f"{sp.z:+.4f} m (sensor_depth_m {model.sensor_depth_m})")
+
+    # ---- out-of-map: reported, render unchanged --------------------------
+    sc_in = _scene15([], [], size=(401, 401), res=0.1, origin=(-20.0, -5.0))
+    sc_edge = _scene15([], [], size=(401, 401), res=0.1, origin=(-20.0, -5.0),
+                       outside="edge")
+    near = Pose3D(0.0, 20.0, 0.0)          # map ends at y = 35
+    p_in = GeometricRenderer(sc_in, acq, model).render(
+        Side.PORT, Pose3D(0.0, 5.0, 0.0), 0.0).ping
+    p_fill = GeometricRenderer(sc_in, acq, model).render(Side.PORT, near,
+                                                         0.0).ping
+    p_edge = GeometricRenderer(sc_edge, acq, model).render(Side.PORT, near,
+                                                           0.0).ping
+    ds15 = GeometricRenderer(sc_in, acq, model)._ds
+    check("a swath leaving the map says where (out_of_map_from_m), under "
+          "either outside rule; one inside the map says nothing",
+          p_in.out_of_map_from_m is None
+          and p_fill.out_of_map_from_m is not None
+          # the map ends at y = 35, measured from the transducer itself
+          and abs(p_fill.out_of_map_from_m - (35.0 - p_fill.pose.y))
+          <= 2.0 * ds15
+          and p_edge.out_of_map_from_m == p_fill.out_of_map_from_m,
+          f"inside {p_in.out_of_map_from_m}, fill "
+          f"{p_fill.out_of_map_from_m}, edge {p_edge.out_of_map_from_m} m")
+
+    # ---- explicit entries: a pinned material drives every dependent ------
+    lib15 = MaterialLibrary()
+    g15 = GridSpec(origin_x=-20.0, origin_y=-20.0, resolution=0.1, nx=401,
+                   ny=401)
+
+    def _place(explicit):
+        oc = ObjectFieldConfig.from_dict({"classes": {"can": {"amount": {
+            "kind": "count", "value": 3}}},
+                                          "explicit": explicit})
+        return place_objects_v2(g15, oc, lib15, np.random.default_rng(15))
+    base = _place([{"type": "can", "x": 1.0, "y": 1.0},
+                   {"type": "brick", "x": 4.0, "y": 1.0}])
+    over = _place([{"type": "can", "x": 1.0, "y": 1.0,
+                    "material": "concrete"},
+                   {"type": "brick", "x": 4.0, "y": 1.0}])
+    sized = _place([{"type": "plastic_box", "x": 1.0, "y": 1.0,
+                     "params": {"length_m": 1.25}}])
+    conc, metal = lib15.get("concrete"), lib15.get("metal")
+    c0, c1 = base[3], over[3]
+
+    def _band(m, v):
+        return m.reflectivity * 0.85 - 1e-12 <= v \
+            <= min(m.reflectivity * 1.15, 1.0) + 1e-12
+    check("an explicit entry naming a material gets that material's drawn "
+          "reflectivity, roughness and route (concrete can -> raster), its "
+          "size knobs apply, and no other object's draw moves",
+          _band(metal, c0.reflectivity) and _band(conc, c1.reflectivity)
+          and c1.material == "concrete" and not is_facet_object(c1)
+          and is_facet_object(c0)
+          and all(dataclasses.asdict(a) == dataclasses.asdict(b)
+                  for a, b in zip(base[:3] + base[4:], over[:3] + over[4:]))
+          and abs(sized[3].length - 1.25) < 1e-12,
+          f"can metal {c0.reflectivity:.3f} -> concrete "
+          f"{c1.reflectivity:.3f}; plastic_box length {sized[3].length:.3f} m")
+
+
+def _section_calibration() -> None:
+    """[16] calibration scaffolding: registry, artifacts, manifests,
+    quality, identifiability (docs/engineering/).
+
+    Everything here runs on synthetic or shipped inputs only -- no field
+    data is needed or read, and no constant is fitted: these are contract
+    tests for the lifecycle the field session will run.
+    """
+    import copy
+    import yaml as _y16
+    from blueboat_sss_sim.calibration import (artifact as A, manifest as M,
+                                              registry as R)
+    from blueboat_sss_sim.calibration.__main__ import main as cal_main
+    from blueboat_sss_sim.calibration.identifiability import analyse
+    from blueboat_sss_sim.calibration.quality import svlog_quality
+    from blueboat_sss_sim.core.types import Ping
+    from blueboat_sss_sim.sonar.config import SonarConfig as _SC16
+
+    print("[16] calibration scaffolding: registry, artifacts, manifests, "
+          "quality, identifiability")
+    out16 = OUT / "calibration16"
+    out16.mkdir(parents=True, exist_ok=True)
+
+    # ---- the registry describes the code, not a wish --------------------
+    reg = R.load_registry()
+    drift = R.drift_report(reg)
+    in_prof = [p for p in reg if p.in_sonar_profile]
+    check("the parameter registry matches the code: every default equals the "
+          "value the model uses (dataclass, shipped profile, module constant, "
+          "material table, sea-state YAML) and the shipped profile states "
+          "every registered profile parameter explicitly",
+          drift["ok"] and not drift["implicit"] and len(reg) >= 50
+          and len(in_prof) >= 35,
+          f"{drift['checked']} parameters, {len(drift['drift'])} drifted "
+          f"{drift['drift'][:2]}, implicit {drift['implicit']}")
+    bad_reg = _y16.safe_load(Path(reg.path).read_text())
+    for e in bad_reg["parameters"]:
+        if e["name"] == "model.spreading_exponent":
+            e["tunable"] = True                  # physical -> refused
+        if e["name"] == "model.calibration_db_offset":
+            e["default"] = 200.0                 # outside its own bounds
+    (out16 / "bad_registry.yaml").write_text(_y16.safe_dump(bad_reg))
+    try:
+        R.load_registry(out16 / "bad_registry.yaml")
+        reg_msg = ""
+    except ValueError as exc:
+        reg_msg = str(exc)
+    check("a registry entry that contradicts itself is refused (a physical "
+          "constant marked tunable, a default outside its bounds)",
+          "cannot be tunable" in reg_msg and "outside bounds" in reg_msg,
+          reg_msg.splitlines()[1][:90] if reg_msg else "accepted")
+
+    # ---- artifacts: what may be applied, and what never ------------------
+    ex = A.example_artifact()
+    rep = A.validate_artifact(ex, reg)
+    check("the example artifact is valid, and flagged as a placeholder that "
+          "must never be applied", rep.ok and any("placeholder" in w
+                                                  for w in rep.warnings),
+          f"errors {rep.errors}, warnings {rep.warnings}")
+
+    def _bad(mut, needle):
+        d = copy.deepcopy(ex)
+        mut(d)
+        r = A.validate_artifact(d, reg)
+        return (not r.ok) and any(needle in m for m in r.errors), r.errors
+    cases = {
+        "unregistered name": (lambda d: d["parameters"].update(
+            {"model.not_a_knob": {"value": 1, "unit": "1", "status": "joint",
+                                  "uncertainty": {"sd": 1}}}),
+            "not in the parameter registry"),
+        "non-tunable physical constant": (lambda d: d["parameters"].update(
+            {"model.spreading_exponent": {"value": 4.0, "unit": "1",
+                                          "status": "joint",
+                                          "uncertainty": {"sd": 0.1}}}),
+            "not tunable"),
+        "augmentation knob": (lambda d: d["parameters"].update(
+            {"model.gain_drift_amp": {"value": 0.1, "unit": "fraction",
+                                      "status": "joint",
+                                      "uncertainty": {"sd": 0.1}}}),
+            "not tunable"),
+        "unit mismatch": (lambda d: d["parameters"][
+            "model.calibration_db_offset"].update(unit="dB re 1 uPa"),
+            "unit"),
+        "out of bounds": (lambda d: d["parameters"][
+            "model.calibration_db_offset"].update(value=150.0),
+            "outside bounds"),
+        "no uncertainty": (lambda d: d["parameters"][
+            "model.calibration_db_offset"].pop("uncertainty"),
+            "uncertainty must state"),
+        "device term per session": (lambda d: d["sessions"]["S1"].update(
+            {"model.calibration_db_offset": {"value": 80.0, "unit": "dB",
+                                             "status": "joint",
+                                             "uncertainty": {"sd": 1}}}),
+            "cannot vary per session"),
+        "calibration = validation": (lambda d: d["data"].update(
+            validation_sessions=["S1"]), "both calibration and validation"),
+        "scored on fitted data": (lambda d: d["validation"][0].update(
+            session="S1"), "not a validation session"),
+        "position data": (lambda d: d.update(
+            scope={"lat": 33.9, "lon": 130.7}), "position data"),
+        "raw data": (lambda d: d.update(
+            notes=list(range(100))), "raw data"),
+    }
+    caught = {k: _bad(*v) for k, v in cases.items()}
+    check("an artifact is refused, naming why, for each of: "
+          + ", ".join(cases),
+          all(ok for ok, _e in caught.values()),
+          "; ".join(f"{k}: {'ok' if ok else errs}"
+                    for k, (ok, errs) in caught.items() if not ok)
+          or f"{len(cases)} rejection paths")
+    biased = copy.deepcopy(ex)
+    biased["data"]["calibration_sessions"] = ["S1", "S3", "S4"]
+    for sid, v in (("S1", 0.17), ("S3", 0.18), ("S4", 0.19)):
+        biased["sessions"][sid] = {"model.sensor_depth_m": {
+            "value": v, "unit": "m", "status": "measured",
+            "uncertainty": {"sd": 0.01}}}
+    rb = A.validate_artifact(biased, reg)
+    check("per-session values that all lean one way are reported as a "
+          "systematic offset, not accepted silently as nuisance",
+          rb.ok and any("same way" in w for w in rb.warnings), rb.warnings)
+
+    # round trip, write-once
+    paths16 = {}
+    for ext in ("yaml", "json"):
+        pth = A.save_artifact(ex, out16 / f"artifact.{ext}")
+        paths16[ext] = pth
+    back = {k: A.load_artifact(v) for k, v in paths16.items()}
+    try:
+        A.save_artifact(ex, paths16["yaml"])
+        again = False
+    except FileExistsError:
+        again = True
+    check("artifacts round-trip through YAML and JSON unchanged and are "
+          "write-once", back["yaml"] == ex and back["json"] == ex and again,
+          f"{[p.name for p in paths16.values()]}")
+
+    # precedence: defaults < profile < artifact < session < run
+    art = copy.deepcopy(ex)
+    art["parameters"]["model.calibration_db_offset"]["value"] = 82.4
+    art["parameters"]["material.pp_shell.transmission"] = {
+        "value": 0.12, "unit": "fraction (two-way)", "status": "measured",
+        "uncertainty": {"sd": 0.02}}
+    art["sessions"]["S1"]["model.sensor_depth_m"]["value"] = 0.18
+    eff = A.effective_config(None, art, "S1",
+                             {"acquisition.range_length_mm": 30000}, reg)
+    eff0 = A.effective_config(None, art, None, None, reg)
+    c = eff.config
+    try:
+        A.effective_config(None, art, None,
+                           {"model.calibration_db_offset": 70.0}, reg)
+        run_model = False
+    except ValueError:
+        run_model = True
+    check("composition order: profile < artifact < session < run; a run may "
+          "set only acquisition; a parameter outside the sonar profile is "
+          "reported as not applied, never silently dropped",
+          c.model.calibration_db_offset == 82.4
+          and c.model.sensor_depth_m == 0.18
+          and eff0.config.model.sensor_depth_m == 0.15
+          and c.acquisition.range_length_mm == 30000
+          and eff.provenance["model.sensor_depth_m"].endswith("session:S1")
+          and eff.provenance["acquisition.range_length_mm"] == "run"
+          and eff.provenance["model.tvg_compensation"].startswith("artifact")
+          and "material.pp_shell.transmission" in eff.not_applied
+          and run_model,
+          f"offset {c.model.calibration_db_offset}, depth "
+          f"{c.model.sensor_depth_m}, range {c.acquisition.range_length_mm}")
+    prof16 = A.write_effective_profile(eff, out16 / "effective_sonar.yaml",
+                                       {"artifact": art["id"]})
+    reloaded = _SC16.from_yaml(prof16)
+    doc16 = _y16.safe_load(prof16.read_text())
+    check("the effective profile is self-contained (every field stated) and "
+          "reloads to exactly the composed configuration",
+          dataclasses.asdict(reloaded) == dataclasses.asdict(c)
+          and set(doc16["model"]) == {f.name for f in
+                                      dataclasses.fields(c.model)},
+          f"{len(doc16['model'])} model fields")
+
+    # ---- manifests: split by whole session --------------------------------
+    man = M.example_manifest()
+    mrep = M.validate_manifest(man)
+    leaks = {}
+    m1 = copy.deepcopy(man)
+    m1["sessions"][1]["recordings"][0]["path"] = "S1/pass01.svlog"
+    leaks["same recording, two roles"] = M.validate_manifest(m1)
+    m2 = copy.deepcopy(man)
+    m2["sessions"][1]["group"] = m2["sessions"][0]["group"]
+    leaks["one site-day, two roles"] = M.validate_manifest(m2)
+    m3 = copy.deepcopy(man)
+    m3["sessions"][0]["recordings"][0]["sha256"] = "ab" * 32
+    m3["sessions"][1]["recordings"][0]["sha256"] = "ab" * 32
+    leaks["same content, two roles"] = M.validate_manifest(m3)
+    m4 = copy.deepcopy(man)
+    m4["sessions"][0]["recordings"][0]["path"] = "/abs/pass.svlog"
+    leaks["absolute path"] = M.validate_manifest(m4)
+    check("a manifest splits by whole session: the same recording, the same "
+          "content or one site-day under two roles is leakage and refused",
+          mrep.ok and all(not r.ok for r in leaks.values()),
+          "; ".join(f"{k}: {r.errors[:1]}" for k, r in leaks.items()))
+
+    # ---- quality report on a synthetic recording --------------------------
+    traj16 = _line_trajectory(out16 / "line16.yaml", 3.0, 17.0, 0.0)
+    anchor16 = GeoAnchor(lat0=43.6961, lon0=7.3080)   # the public legacy origin
+    sv16, _ = _write_sim_svlog(_baseline_scene(), traj16, anchor16,
+                               out16 / "synthetic16.svlog", n_pings=120,
+                               noise_seed=16)
+    fcfg = _cal_config()
+    fcfg.model.fault_gain_walk_pings = 30
+    sv16w, _ = _write_sim_svlog(_baseline_scene(), traj16, anchor16,
+                                out16 / "synthetic16_walk.svlog",
+                                n_pings=120, noise_seed=16, sonar_cfg=fcfg)
+    q = svlog_quality(sv16, with_hash=True)
+    qw = svlog_quality(sv16w)
+    codes = {f["code"] for f in q["flags"]}
+    codes_w = {f["code"] for f in qw["flags"]}
+    text16 = json.dumps(q)
+    check("the quality report reads a simulated recording as usable (the "
+          "device's normalisation invariants hold on every ping), flags a "
+          "gain walk, and never carries a position fix or a path",
+          q["usable"] and q["normalisation_invariants"]["span_within_90db"]
+          == 1.0 and "port_gain_walk" not in codes
+          and "port_gain_walk" in codes_w and "first_fix" not in text16
+          and str(out16) not in text16 and len(q["sha256"]) == 64,
+          f"flags {sorted(codes)} / walk {sorted(codes_w)}")
+    try:
+        cal_main(["quality", "--out", str(out16 / "q"), str(sv16)])
+        inside = False
+    except SystemExit as exc:
+        inside = "write-once" in str(exc)
+    check("the quality CLI refuses to write inside a recording's directory "
+          "(field data are write-once, CM-7)", inside)
+
+    # ---- the wire never spans more than the device's 90 dB ----------------
+    acq16, mdl16 = _cal_config().acquisition, _cal_config().model
+    enc16 = PingEncoder(Side.PORT, acq16, mdl16)
+    rng16 = np.random.default_rng(16)
+    wide = 0
+    for k in range(400):
+        pw = 10 ** rng16.uniform(-14, -2, acq16.num_results)
+        f16 = parse_frame(enc16.encode(Ping(
+            side=Side.PORT, power=pw, pose=Pose3D(0, 0, 0), altitude_m=2.0,
+            t_sim=0.05 * k, start_mm=0,
+            length_mm=acq16.range_length_mm)).raw_frame)
+        wide += float(f16["max_pwr_db"]) - float(f16["min_pwr_db"]) \
+            > 90.0 + 1e-6
+    check("clamped pings never read wider than max_span_db once both "
+          "endpoints are float32 on the wire (the device's never do)",
+          wide == 0, f"{wide} of 400 clamped pings wider than 90 dB")
+
+    # ---- identifiability: the [2e] ridge, found by the generic tool -------
+    P2 = ["model.tvg_compensation", "model.lambert_exponent"]
+    P3 = P2 + ["model.calibration_db_offset"]
+    one2 = analyse(P2, [7.33])
+    one3 = analyse(P3, [7.33])
+    two3 = analyse(P3, [1.40, 7.33])
+    max_two = max(abs(two3.correlation[i][j]) for i in range(3)
+                  for j in range(3) if i != j)
+    check("local identifiability reproduces the calibration's ridge: at one "
+          "altitude tvg_compensation and lambert_exponent are one parameter "
+          "(and with the level offset the system is singular); two altitudes "
+          "separate all three",
+          abs(one2.correlation[0][1]) > 0.95 and one3.condition_number > 1e3
+          and two3.condition_number < 100.0 and max_two < 0.95
+          and not two3.ridges,
+          f"one altitude corr {one2.correlation[0][1]:.4f}, cond3 "
+          f"{one3.condition_number:.3g}; two altitudes cond "
+          f"{two3.condition_number:.3g}, max |corr| {max_two:.3f}")
+    rc = cal_main(["registry", "--check", "--json",
+                   str(out16 / "registry_check.json")])
+    rv = cal_main(["validate-artifact", str(paths16["yaml"]), "--json",
+                   str(out16 / "artifact_check.json")])
+    check("the sss_calibration CLI checks the registry and validates an "
+          "artifact (exit 0)", rc == 0 and rv == 0, f"exit {rc} / {rv}")
 
 
 if __name__ == "__main__":

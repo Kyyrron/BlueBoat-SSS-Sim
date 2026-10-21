@@ -198,7 +198,16 @@ lever arm follows the attitude** (2026-10-08): a 10° roll lifts one
 transducer and dips the other by `mount_y·sin(roll)` ≈ 49.5 mm on the
 ±0.285 m mount (the earlier "3 mm" was the horizontal term only), and pitch
 swings the transducer `sensor_depth·sin(pitch)` along-track — both change
-the slant geometry of that ping. **Yaw** turns the fan, so the ground a
+the slant geometry of that ping. **Vertical datum (2026-10-21).** The
+vehicle pose's z = 0 is the boat floating level at rest on the still
+water, so `sensor_depth_m` is the transducer face's depth below the still
+waterline — what every offline and calibration render (pose z = 0) has
+always assumed. Gazebo's base_link floats at rest 0.111 m *below* that
+(`sea.motion.GAZEBO_BASE_REST_Z_M`, the URDF buoyancy box's equilibrium),
+and until 2026-10-21 the node fed that z straight in: in Gazebo the
+transducers sat ~0.26 m deep. The node now moves every received pose onto
+the waterline datum first (`base_link_rest_z_m`; `0.0` restores the old
+behaviour); Gazebo recordings made before are not comparable bit for bit. **Yaw** turns the fan, so the ground a
 ping images at range r moves `r·sin(Δψ)` along-track, in opposite
 directions on the two sides (the differential mode; pitch is the common
 mode — Lei et al. 2026, arXiv:2604.19901). Every ping is rendered at the
@@ -575,7 +584,11 @@ spacing = v/PRF.
   additive; absent means `fill`); `generate_scene` and every world already
   on disk keep `fill`. Either way, keep the survey at least `range_max`
   inside the limits when the edge matters; an object on the edge row
-  extends outward as a strip under `edge`.
+  extends outward as a strip under `edge`. It is no longer silent: every
+  ping reports where its centre ground line leaves the map
+  (`Ping.out_of_map_from_m`, per side on `~/ground_truth/sensor`, one node
+  warning per run), so a dataset can drop or flag those ranges; the render
+  itself is unchanged.
 * **A9 — closed (2026-09-02, re-anchored 2026-09-03).** Walls reflect,
   echo *and* occlude, quays and pontoons differently: §11. What remains
   assumed is the face model itself — a uniform vertical plane with one
@@ -750,6 +763,21 @@ raster:
   corner band additionally on its own direct leg. Smoke `[4d]` gates both:
   a second quay behind the first adds **±0.0 dB** past its foot, and a quay
   behind a pontoon returns **+78 dB** over the same scene without it.
+  **The ghost's own first leg** (2026-10-21): a wall ghost is rendered from
+  the mirror source, so the stretch of its line before the wall plane lies
+  behind the wall -- but that stretch is the mirror image of the real
+  transducer → face leg. Its heights (and facet occluders and
+  transmission) are now read at the reflected, near-side point; before,
+  land or a high apron behind a quay set the horizon there and deleted
+  the ghost outright (the harbour recipe `land` + `quay`: ghost energy 0
+  instead of the water-behind value). Flat basins are unchanged; smoke
+  `[15]`.
+* **Smooth objects behind a wall** (2026-10-21). The facet layer is
+  occluded by the walls exactly as the seabed is (the direct path's band
+  rule per patch, `multipath.segment_blocked`). Before, a glint behind a
+  quay was painted while its ground truth said "not visible"; smoke
+  `[15]` pins image and label together (and a pontoon whose draft the ray
+  passes under still lets the object be seen).
 * **Ground truth** unchanged: one `object_type: "wall"` contact per
   ping-side (`wall:<name>`, face distance, face span, occluded remainder).
 

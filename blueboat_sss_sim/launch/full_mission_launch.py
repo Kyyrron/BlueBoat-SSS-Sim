@@ -41,6 +41,10 @@ quiet             filter known-noisy startup lines      (default true)
 sim_origin_lat / sim_origin_lon
                   MAVROS-shim origin override; empty = the world's anchor
 with_mavros_shim  forwarded to sss_sim_launch.py        (default true)
+sonar_config      sonar profile YAML, forwarded to sss_sim_launch.py
+                  (default '': the world's frozen copy, else the package
+                  default -- the same resolution as there)
+sonar_seed        sensor-noise seed, forwarded (default 0 = fresh, logged)
 headless          run the Gazebo server only (``gz sim -s``), no GUI --
                   scripted runs such as ``test/gazebo_sea_test.py``
                                                   (default false)
@@ -170,6 +174,8 @@ _declare("with_mavros_shim", default_value=True)
 _declare("sim_origin_lat", default_value="")
 _declare("sim_origin_lon", default_value="")
 _declare("headless", default_value=False)
+_declare("sonar_config", default_value="")
+_declare("sonar_seed", default_value="0")
 
 # The six run-dependent acquisition parameters, forwarded to sss_sim_launch.
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
@@ -323,6 +329,8 @@ def launch_setup():
                                  "with_mavros_shim": sl.arg("with_mavros_shim"),
                                  "sim_origin_lat": sl.arg("sim_origin_lat"),
                                  "sim_origin_lon": sl.arg("sim_origin_lon"),
+                                 "sonar_config": sl.arg("sonar_config"),
+                                 "sonar_seed": sl.arg("sonar_seed"),
                                  **{a: sl.arg(a) for a in ACQUISITION_ARGS}})
 
     # 4. Sea state: current + waves on the hull (docs/sea_state_model.md).

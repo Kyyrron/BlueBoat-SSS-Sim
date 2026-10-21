@@ -106,6 +106,31 @@ def predict_pose(pose: Pose3D, v_body, w_body, dt: float,
                   yaw=pose.yaw + float(w[2]) * dt)
 
 
+#: Height of Gazebo's ``blueboat/base_link`` origin above the still waterline
+#: when the boat floats at rest: the URDF buoyancy box's own equilibrium
+#: (about -0.111 m; the catamaran hydrostatics share it by construction,
+#: ``hull.py``). Gazebo's poses carry this trim; the renderer -- and every
+#: offline and calibration render, at pose z = 0 -- takes z = 0 as the
+#: waterline, so ``sensor_depth_m`` is depth below the still water.
+GAZEBO_BASE_REST_Z_M = float(HullBoxes.gazebo_box().equilibrium_z())
+
+
+def waterline_pose(pose: Pose3D, base_rest_z: float) -> Pose3D:
+    """A Gazebo base_link pose re-referenced so that z = 0 is the boat
+    floating level at rest (the renderer's datum): ``z - base_rest_z``.
+
+    Without it a Gazebo run put the transducers ``sensor_depth_m - 0.111``
+    m too deep (0.26 m instead of 0.15) while every calibration render
+    assumed 0.15 (2026-10-21). ``base_rest_z = 0`` returns the pose
+    unchanged (the pre-fix behaviour, ``base_link_rest_z_m:=0.0``).
+    Heave, roll and pitch are untouched: only the constant datum moves.
+    """
+    if base_rest_z == 0.0:
+        return pose
+    return Pose3D(pose.x, pose.y, pose.z - float(base_rest_z),
+                  roll=pose.roll, pitch=pose.pitch, yaw=pose.yaw)
+
+
 class HighRatePose:
     """The boat's pose from Gazebo's 100 Hz ``PosePublisher``
     (``/sim/sea_state/boat_pose``, a stamped ``TransformStamped`` bridged

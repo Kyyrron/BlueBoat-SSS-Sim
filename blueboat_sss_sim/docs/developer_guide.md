@@ -254,10 +254,20 @@ All noise/physics knobs are in the sonar YAML (`configuration_guide.md
 
 ## 4. Testing
 
-* `python3 -m test.smoke_test` — the offline gate (439 checks: geo →
-  world folder → render → encode → decode → metrics → calibration),
-  artifacts in `/tmp/blueboat_sss_smoke/`. Run it after any change; it
-  needs only numpy/scipy/yaml/PIL.
+* `python3 -m test.smoke_test` — the offline gate (geo → world folder →
+  render → encode → decode → metrics → calibration; 439 checks with the
+  corpus and the BlueBoat-SSS checkout beside it, fewer with visible SKIPs
+  without them), artifacts in `/tmp/blueboat_sss_smoke/`. Run it after any
+  change; it needs numpy/scipy/yaml/PIL, and PySide6 with a working
+  `libEGL.so.1` for `[12]` (a container without it crashes there:
+  `apt-get install libegl1`). `[15]` pins the 2026-10-21 consistency fixes
+  (facets behind walls, the wall ghost's first leg, the Gazebo datum,
+  out-of-map reporting, atomic explicit entries); `[16]` the calibration
+  scaffolding.
+* Calibration contracts: `python3 -m blueboat_sss_sim.calibration registry
+  --check` (registry vs code), `validate-manifest`, `quality`,
+  `validate-artifact`, `effective-profile`, `identifiability`
+  (`sss_calibration`; design in `docs/engineering/`).
   `QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke` covers the GUI,
   including `[g8]` screen adaptation — every page's layout minimum fits a
   1000×600 display, tool rows wrap, previews rescale, and a page

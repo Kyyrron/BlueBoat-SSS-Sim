@@ -199,6 +199,13 @@ model:
   # defined, never collapsing. The floor is the max of the two, so this can
   # only lighten a shadow.
   reverberation_reference: ambient
+  # The floor itself: a culled bin sits this many dB under that reference,
+  # with the seabed's own speckle. MEASURED on the corpus quay (deep shadow
+  # 6-12 m behind the face 17-25 dB under the seabed, 2026-09-18); 0 restores
+  # the white receiver floor that made every shadow ~30 dB too deep. Stated
+  # here (2026-10-21) rather than left to the dataclass default, so a frozen
+  # copy of this profile freezes it too -- the value is unchanged.
+  reverberation_db: 18.0
   # Sediment volume backscatter beside the surface term (Bell & Linnett
   # 1997 eq. 12). Shipped at 0 on purpose: the Lambert coefficient this
   # model is calibrated on is an empirical total over the corpus's grazing

@@ -361,15 +361,21 @@ of `worldgen.objects.PINNED_FIELDS` (what
 `worldgen.objects.placed_to_explicit` writes) for an instance that must
 stay put — that is what the World Builder's hand-placement screen does.
 
-Two asymmetries worth knowing: `material` is assigned *after* the
-reflectivity was computed from the class's own material, so give
-`reflectivity` too when the material matters acoustically (the raster path
-only — a facet object ignores reflectivity; `transmission` and the surface
-roughness, which decides facet vs raster, do follow the pinned `material`
-since 2026-10-21); and writing
+A pinned `material` drives every property that depends on it: the drawn
+`reflectivity` (raster path only — a facet object ignores it), the
+`transmission` and the surface roughness, which decides facet vs raster
+(all three since 2026-10-21; before, the drawn reflectivity stayed the class
+default's and a concrete `can` kept metal's 0.97). A pinned `reflectivity`
+still wins. The entry's `params` size knobs (`length_m`, `width_m`,
+`height_m`, `diameter_m` — the class's `params_schema`) now size the
+instance as they do for a scattered one; they were stored and ignored
+before. Neither change draws anything extra, so no other object moves.
+One asymmetry remains: writing
 `roll_deg`/`pitch_deg` at all sends the instance down the 3-D solid path
 (`rest` stops being `canonical`), so omit both for an object that should
-keep the flat 2.5-D stamp.
+keep the flat 2.5-D stamp. Note also that a class entry's amount is
+`amount: {kind: count|density, value: N}`; the `objects:` section ignores
+unknown keys, so a bare `count: N` places nothing.
 
 **Hand placement (World Builder Screen 5).** The builder writes
 `explicit` from map clicks, and can additionally **pin** Screen 4's
@@ -536,7 +542,7 @@ surface mirror is **off** in it).
 
 | Group | Keys | Guidance |
 |---|---|---|
-| Mounting | `sensor_depth_m`, `mount_x_m`, `mount_y_abs_m`, `beam_tilt_deg` (20), `vertical_aperture_deg` (50, spec), `horizontal_aperture_deg` (0.5, spec) | match the physical bracket; tilt+aperture set the usable swath |
+| Mounting | `sensor_depth_m` (transducer face below the **still waterline** with the boat level at rest; in Gazebo the node first moves the base_link pose onto that datum, `base_link_rest_z_m`), `mount_x_m`, `mount_y_abs_m`, `beam_tilt_deg` (20), `vertical_aperture_deg` (50, spec), `horizontal_aperture_deg` (0.5, spec) | match the physical bracket; tilt+aperture set the usable swath |
 | Timing | `max_ping_rate_hz` (20, the device law measured on the corpus: 50 ms to 30 m, 2R/c + 3 ms beyond) | set 0 to disable the cap (experiment only) |
 | Acoustics | `lambert_exponent` (1.0), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (4.0), `tvg_compensation` (**0.30**), `specular_spreading_exponent` (**2.0**), `array_length_m` (**0.0**), `beam_sidelobe_floor` (0.004), `specular_strength` (**12**), `specular_width_deg` (8.0), `specular_looks` (25), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | the range law was re-fitted on **two altitudes at once** on 2026-09-18 (beach 1.40 m + harbour 7.33 m): `tvg_compensation` 0 → 0.30, and the coherent component got its own spreading (an image source spreads once, not twice) so the first-bottom return follows the device's altitude law. Only the product `spreading_exponent · (1 − tvg_compensation)` is determined; raising the TVG flattens the image. Sidelobe/specular shape the FBR line — don't zero them if downstream bottom tracking must lock. `array_length_m` floors the along-track footprint at the aperture; 0 because the corpus says the device focuses its near field |
 | Multipath | `multipath_enabled` (false), `multipath_gain` (0.12) | optional second-bottom-echo ghost, +altitude in slant range |

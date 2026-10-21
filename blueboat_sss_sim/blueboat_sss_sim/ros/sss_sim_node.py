@@ -41,7 +41,22 @@ since the ``gain_index`` field is ``uint16`` and cannot carry ``-1``.
 Simulation-only parameters
 --------------------------
 scene_dir (required), sonar_config (YAML with the ``model:`` section),
-odom_topic, publish_ground_truth, seed, predict_pose, pose_topic.
+odom_topic, publish_ground_truth, seed, predict_pose, pose_topic,
+base_link_rest_z_m.
+
+``seed`` 0 draws a fresh noise seed from OS entropy at start-up -- and logs
+it and puts it on ``~/ground_truth/sensor`` (``noise_seed``), so any run can
+be replayed with ``seed:=<that value>`` (2026-10-21; before, the entropy
+seed was never recorded).
+
+Vertical datum (2026-10-21). Gazebo's ``blueboat/base_link`` floats at rest
+``base_link_rest_z_m`` above the still waterline (default
+``sea.motion.GAZEBO_BASE_REST_Z_M``, the URDF buoyancy box's equilibrium,
+-0.111 m); the renderer takes z = 0 as the waterline. Every received pose
+is re-referenced (``sea.motion.waterline_pose``) before it is rendered, so
+the transducers sit ``sensor_depth_m`` below the still water as in every
+offline and calibration render. ``base_link_rest_z_m:=0.0`` restores the
+pre-fix behaviour (transducers ~0.111 m deeper).
 
 Platform motion (2026-10-08; 100 Hz pose 2026-10-09). Each ping is
 rendered at the vehicle pose *at the ping time*: Gazebo's per-step model
@@ -76,7 +91,8 @@ from std_msgs.msg import Bool, String, UInt8MultiArray
 from blueboat_interfaces.msg import OmniscanProfile
 
 from ..core.geometry import quat_to_rpy
-from ..sea.motion import HighRatePose, predict_pose
+from ..sea.motion import (GAZEBO_BASE_REST_Z_M, HighRatePose, predict_pose,
+                          waterline_pose)
 from ..core.types import Pose3D, Side
 from ..sonar.config import (AUTO_GAIN_INDEX, AcquisitionParams, SonarConfig,
                             SonarModelConfig)
@@ -124,6 +140,7 @@ class SideScanSonarSimNode(Node):
         self.declare_parameter("seed", 0)
         self.declare_parameter("predict_pose", True)
         self.declare_parameter("pose_topic", "/sim/sea_state/boat_pose")
+        self.declare_parameter("base_link_rest_z_m", GAZEBO_BASE_REST_Z_M)
 
         scene_dir = self.get_parameter("scene_dir").value
         if not scene_dir:
@@ -132,7 +149,9 @@ class SideScanSonarSimNode(Node):
         self._scene = SceneModel.load(scene_dir)
         self.get_logger().info(
             f"scene loaded: {self._scene.grid.nx}x{self._scene.grid.ny} @ "
-            f"{self._scene.grid.resolution} m, {len(self._scene.objects)} objects")
+            f"{self._scene.grid.resolution} m, {len(self._scene.objects)} "
+            f"objects, beyond the map: '{self._scene.outside}'")
+        self._oom_warned = False
         stale = self._scene.stale_rasters()
         if stale:
             # SceneModel.load says the same through Python logging, which
@@ -155,7 +174,17 @@ class SideScanSonarSimNode(Node):
             self._model_cfg = SonarModelConfig()
 
         seed = int(self.get_parameter("seed").value)
-        self._rng = np.random.default_rng(seed if seed else None)
+        if not seed:
+            # OS entropy, as before -- but a concrete, recorded value, so a
+            # run's noise can be replayed (`seed:=<noise_seed>`).
+            seed = int(np.random.SeedSequence().entropy) % (2 ** 63 - 1) or 1
+        self._noise_seed = seed
+        self._rng = np.random.default_rng(seed)
+        self._base_rest_z = float(
+            self.get_parameter("base_link_rest_z_m").value)
+        self.get_logger().info(
+            f"sensor noise seed {seed} (replay with seed:={seed}); base_link "
+            f"rest z {self._base_rest_z:+.4f} m above the still waterline")
 
         # ---- Publishers (best-effort: matches real node) --------------------
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -321,18 +350,35 @@ class SideScanSonarSimNode(Node):
         got = self._ping_pose(t_now)
         if got is None:
             return
-        pose, age = got
+        boat, age = got
+        # Gazebo's base_link -> the renderer's waterline datum (module doc).
+        pose = waterline_pose(boat, self._base_rest_z)
         t_sim = t_now - (self._t0 or 0.0)
         gt_payload = []
         sensors: dict = {}
         for ch in self._channels.values():
             rendered = self._renderer.render(ch.side, pose, t_sim)
             sp = rendered.ping.pose
+            oom = rendered.ping.out_of_map_from_m
             sensors[ch.side.value] = {
                 "pose": [round(float(v), 5) for v in
                          (sp.x, sp.y, sp.z, sp.roll, sp.pitch, sp.yaw)],
                 "altitude_m": round(float(rendered.ping.altitude_m), 4),
-                "ping_number": None, "dropped": False}
+                "ping_number": None, "dropped": False,
+                # Additive (2026-10-21): where this side's swath leaves the
+                # authored map, null while it stays inside (A13).
+                "out_of_map_from_m": (None if oom is None
+                                      else round(float(oom), 2))}
+            if oom is not None and not self._oom_warned:
+                self._oom_warned = True
+                self.get_logger().warning(
+                    f"the {ch.side.value} swath leaves the world map "
+                    f"{oom:.1f} m out: beyond it the sonar sees the scene's "
+                    f"'{self._scene.outside}' rule (a flat phantom plain at "
+                    "the deepest cell under 'fill', the repeated edge under "
+                    "'edge'), not authored seabed. Keep surveys range_max "
+                    "inside the limits (docs/sonar_model.md A13); "
+                    "ground_truth/sensor reports it per ping. (Logged once.)")
             if ping_dropped(self._model_cfg, ch.rng):
                 # Device counter still advances on the real hardware.
                 if ch.encoder is not None:
@@ -381,14 +427,19 @@ class SideScanSonarSimNode(Node):
             # Every cycle, contacts or not: what the validation tooling
             # (analysis/sea_validation.py) reads to know exactly where each
             # ping was taken from. Pose = [x, y, z, roll, pitch, yaw], world
-            # ENU, metres / radians.
+            # ENU, metres / radians. `boat` is the pose as received (Gazebo's
+            # base_link, predicted to the ping time); `sensors.*.pose` is
+            # what was rendered, on the waterline datum `base_link_rest_z_m`
+            # below it (additive keys `base_link_rest_z_m`, `noise_seed`).
             m = String()
             m.data = json.dumps({
                 "t_sim": round(t_sim, 4), "stamp": round(t_now, 4),
                 "pose_age_ms": round(1000.0 * age, 1), "predicted": self._predict,
                 "pose_source": self._pose_source,
                 "boat": [round(float(v), 5) for v in
-                         (pose.x, pose.y, pose.z, pose.roll, pose.pitch, pose.yaw)],
+                         (boat.x, boat.y, boat.z, boat.roll, boat.pitch, boat.yaw)],
+                "base_link_rest_z_m": round(self._base_rest_z, 5),
+                "noise_seed": self._noise_seed,
                 "sensors": sensors})
             self._sensor_pub.publish(m)
 

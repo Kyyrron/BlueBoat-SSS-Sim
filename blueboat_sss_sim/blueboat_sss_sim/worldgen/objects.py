@@ -903,9 +903,20 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
             raise KeyError(f"Unknown object class '{t}' in objects.explicit "
                            f"(available: {sorted(CATALOG)})")
         spec = CATALOG[t]
+        item_params = (item["params"] if isinstance(item.get("params"),
+                                                    Mapping) else None)
+        # The pinned material and the class knobs go INTO the draw (same
+        # RNG draws either way, so no other object moves): the drawn
+        # reflectivity is then the pinned material's, and a size knob
+        # (`length_m`, `diameter_m`, ...) sizes the instance -- before
+        # 2026-10-21 both were silently left at the class default's draw.
         inst = _make_instance(spec, len(placed), float(item["x"]),
                               float(item["y"]),
-                              float(item.get("yaw", 0.0)), cfg, materials, rng)
+                              float(item.get("yaw", 0.0)), cfg, materials, rng,
+                              material_override=(str(item["material"])
+                                                 if "material" in item
+                                                 else None),
+                              params=item_params)
         # Verbatim overrides: whatever the author pins, stays pinned.
         for key in ("length", "width", "proud_height", "burial",
                     "fill_fraction", "reflectivity"):
@@ -922,8 +933,8 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
         # The shell and the surface follow the material (a pinned entry that
         # names one gets that material's transmission and roughness, not the
         # class default's -- roughness decides facet vs raster, NC #17) and
-        # the instance's construction. Reflectivity does not follow: it is
-        # only drawn, or pinned verbatim (see the configuration guide).
+        # the instance's construction; the drawn reflectivity follows it too
+        # (above), unless the entry pins `reflectivity` verbatim.
         _mat = materials.get(inst.material)
         inst.transmission = _instance_transmission(_mat.transmission,
                                                    inst.params)

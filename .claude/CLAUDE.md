@@ -72,6 +72,15 @@ Qt-free so the smoke test drives the whole build headless). Keep it so — the
 offline smoke test depends on it. `builder/layout.py` = the Qt screen-size
 contract every page obeys.
 
+**Field calibration (2026-10-21):** `blueboat_sss_sim/calibration/`
+(ROS-free; `sss_calibration`): the parameter registry
+`config/parameter_registry.yaml` (checked against the code by smoke `[16]`
+-- a moved constant fails until the registry moves with it), session
+manifests (whole-session splits), `.svlog` quality reports, local
+identifiability, and versioned calibration artifacts composed into a
+self-contained effective profile. A calibration never edits
+`default_sonar.yaml`. Design and runbook: `docs/engineering/`.
+
 **Extension seams:** `SonarRenderer` (ABC, `sonar/renderer.py`; everything
 downstream is renderer-agnostic); `DEPTH_PRESETS`
 (`worldgen/depth/presets.py`), `CATALOG` (`worldgen/objects.py`),
@@ -145,9 +154,20 @@ to the calibrated index 4 and reports 4. Modelled ladder **0–7** (4–7
 measured on the corpus); any other index raises in `AcquisitionParams`.
 
 Sim-only params: `scene_dir` (**required**; world folder or legacy bundle),
-`sonar_config`, `odom_topic`, `publish_ground_truth`, `seed`,
-`predict_pose` (default true), `pose_topic` (default
-`/sim/sea_state/boat_pose`).
+`sonar_config`, `odom_topic`, `publish_ground_truth`, `seed` (0 = a fresh
+entropy seed that is logged and published as `noise_seed`; launch arg
+`sonar_seed`), `predict_pose` (default true), `pose_topic` (default
+`/sim/sea_state/boat_pose`), `base_link_rest_z_m` (2026-10-21, below).
+
+**Vertical datum (2026-10-21).** The renderer's vehicle z = 0 is the boat
+floating level on the still water, so `sensor_depth_m` is depth below the
+still waterline -- what every offline and calibration render assumes.
+Gazebo's base_link rests 0.111 m below that
+(`sea.motion.GAZEBO_BASE_REST_Z_M`, the URDF box's equilibrium); the node
+now subtracts `base_link_rest_z_m` from every received pose before
+rendering (`0.0` = the old ~0.26 m submersion). `ground_truth/sensor`'s
+`boat` stays the received pose; `sensors.*.pose` is the rendered one.
+Gazebo recordings made before 2026-10-21 are not comparable bit for bit.
 
 **The sonar follows the hull (2026-10-08; 100 Hz pose 2026-10-09).** Each
 ping is rendered at the boat's pose propagated to the ping time with its
@@ -506,7 +526,12 @@ python3 -m test.smoke_test        # from the package source root
 The only automated gate of the Stop hook (no lint, no type-check). **439
 checks** (436 + one visible `SKIP`, covering the two bridge checks and the
 `ApplyLinkWrench` detection, when the interpreter has no ROS; one
-more when the `BlueBoat-SSS` checkout beside it is missing), ~205 s (2026-10-20).
+more when the `BlueBoat-SSS` checkout beside it is missing), ~205 s (2026-10-20);
+2026-10-21 added 20 more in `[15]` (image/label/geometry consistency: facets
+behind walls, the wall ghost's first leg, the Gazebo datum, out-of-map
+reporting, atomic explicit entries) and `[16]` (calibration scaffolding).
+`[12]` imports PySide6's QtGui, which needs `libEGL.so.1`: a container
+without it crashes there (`apt-get install libegl1`).
 Section `[10]` (sea state) is unit-level only — the current's statistics,
 bound, smoothness, tick-independence and no-reset; the plain-language
 preset keys; the sensor lever arm; the image's roll/pitch/yaw response
@@ -575,7 +600,7 @@ a too-short timeout makes the gate pass silently.
 ## 8. Working on this module
 
 - **Read `docs/` first** — `architecture.md`, `sonar_model.md` (physics,
-  assumptions A1–A12), `topics.md` (raw-frame byte map),
+  assumptions A1–A13), `topics.md` (raw-frame byte map),
   `integration_guide.md`, `configuration_guide.md`, `developer_guide.md`,
   `roadmap.md`.
 - Frames: world ENU, z = 0 at the surface, depths negative; world (0, 0) is

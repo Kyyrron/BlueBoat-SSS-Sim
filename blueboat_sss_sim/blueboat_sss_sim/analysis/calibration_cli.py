@@ -170,11 +170,15 @@ def _simulate_with(bundle: Path, cfg: SonarConfig, n_pings: int, seed: int,
             t = t0 + k * dt
             x, y, yaw = traj.pose_at(t)
             ping = rr.render(side, Pose3D(x, y, 0.0, 0.0, 0.0, yaw), t).ping
+            # The node's own noise call, `ambient` included: without it a
+            # shadow's reverberation floor fell back to the unoccluded
+            # reference and this report's shadows differed from a live run's.
             ping.power = apply_ping_noise(ping.power, bin_r < ping.altitude_m,
                                           1.0, model, rng,
                                           specular=ping.specular,
                                           texture=ping.texture,
-                                          unoccluded=ping.unoccluded)
+                                          unoccluded=ping.unoccluded,
+                                          ambient=ping.ambient)
             e = enc.encode(ping)
             out.append(ProfileRecord(
                 side=side, ping_number=e.ping_number,

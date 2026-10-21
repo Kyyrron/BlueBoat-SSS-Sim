@@ -15,6 +15,8 @@ setup(
         ("share/" + package_name + "/config", glob("config/*.yaml")),
         ("share/" + package_name + "/launch", glob("launch/*.py")),
         ("share/" + package_name + "/docs", glob("docs/*.md")),
+        ("share/" + package_name + "/docs/engineering",
+         glob("docs/engineering/*.md")),
         ("share/" + package_name + "/msg_reference", glob("msg_reference/*.msg")),
     ],
     install_requires=["setuptools"],
@@ -38,6 +40,7 @@ setup(
             "sss_calibration_report = blueboat_sss_sim.analysis.calibration_cli:main",
             "sss_svlog_compare = blueboat_sss_sim.analysis.svlog_compare:main",
             "sss_sea_validation = blueboat_sss_sim.analysis.sea_validation:main",
+            "sss_calibration = blueboat_sss_sim.calibration.__main__:main",
         ],
     },
 )

@@ -61,13 +61,17 @@ ranges + material IDs) behind the same ABC. The interface, noise stack
 and encoder layers are already backend-agnostic.
 
 ## 8. Sim-to-real calibration over a known bottom
-The first pass is done: the encoder now carries the device's per-ping
-normalisation, and the range law, noise floor, gain ladder and level
-reference are fitted against the Shiraishi-jima harbour corpus
-(`docs/sonar_model.md` §6). What that corpus cannot give is the seabed:
-`lambert_exponent` is confounded with an unsampled bottom type, and the
-residual floor is set by site geometry — two real passes of the same water
-disagree by 1.8–3.1 dB RMS, against a 0.67 dB reduction floor. Closing that
-needs a capture over a **known, flat** bottom at two or more altitudes with
-the acquisition written down; `sss_calibration_report` runs the comparison
-as soon as one exists.
+Two passes are done (`docs/sonar_model.md` §6): the encoder carries the
+device's per-ping normalisation, and since 2026-09-18 the range law, level
+and coherent spreading are fitted on **two** altitudes together (`bath3`,
+1.40 m sand, and `reflectionEvidenceFullharbour`, 7.33 m), which is what
+measured `lambert_exponent` (1.0) and `tvg_compensation` (0.30) — over
+**sand only**. What is still missing is a bottom-*class* lever: the harbour
+bottom type was never sampled, the angular law is one global exponent, and
+two real passes of the same water disagree by 1.8–3.1 dB RMS against a
+0.67 dB reduction floor. Closing that needs captures over **independently
+classified, flat** bottoms at three or more altitudes with the acquisition
+written down. The lifecycle tooling for it — session manifests, quality
+reports, identifiability, versioned calibration artifacts, the effective
+profile — exists since 2026-10-21 (`blueboat_sss_sim/calibration/`,
+`docs/engineering/`); the fit itself waits for that data.

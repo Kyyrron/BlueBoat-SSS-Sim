@@ -45,7 +45,9 @@ ros2 run blueboat_sss_sim generate_world --config config/default_world.yaml --ou
 ```
 
 Offline verification without ROS (also wired as the session gate), from
-`blueboat_sss_sim/`: `python3 -m test.smoke_test` (434 checks). GUI checks:
+`blueboat_sss_sim/`: `python3 -m test.smoke_test` (439 checks with the field corpus
+and the BlueBoat-SSS checkout; visible SKIPs without them). Calibration tooling:
+`python3 -m blueboat_sss_sim.calibration --help` (`docs/engineering/`). GUI checks:
 `QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke`.
 
 ## GPS anchoring in one paragraph
