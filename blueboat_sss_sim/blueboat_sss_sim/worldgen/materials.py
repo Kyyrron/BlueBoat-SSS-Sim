@@ -146,6 +146,9 @@ _ROUGHNESS_M: dict[str, float] = {
     # coming back. That single number is what separates the measured
     # +2.5 dB highlight from the +32 dB an unsplit model produced.
     "pp_shell": 1.0e-4,
+    # Rotomoulded polyethylene skin of a cement-filled weight (pass 3, the
+    # pool's RISU #60R pickling weights): moulded, smooth like any PE part.
+    "pe_cement": 1.0e-4,
 }
 
 _OBJECT_DEFAULTS: dict[str, Material] = {
@@ -190,6 +193,13 @@ _OBJECT_DEFAULTS: dict[str, Material] = {
     # with nearly transparent walls still shadows by 9 dB.
     "pp_shell": Material("pp_shell", 0.18, 0.05, 0, 0.0, (0.88, 0.90, 0.92),
                          transmission=0.11),
+    # A polyethylene shell filled with cement -- the pool targets of
+    # 2026-10-28 (RISU "tsukemono omoshi" #60R: 228 mm x 94 mm, 6.0 kg, body
+    # polyethylene, contents cement/concrete; maker's catalogue). A FACET
+    # object: smooth moulded PE (NC #17), its echo from a PE layer on a
+    # cement half-space (`_ACOUSTIC`, backing "concrete"); opaque (no
+    # transmission). `reflectivity` is read only on the raster path.
+    "pe_cement": Material("pe_cement", 0.40, 0.05, 0, 0.0, (0.88, 0.88, 0.86)),
 }
 
 
@@ -230,7 +240,21 @@ _ACOUSTIC: dict[str, tuple[float, float, str, float]] = {
     # a 2 mm moulded wall, flooded. The class's own `wall_mm` / `flooded`
     # knobs override the last two per instance.
     "pp_shell":  (905.0, 2740.0, "water", 2.0e-3),
+    # HDPE [S] skin on a cement core: backing "concrete" = a layer of this
+    # material on the concrete half-space [K]. The skin thickness is not
+    # published; the mass fixes it to 4-8 mm (6.0 kg in the ~3.4 L envelope
+    # left by the handle recess, cement 2.0-2.3 g/cm3, PE 0.95 g/cm3 -> 0.8-1.35 L
+    # of PE over ~0.18 m2), so 6 mm nominal and the reflection is the mean
+    # |R|^2 over that band (LAYER_THICKNESS_BAND): it spans more than one
+    # layer resonance (half a wavelength in PE is 2.7 mm at 450 kHz), and the
+    # result moves only between the quarter-wave value (|R| 0.44) and the
+    # bare concrete one (0.71), i.e. -7.2 to -3.0 dB.
+    "pe_cement": (950.0, 2430.0, "concrete", 6.0e-3),
 }
+
+#: A layer on a solid backing whose thickness is only bounded (``pe_cement``)
+#: reflects the mean |R|^2 over [lo, hi] x its nominal ``wall_m``.
+LAYER_THICKNESS_BAND = (2.0 / 3.0, 4.0 / 3.0)
 for _n, (_d, _c, _bk, _w) in _ACOUSTIC.items():
     if _n in _OBJECT_DEFAULTS:
         _OBJECT_DEFAULTS[_n] = replace(
@@ -271,6 +295,15 @@ def acoustic_reflection(mat: "Material", *, wall_m: float | None = None,
     2 mm polypropylene wall gives R_I = 0.15 (-8.3 dB), a half-wavelength
     wall (3.0 mm) is transparent.
     ``air``: a thin wall with air behind it, ``|R| = 1``.
+    ``<material>`` (a solid entry of ``_ACOUSTIC``, e.g. ``concrete``): a
+    layer of ``mat`` of thickness ``d`` on that half-space, the three-medium
+    formula (Kinsler et al. par. 6.3):
+    ``R = [(1 - Z1/Z3) cos kd + i (Z2/Z3 - Z1/Z2) sin kd] /
+    [(1 + Z1/Z3) cos kd + i (Z2/Z3 + Z1/Z2) sin kd]`` (water Z1, layer Z2,
+    backing Z3); ``d -> 0`` gives the backing's half-space value and a
+    quarter-wave layer ``(Z2^2 - Z1 Z3)/(Z2^2 + Z1 Z3)``. Its thickness is
+    only bounded, so the mean |R|^2 over ``LAYER_THICKNESS_BAND`` x ``d`` is
+    returned (as an amplitude).
     ``wall_m`` / ``backing`` override the material's own (the
     ``plastic_box`` class knobs). 0 when the material carries no acoustic
     constants.
@@ -282,9 +315,22 @@ def acoustic_reflection(mat: "Material", *, wall_m: float | None = None,
         return 0.0
     if bk == "solid":
         return _half_space_r(mat.density_kgm3, mat.sound_speed_mps)
+    if bk in _ACOUSTIC and _ACOUSTIC[bk][2] == "solid":
+        z1 = WATER_DENSITY_KGM3 * WATER_SOUND_SPEED_MPS
+        z2 = mat.density_kgm3 * mat.sound_speed_mps
+        z3 = _ACOUSTIC[bk][0] * _ACOUSTIC[bk][1]
+        d0 = float(mat.wall_m if wall_m is None else wall_m)
+        if d0 <= 0.0:
+            return _half_space_r(_ACOUSTIC[bk][0], _ACOUSTIC[bk][1])
+        d = np.linspace(LAYER_THICKNESS_BAND[0] * d0,
+                        LAYER_THICKNESS_BAND[1] * d0, 401)
+        kd = 2.0 * np.pi * float(frequency_hz) / mat.sound_speed_mps * d
+        num = (1.0 - z1 / z3) * np.cos(kd) + 1j * (z2 / z3 - z1 / z2) * np.sin(kd)
+        den = (1.0 + z1 / z3) * np.cos(kd) + 1j * (z2 / z3 + z1 / z2) * np.sin(kd)
+        return float(np.sqrt(np.mean(np.abs(num / den) ** 2)))
     if bk != "water":
         raise ValueError(f"material '{mat.name}': backing '{bk}' "
-                         "(solid | water | air)")
+                         "(solid | water | air | a solid material name)")
     d = float(mat.wall_m if wall_m is None else wall_m)
     if d <= 0.0:
         return _half_space_r(mat.density_kgm3, mat.sound_speed_mps)

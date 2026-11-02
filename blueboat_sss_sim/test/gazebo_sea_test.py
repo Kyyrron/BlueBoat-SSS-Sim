@@ -19,6 +19,13 @@ comparison figures, ``report.md`` and ``results.json`` into ``--out``, and
 checks each scenario against the expectations below. Exit code 0 = every
 check passed.
 
+``--sonar-config P.yaml`` (2026-10-24) runs the sonar on another profile
+(``full_mission_launch.py sonar_config:=``, e.g. a field-calibration
+candidate). In every scenario the recorded profile stream is also checked
+against the device's normalisation invariants (one bin at 65535, minimum 0,
+span within 90 dB) and the downstream detector must find the first bottom
+return on >= 95 % of the pings (NC #4).
+
 Scenarios (the run's seed fixes the sea; the current comes from the north,
 across the east-west survey lines; waves from the north-east, oblique):
 
@@ -243,6 +250,8 @@ def run_scenario(name: str, a: argparse.Namespace, out: Path,
            f"trajectory_file:={a.trajectory}", "headless:=true",
            f"sea_schedule:={d / 'scenario.yaml'}", f"sea_seed:={a.seed}",
            f"note:=seaval_{name}", f"data_dir:={d / 'data'}"]
+    if a.sonar_config:
+        cmd.append(f"sonar_config:={a.sonar_config}")
     goal, need = mission_goal(traj_points, a.quick)
     attempts = []
     for attempt in range(1 + max(int(a.retries), 0)):
@@ -293,10 +302,56 @@ def _g(r: dict, *path, default=float("nan")):
     return default if v is None else v
 
 
+def sonar_stream_stats(bag_dir: Path) -> dict:
+    """The recorded profiles against the device's normalisation invariants
+    and the downstream FBR detector (needs a sourced workspace)."""
+    from types import SimpleNamespace  # noqa: PLC0415
+    import rosbag2_py  # noqa: PLC0415
+    from rclpy.serialization import deserialize_message  # noqa: PLC0415
+    from rosidl_runtime_py.utilities import get_message  # noqa: PLC0415
+    from blueboat_sss_sim.analysis.calibration import (  # noqa: PLC0415
+        fbr_bin, normalisation_invariants, scale_to_db)
+    reader = rosbag2_py.SequentialReader()
+    reader.open(rosbag2_py.StorageOptions(uri=str(bag_dir), storage_id=""),
+                rosbag2_py.ConverterOptions("", ""))
+    types = {t.name: t.type for t in reader.get_all_topics_and_types()}
+    recs, found = [], 0
+    while reader.has_next():
+        topic, data, _ = reader.read_next()
+        if not topic.endswith("/profile") or topic not in types:
+            continue
+        m = deserialize_message(data, get_message(types[topic]))
+        pwr = np.asarray(m.pwr_results, dtype=np.uint16)
+        recs.append(SimpleNamespace(pwr_results=pwr, min_pwr_db=m.min_pwr_db,
+                                    max_pwr_db=m.max_pwr_db))
+        if fbr_bin(scale_to_db(pwr.astype(np.float64), m.min_pwr_db,
+                               m.max_pwr_db)) is not None:
+            found += 1
+    if not recs:
+        return {"n": 0}
+    inv = normalisation_invariants(recs)
+    return {"n": len(recs), "fbr_detection": round(found / len(recs), 4),
+            **{k: v for k, v in inv.items() if k != "n"}}
+
+
 def evaluate(results: dict[str, dict], a: argparse.Namespace) -> Checks:
     ck = Checks()
     calm = results.get("calm")
     for name, r in results.items():
+        ss = r.get("sonar_stream") or {}
+        ck(name, "the sonar stream keeps the device's normalisation "
+           "invariants and the first bottom return is found on >= 95 % of "
+           "pings (NC #4)",
+           ss.get("n", 0) > 0 and ss.get("single_full_scale_bin") == 1.0
+           and ss.get("zero_minimum") == 1.0
+           and ss.get("span_within_90db") == 1.0
+           and ss.get("fbr_detection", 0.0) >= 0.95,
+           f"{ss.get('n', 0)} profiles, FBR found on "
+           f"{100 * ss.get('fbr_detection', 0):.1f} %, invariants "
+           f"{ss.get('single_full_scale_bin')}/{ss.get('zero_minimum')}/"
+           f"{ss.get('span_within_90db')}"
+           + (f", profile {Path(a.sonar_config).name}" if a.sonar_config
+              else ""))
         waves = name in ("waves", "both")
         current = name in ("current", "both")
         att, fp = r.get("attitude", {}), r.get("footprint", {})
@@ -463,6 +518,9 @@ def main(argv=None) -> int:
                     help="relaunches of a stalled start")
     ap.add_argument("--analyse-only", action="store_true",
                     help="re-analyse the runs already in --out")
+    ap.add_argument("--sonar-config", default="",
+                    help="sonar profile YAML for the simulated sonar "
+                         "(default: the shipped one)")
     a = ap.parse_args(argv)
     a.world_dir = a.world_dir.expanduser().resolve()
     a.trajectory = a.trajectory.expanduser().resolve()
@@ -490,6 +548,10 @@ def main(argv=None) -> int:
             print(f"  {name}: cannot read the run ({exc})")
             continue
         res = sv.analyse(run)
+        try:
+            res["sonar_stream"] = sonar_stream_stats(out / name / "bag")
+        except Exception as exc:  # noqa: BLE001 -- reported as a failed check
+            res["sonar_stream"] = {"n": 0, "error": str(exc)}
         sv.write_metrics(res, out / name)
         sv.plot_run(run, out / name)
         runs.append(run)
@@ -507,7 +569,8 @@ def main(argv=None) -> int:
               f"World `{a.world_dir}`, trajectory `{a.trajectory}`, seed {a.seed}; "
               f"current {a.current_speed} m/s from {a.current_from:.0f}° "
               f"({a.variation}); waves '{a.waves}' from {a.waves_from:.0f}° "
-              f"({a.crest} crests, wakes {a.wakes}).", "",
+              f"({a.crest} crests, wakes {a.wakes}); sonar profile "
+              f"`{a.sonar_config or 'default_sonar.yaml'}`.", "",
               "## Measurements", "", sv.summary_table(list(results.values())), "",
               "## Checks", "", ck.markdown(), "",
               "## Figures", ""] + [f"![{f}]({f})" for f in figs]

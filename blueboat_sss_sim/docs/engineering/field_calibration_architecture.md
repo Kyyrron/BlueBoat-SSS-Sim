@@ -56,7 +56,7 @@ per-session.
 naming the layer of each value. Registry parameters that live outside the
 sonar profile (materials, hull) are returned as `not_applied`, with their
 owner: they are never dropped silently. `write_effective_profile` writes a
-**self-contained** profile (all 6 + 68 fields plus a `provenance:` block
+**self-contained** profile (all 6 + 78 fields plus a `provenance:` block
 that the loader ignores), so a run, or a dataset, is reproducible from one
 file. Augmentation stays outside calibration: a dataset generator records
 its own seeds and knobs next to the effective profile.
@@ -115,12 +115,14 @@ pair's equivalence range rather than individual values.
 
 | Piece | State |
 |---|---|
-| Registry (64 parameters) + drift check against the code | built, gated (smoke `[16]`) |
+| Registry (75 parameters) + drift check against the code; values with an unquoted ` #` refused | built, gated (smoke `[16]`) |
 | Manifest schema + leakage checks | built, gated |
-| `.svlog` quality report | built, gated on synthetic data; run read-only on the three attached samples |
-| Local identifiability (seabed profile statistic) | built, gated (reproduces `[2e]`'s ridge) |
-| Artifact schema, validator, write-once I/O, composition, effective profile | built, gated |
-| Staged fitters | **not built**. Each needs the private datasets to design its reduction against; the existing `analysis.calibration` reductions are the starting point |
+| `.svlog` quality report (per-setting ping period, ping-number gaps / duplicates) | built, gated on synthetic data; run read-only on the corpus and on the 2026-10-27/28 recordings |
+| Local identifiability (seabed profile statistic; per-altitude acquisitions, per-site levels) | built, gated (reproduces `[2e]`'s ridge and the pulse-exponent / site-level confound) |
+| Artifact schema, validator, write-once I/O, composition (base-profile name and hash checked), effective profile | built, gated |
+| Output guard (`io_guard`): no output inside a recording's tree, the manifest root or the corpus | built, gated |
+| Seabed engine `calibration/seabed.py`: strata, forward model (noisy / expected, attitude replay), metrics (LEVEL, dB-mean, crest, texture, nadir), `score`, `fit` (least squares, validation refused without a reason), `scan`, the NC #4 FBR envelope, the corpus anchor gate | built 2026-10-23..30; smoke `[2f]` / `[17]`, `test/calibration_fit_test.py` (round trip, recovery, refusal, pass-1 equivalence, candidate FBR lock). Results: [`calibration_results.md`](calibration_results.md) |
+| Other staged fitters (walls, object edges, USV dynamics) | not built |
 | Navigation/bag readers for USV dynamics | `analysis/sea_validation.read_bag` (sim bags); real run bags live in Control (`run_bag.py`) |
 | Global sensitivity, Bayesian discrepancy model | not built; the identifiability tool is local and noise-free |
 

@@ -80,6 +80,14 @@ manifests (whole-session splits), `.svlog` quality reports, local
 identifiability, and versioned calibration artifacts composed into a
 self-contained effective profile. A calibration never edits
 `default_sonar.yaml`. Design and runbook: `docs/engineering/`.
+**The seabed engine (pass 2, 2026-10-30):** `calibration/seabed.py`
+(`sss_calibration score | fit | scan`) reduces recordings to strata, renders
+their simulated counterpart (noisy, or the noise-free expected mode, with
+the recorded attitude replayed), scores level / crest / texture / nadir per
+session, fits on calibration sessions only, and holds the NC #4 FBR envelope
+every fitted change must pass. Results and the promotion record:
+`docs/engineering/calibration_results.md`; second-pass runbook:
+`validation_and_experiment_plan.md` §6.
 
 **Extension seams:** `SonarRenderer` (ABC, `sonar/renderer.py`; everything
 downstream is renderer-agnostic); `DEPTH_PRESETS`
@@ -126,7 +134,7 @@ assert the cross-module equality, skipping visibly without it:
 |---|---|
 | `range_start_mm` | 0 |
 | `range_length_mm` | 20000 |
-| `msec_per_ping` | 0 (free run) |
+| `msec_per_ping` | **50** (SonarView's command, 2026-10-27; 0 = free run) |
 | `gain_index` | -1 (device auto; the simulator resolves it to its calibrated 4) |
 | `num_results` | 1200 (the device maximum, 16.7 mm bins at 20 m) |
 | `pulse_len_percent` | 0.00125 |
@@ -141,10 +149,24 @@ Seabed level is bin-count invariant (0.1 dB, 600 vs 1200), so the
 calibration carries over; **smoke gates still measure at the calibration
 acquisition** (`_cal_config()`: 600 bins, 0.002, gain 4 — the anchors').
 
+**Ping timing = SonarView's (2026-10-27, owner: acquire exactly like
+SonarView, identically sim and real).** Period = `max(msec_per_ping, 2R/c +
+3 ms, 1/max_ping_rate_hz)`. The corpus law `max(50 ms, 2R/c + 3 ms)` is
+SonarView's 50 ms **command** (every corpus file is SonarView's), not a device
+cap: the real driver free-running pinged every 29.0 ms (34.5 Hz) at 20 m. So
+`msec_per_ping` defaults to 50 in every profile, the node and
+`AcquisitionParams`, and `model.max_ping_rate_hz` to **0** (off) — the period is
+unchanged at every range, renders and fixtures with it, and `msec_per_ping: 0`
+now free-runs as the device does. Smoke `[4b]` asserts the law and the
+real-driver equality.
+
 Launches pass all six from the resolved profile (explicit `sonar_config:=` >
 a legacy bundle's frozen `sonar.yaml` > `config/default_sonar.yaml`), each
 overridable per run, so acquisition always traces to a named file. Profiles
-are each the default with **one idea** changed; `default_sonar.yaml` is the
+are each the default with **one idea** changed -- except
+`field_candidate_v1_sonar.yaml` (2026-10-30), a calibration artifact composed
+into a self-contained profile (provisional, never the comparison profile;
+regenerate, never hand-edit); `default_sonar.yaml` is the
 sim-vs-real comparison profile (`shallow_beach_sonar.yaml` lightens the
 field box's shadow past the device's), and `fault_injection_sonar.yaml` is a
 **test** profile, never calibration or comparison.
@@ -158,6 +180,13 @@ Sim-only params: `scene_dir` (**required**; world folder or legacy bundle),
 entropy seed that is logged and published as `noise_seed`; launch arg
 `sonar_seed`), `predict_pose` (default true), `pose_topic` (default
 `/sim/sea_state/boat_pose`), `base_link_rest_z_m` (2026-10-21, below).
+
+**Installation (2026-11-02, field-calibration pass 3).** `sensor_depth_m` **0.22**
+(measured) and `mount_x_m` **−0.345** (the drawing, vs base_link = the hull centre), in the
+code default and every comparison profile; `field_candidate_v1_sonar.yaml` keeps its pass-2
+0.15 / 0.0. A replay of a real recording takes the fore/aft arm relative to *that corpus's*
+navigation fix (`calibration.scene_replay.with_installation`). `sss_processor_node` moved
+to 0.22 m the same day; its fore/aft stays 0.0, unused by any georeference (superproject §4.3).
 
 **Vertical datum (2026-10-21).** The renderer's vehicle z = 0 is the boat
 floating level on the still water, so `sensor_depth_m` is depth below the
@@ -181,7 +210,13 @@ on the 20 Hz odometry the catamaran's stiff roll restoring rang at 3.2 Hz
 `[mount_x, ±mount_y, −sensor_depth]` by the full attitude (yaw only
 before). Level poses are bit-identical to before, so the render fixture
 and every calm-water comparison stand; any wave-run recording made before
-2026-10-08 is not comparable bit for bit.
+2026-10-08 is not comparable bit for bit. **Pitch moves the beam centre,
+not the samples (2026-10-30):** the coherent scatterer field is a ground
+lattice, and shifting every sample by `dz·tan(pitch)` re-drew the speckle
+each ping (track lag-1 0.76 → 0.24 under a 0.4°/ping pitch walk);
+`renderer._pitch_centre` keeps the lines on the lattice and weights them
+about the shifted centre, only the relief residual moves samples (smoke
+`[10]`). Wave-run recordings made before it are not comparable bit for bit.
 
 Ground-truth JSON per ping cycle:
 `{"t_sim": float, "contacts": [{"side","object_id","type","slant_range_m","extent_bins","shadow_bins","visible","ping_number","ghost","via"}]}`
@@ -281,7 +316,11 @@ scientific argument.
    FBR rides on it and `beam_sidelobe_floor` (0.004) is the guard when the
    fan is rolled up >0.55°, the tilt reduced or the aperture narrowed; keep
    w(nadir) ≥ ~0.004); (2) the specular near-nadir lobe
-   (`specular_strength`); (3) the specular component rendered and speckled
+   (`specular_strength`; 1.75 since 2026-10-30 = the FBR-crest fit raised to
+   the smallest value with no regression of `calibration.seabed.fbr_envelope`
+   -- sand and seagrass, 0.6-22 m, the corpus acquisitions; any acoustic
+   change must keep that envelope, which caught the first pass-2 candidate
+   losing the FBR at 7-21 m); (3) the specular component rendered and speckled
    **separately** from the diffuse field, low CV (`specular_looks`); (4)
    pulse-length range smearing (`pulse_smearing`); (5) (2026-09-18) that
    component's **own range law** (`specular_spreading_exponent` 2.0: a
@@ -329,8 +368,19 @@ scientific argument.
    corpus quay. Changing any of them silently invalidates every comparison
    against real data. `docs/sonar_model.md` §6 records which constants are
    measured, jointly determined, undetermined — keep it current whenever one
-   moves. Residual: the reported *peak* is still ~5 dB hot with the right
-   slope (the near-nadir return the tail fit deliberately excludes).
+   moves. **Moved again, once, on 2026-10-30** (field-calibration pass 2,
+   bundle B, through its pre-registered gate; `docs/engineering/
+   calibration_results.md`): `specular_strength` 12 → **1.75** and the
+   **receiver ceiling** on (`receiver_ceiling_db` **67.9**, the beach
+   anchor's measured pile-up). The 12 had been fitted to the reported
+   `max_pwr_db`, which on the device is mostly not the first bottom return;
+   fitted to the detector-located FBR crest instead, the crest bias fell on
+   every session and the seabed level moved <= 0.07 dB.
+   `calibration_db_offset`, `tvg_compensation`, `lambert_exponent` did NOT
+   move: bundle A (a pulse-length level term + refit) failed its gate and is
+   provisional in `config/field_candidate_v1_sonar.yaml`. The old residual
+   ("peak ~5 dB hot") is gone: within 4 dB of the device law at every
+   altitude, mean +0.7 (`[2c]`, re-anchored).
 
 7. **Never raise launch's global log level to suppress noise.** Filter by
    message content on the screen handler instead.
@@ -454,7 +504,11 @@ scientific argument.
 - `metadata.yaml` is **the cross-module contract** (`blueboat_world_meta/1`:
   anchor, spawn, limits, walls and every object in local + GPS). Downstream
   reads it, **never** `builder_state.yaml` (GUI-internal, may churn).
-- `depth.npz` is the **terrain-only** height raster (pre-object-stamp).
+- `depth.npz` is the **terrain-only** height raster (pre-object-stamp). The Gazebo
+  visuals (`world.sdf` objects and walls, `seabed.stl`) stand on it since 2026-11-02
+  (`write_world_sdf(terrain_height=...)`); before, they stood on the stamped raster, so
+  every object floated on its own top over a bump (visual only, the acoustic scene was
+  right). A world built earlier keeps that picture until re-saved (Edit -> new `_i`).
 - `scene_manifest.yaml` stays **version 1**: the `geo:` block is additive;
   `SceneModel.load` rejects any other version.
 - RNG determinism: a config **with** a `depth:` section splits the seed into
@@ -523,10 +577,29 @@ of `controller_type`.
 python3 -m test.smoke_test        # from the package source root
 ```
 
-The only automated gate of the Stop hook (no lint, no type-check). **439
-checks** (436 + one visible `SKIP`, covering the two bridge checks and the
-`ApplyLinkWrench` detection, when the interpreter has no ROS; one
-more when the `BlueBoat-SSS` checkout beside it is missing), ~205 s (2026-10-20);
+The only automated gate of the Stop hook (no lint, no type-check). **484
+checks** on the system python, **481 + one visible `SKIP`** on the venv (the
+two bridge checks and the `ApplyLinkWrench` detection need ROS; one more
+SKIP when the `BlueBoat-SSS` checkout beside it is missing), ~220-250 s
+(2026-11-02, +1: the Gazebo visuals stand on the terrain; 481 on 2026-11-01; 478 on 2026-10-30; 439 and ~205 s on 2026-10-20). The venv
+interpreter is `~/ros2_ws/.venv/bin/python3` (`env.sh` activates it only
+when sourced from `~/ros2_ws`);
+2026-11-02 (pass 3 phase 4) added `[4c]`'s real-like heading check (ping headers 80 deg off
+ATTITUDE: the pose heading stays exact) and `[14]`'s nested-transmission check; the
+installation moved (0.22 m deep, 0.345 m aft), so **object checks place the transducers, not
+the vehicle origin, over their target** (`_tx_pose`), and the pitch/lever-arm formulas carry
+`mount_x_m`;
+2026-11-01 added `[16]`'s `regime.forward_model` check (pass 3: a `scene`
+session is never selected by the flat-sand engine) and two `[14]` checks (the
+`pe_cement` layer-on-solid reflection; a `nested` weight inside a flooded box
+stands on the seabed instead of stacking);
+2026-10-23..30 added `[17]` (the pass-2 model terms against their analytic
+forms, the frozen encode fixture `test/fixtures/encode_baseline_v1.npz`, the
+calibration engine's expected mode), the `[2f]` corpus LEVEL anchor gate, the
+`[10]` pitch-lattice check and `[16]`'s calibration I/O checks; the slow
+calibration checks are `python3 -m test.calibration_fit_test` (manual,
+~2 min: round trip, recovery, refusal, pass-1 equivalence, candidate FBR
+lock);
 2026-10-21 added 20 more in `[15]` (image/label/geometry consistency: facets
 behind walls, the wall ghost's first leg, the Gazebo datum, out-of-map
 reporting, atomic explicit entries) and `[16]` (calibration scaffolding).
@@ -549,7 +622,11 @@ first failure hid a second: the pontoon-crossing check assumed the old mount. Bo
 repaired on 2026-10-19. The fixture was rebaselined, after a re-render at 0.20 had
 reproduced the old one bit for bit, and the crossing pose is now placed from the
 profile's mount. The suite ran 434 / 434 again on the system python, and 431 + 1 visible
-`SKIP` on the venv python. `[2f]` reads the
+`SKIP` on the venv python. The 2026-11-02 installation change (pass 3) repeated it: the
+render and encode fixtures were rebaselined only after the old installation had reproduced
+both bit for bit (`~/calib/pass3/phase4/fixture_check/`). Six checks with hard-coded
+geometry, and one 2σ single-ping statistic, were made mount-aware or robust, with no bound
+widened. `[2f]` reads the
 field corpus at `$BLUEBOAT_SSS_CORPUS` (default `~/ros2_ws/data/SSS_data`) and
 skips without it. Calibration gates: `[2c]`, `[2e]`, `[2f]`; object physics:
 `[14]`. Runs serialize on `/tmp/blueboat_sss_smoke.lock` — give a manual run

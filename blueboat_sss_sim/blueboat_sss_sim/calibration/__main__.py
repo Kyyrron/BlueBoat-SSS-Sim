@@ -14,6 +14,17 @@
     python3 -m blueboat_sss_sim.calibration identifiability \\
         --param model.tvg_compensation --param model.lambert_exponent \\
         --altitude 1.40 --altitude 7.33 [--out DIR]
+    python3 -m blueboat_sss_sim.calibration score --manifest M.yaml \
+        --root DIR --out DIR [--profile P.yaml] [--artifact A.yaml] \
+        [--set model.X=V] [--mode noisy|expected|both] \
+        [--replay none|attitude] [--cache DIR]
+    python3 -m blueboat_sss_sim.calibration fit --manifest M.yaml \
+        --root DIR --out DIR --param model.X [--param ...] \
+        [--metric level|nadir] [--allow-reuse REASON]
+    python3 -m blueboat_sss_sim.calibration scan --manifest M.yaml \
+        --root DIR --out DIR --grid model.X=v1,v2 [--grid ...]
+    python3 -m blueboat_sss_sim.calibration envelope [--profile P.yaml] \
+        [--set model.X=V] [--out F.json]     # NC #4, exit 1 on a regression
     python3 -m blueboat_sss_sim.calibration example {artifact,manifest}
 
 Exit status: 0 ok, 1 invalid input / drift / unusable data, 2 usage.
@@ -29,15 +40,6 @@ import sys
 from pathlib import Path
 
 import yaml
-
-
-def _refuse_inside(out: Path, inputs: list[Path]) -> None:
-    out = out.resolve()
-    for p in inputs:
-        d = p.resolve().parent
-        if out == d or d in out.parents:
-            raise SystemExit(f"--out {out} lies inside the recordings' tree "
-                             f"({d}); field data are write-once (CM-7)")
 
 
 def _dump(obj, path: str | None) -> None:
@@ -67,6 +69,9 @@ def _cmd_validate_manifest(a) -> int:
     from .manifest import load_manifest, validate_manifest
     doc = load_manifest(a.manifest)
     root = Path(a.root) if a.root else Path(a.manifest).resolve().parent
+    if a.json:
+        from .io_guard import refuse_inside
+        refuse_inside(Path(a.json).parent, roots=[root])
     rep = validate_manifest(doc, root=root, check_files=a.check_files
                             or a.verify_hashes,
                             verify_hashes=a.verify_hashes)
@@ -77,10 +82,13 @@ def _cmd_validate_manifest(a) -> int:
 def _cmd_quality(a) -> int:
     from .manifest import load_manifest
     from .quality import svlog_quality
+    from .io_guard import refuse_inside
     files: list[Path] = [Path(f) for f in a.svlog]
+    roots: list[Path] = []
     if a.manifest:
         doc = load_manifest(a.manifest)
         root = Path(a.root) if a.root else Path(a.manifest).resolve().parent
+        roots.append(root)
         for s in doc.get("sessions") or []:
             for r in s.get("recordings") or []:
                 if r.get("kind") == "svlog":
@@ -88,7 +96,7 @@ def _cmd_quality(a) -> int:
     if not files:
         raise SystemExit("no .svlog given (positional or --manifest)")
     out = Path(a.out)
-    _refuse_inside(out, files)
+    refuse_inside(out, files, roots)
     out.mkdir(parents=True, exist_ok=True)
     reports, missing = [], []
     for f in files:
@@ -138,7 +146,8 @@ def _cmd_effective(a) -> int:
     from .artifact import (effective_config, load_artifact,
                            write_effective_profile)
     art = load_artifact(a.artifact) if a.artifact else None
-    eff = effective_config(a.profile, art, a.session, _parse_set(a.set))
+    eff = effective_config(a.profile, art, a.session, _parse_set(a.set),
+                           allow_base_mismatch=a.allow_base_mismatch)
     write_effective_profile(eff, a.out, sources={
         "profile": str(a.profile or "default_sonar.yaml"),
         "artifact": (art or {}).get("id"), "session": a.session,
@@ -151,9 +160,29 @@ def _cmd_effective(a) -> int:
     return 0
 
 
+def _parse_acq(spec: str):
+    """``RANGE_MM:BINS:PULSE_US`` -> an AcquisitionParams at gain 4 whose
+    pulse is that pulse (or the 44.3 us floor)."""
+    from ..sonar.config import AcquisitionParams, SPEED_OF_SOUND_MPS
+    try:
+        rng_mm, bins, pulse_us = spec.split(":")
+        rng_mm, bins, pulse_s = int(rng_mm), int(bins), float(pulse_us) * 1e-6
+    except ValueError as exc:
+        raise SystemExit(f"--acq {spec!r}: expected RANGE_MM:BINS:PULSE_US") from exc
+    pct = pulse_s / (2.0 * rng_mm / 1000.0 / SPEED_OF_SOUND_MPS)
+    return AcquisitionParams(range_length_mm=rng_mm, num_results=bins,
+                             pulse_len_percent=pct, gain_index=4)
+
+
 def _cmd_identifiability(a) -> int:
     from .identifiability import analyse
-    res = analyse(a.param, a.altitude, sigma_db=a.sigma_db)
+    acqs = [_parse_acq(s) for s in a.acq] if a.acq else None
+    if acqs is not None and len(acqs) != len(a.altitude):
+        raise SystemExit("--acq: give one per --altitude")
+    if a.site and len(a.site) != len(a.altitude):
+        raise SystemExit("--site: give one per --altitude")
+    res = analyse(a.param, a.altitude, sigma_db=a.sigma_db, acqs=acqs,
+                  sites=a.site or None)
     d = res.to_dict()
     if a.out:
         out = Path(a.out)
@@ -210,14 +239,25 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--artifact", default=None)
     e.add_argument("--session", default=None)
     e.add_argument("--set", action="append", default=[])
+    e.add_argument("--allow-base-mismatch", action="store_true",
+                   help="apply an artifact to a profile other than the one "
+                        "it names in base_profile (recorded in provenance)")
     e.add_argument("--out", required=True)
     e.set_defaults(fn=_cmd_effective)
     i = sub.add_parser("identifiability")
     i.add_argument("--param", action="append", required=True)
     i.add_argument("--altitude", action="append", type=float, required=True)
     i.add_argument("--sigma-db", type=float, default=0.67)
+    i.add_argument("--acq", action="append", default=[],
+                   help="per altitude: RANGE_MM:BINS:PULSE_US (the session's "
+                        "own acquisition)")
+    i.add_argument("--site", action="append", default=[],
+                   help="per altitude: a site label; each site gets a free "
+                        "level (site_level:<label>)")
     i.add_argument("--out", default=None)
     i.set_defaults(fn=_cmd_identifiability)
+    from .seabed import add_parsers as _seabed_parsers
+    _seabed_parsers(sub)
     x = sub.add_parser("example")
     x.add_argument("what", choices=("artifact", "manifest"))
     x.set_defaults(fn=_cmd_example)

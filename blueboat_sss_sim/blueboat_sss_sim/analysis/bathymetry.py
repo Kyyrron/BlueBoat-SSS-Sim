@@ -25,7 +25,7 @@ is the failure it guards against), a lone or disagreeing side is kept
 only when it sits within ``MAX_DEV_M`` of the running fused altitude.
 
 Depth below the still-water surface = FBR altitude + the transducer's
-submersion (``sensor_depth_m`` of the sonar config, 0.15 m) + a
+submersion (``sensor_depth_m`` of the sonar config, 0.22 m since 2026-11-02) + a
 ``datum_offset_m`` the operator enters for tide / draft (positive when
 the water stood higher than the reference level during the survey).
 """
@@ -118,7 +118,10 @@ class AltitudeTrack:
     ping_number: np.ndarray
     order: np.ndarray            # packet index of the ping (port, else stbd)
     t_ms: np.ndarray             # device clock of the ping
-    heading_deg: np.ndarray      # vehicle heading (compass) off the ping
+    heading_deg: np.ndarray      # the ping's vehicle_heading_deg -- NOT the boat's
+                                 # heading on real recordings (unreferenced device
+                                 # heading, 2026-11-01); unused here; use
+                                 # svlog_reader.profile_heading_deg
     port_m: np.ndarray
     stbd_m: np.ndarray
     altitude_m: np.ndarray

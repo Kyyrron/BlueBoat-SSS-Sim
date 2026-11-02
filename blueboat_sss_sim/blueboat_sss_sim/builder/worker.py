@@ -195,6 +195,13 @@ def survey_stats_line(info: dict | None) -> str:
         ov = (f"{rel['overlap_rms_m']:.2f} m over {rel['overlap_cells']} cells"
               if rel.get("overlap_rms_m") is not None else "no overlap")
         mode = rel.get("gain_mode", "set")
+        # A clipped gain is a bound, not a fit: say so (2026-10-23 -- on the
+        # beach corpus the tie soundings give a slope <= 0, and the old line
+        # read "calibrated" at the 0.1 floor).
+        clip = rel.get("clipped")
+        if clip:
+            mode += (f"; fit {rel['gain_raw']:+.3f} clipped {clip} -- the tie "
+                     "soundings do not support this amplitude")
         line += (f"\nrelief from shading: {100 * rel['coverage_fraction']:.0f} % "
                  f"of the survey hull, rms {rel['rms_m']:.2f} m, passes "
                  f"disagree {ov}, gain ×{rel['gain']:.2f} ({mode}"

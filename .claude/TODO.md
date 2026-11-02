@@ -66,6 +66,12 @@ Run campaigns until one fails; change the QoS only if the bag shows delivery sta
 then, a lone "fresh pose" failure with every other check passing is this item, not a
 regression.
 
+Recurred 2026-10-30 (pass-2 verification): once under a concurrent 4-worker
+CPU load (2.8 % / 4.6 % of pings over 60 ms in *waves* / *both*) and once
+unloaded (0.17 %, worst 90 ms, *waves*); the calm + waves re-run passed
+(0.00 %). The gate also checks the sonar stream since 2026-10-30
+(`--sonar-config`, device invariants + FBR detection on every profile).
+
 ### [x] Live Gazebo pass with the sea state — done 2026-10-08 (world-folder path)
 `test/gazebo_sea_test.py` ran the null, impulse and motion tests and the
 sonar consequences in Gazebo on `~/worlds/sea_validation/flat_{5p0m,1p5m}`
@@ -408,12 +414,22 @@ estimates and would misreport `analog_gain` and the level if a run used them.
 
 ## Blocked — not verifiable on this machine
 
-Nothing at present. (The 20 Hz vs 22 ms ping-rate question that sat here was
-**settled on 2026-09-02 from the corpus itself**: all seven recordings follow
-`period = max(50 ms, 2R/c + 3 ms)` — 50 ms at 18.4 m and 20 m, 131 ms at
-95.6 m — which is the spec sheet's "20 pings/s up to 30 m, then range-
-limited"; the 22 ms figure was wrong. `sss_svlog_compare` reports the law
-residual per file.)
+- [ ] **Omniscan status frames (id 2194) on `~/raw`.** Since 2026-10-27 the real
+  driver forwards every device frame, and SonarView's recordings carry status
+  frames at ~0.9 Hz per device. Whether the device sends them to our client
+  unsolicited is the open BlueBoat-SSS field check (`sssTODO.md`). If it does,
+  emit them here too (layout `<ffI3xB`, the floats' meaning unestablished —
+  carry corpus-typical values, documented as such) so the raw stream stays
+  CM-2-identical. **Needs the boat.**
+
+(The 20 Hz vs 22 ms ping-rate question that sat here was settled on 2026-09-02
+from the corpus — `period = max(50 ms, 2R/c + 3 ms)` — and **re-read on
+2026-10-27**: the 50 ms is SonarView's `msec_per_ping` command, every corpus
+file being SonarView's; the device free-runs at 29.0 ms at 20 m (the real
+driver's 2026-10-27 recordings), so the old "22 ms at 15 m" (= 2R/c + 2 ms) was
+the device's free run, not wrong. `msec_per_ping` now defaults to 50 and
+`max_ping_rate_hz` to 0; `sss_svlog_compare` still reports the law residual per
+file.)
 
 ## Open — model fidelity, next
 
@@ -577,15 +593,16 @@ shoreline material/relief band in the beach recipes is the fix.
 `shore_taper_m` exists and ships at 0: tuning it would darken the band
 further, which is the wrong direction.
 
-### [P1] The reported peak is still ~5 dB hot
-The seabed level matches within 0.6 dB at both altitudes and the peak's
-altitude *slope* within 0.2 dB/decade, but its level sits 4–7 dB above the
-device's law (`66.60 − 11.28·log₁₀ alt`). The fit window deliberately
-excludes the near-nadir return, so this is the near-nadir model —
-`specular_width_deg`, the beam's near-field behaviour, or the specular /
-diffuse split at high grazing. None of the three is determined by this
-corpus. A point target at 3 and 12 m, and a fixed-gain pass, would settle
-it (the captures the review lists).
+### [x] The reported peak is still ~5 dB hot — resolved 2026-10-30 (pass 2)
+The device's `max_pwr_db` is mostly not the bottom return (ceiling pile-up at
+1–2 m, the bottom return at 3–6 m, the transmit ringing above ~8 m), and
+`specular_strength` 12 had been fitted to it. Pass 2 promoted bundle B through
+its pre-registered gate: `receiver_ceiling` on (67.9 dB, measured) and
+`specular_strength` 12 → 1.75 (the detector-located FBR crest, raised to the
+NC #4 envelope bound). The FBR crest bias fell on every session (e.g. +8.8 →
++0.9 dB on the harbour anchor), the peak now sits within 4 dB of the device
+law at every altitude (mean +0.7), smoke `[2c]` re-anchored.
+`docs/engineering/calibration_results.md`.
 
 ### [P2] Pontoon signature has no field anchor
 `wall_pontoon_specular` (0.15) and the float-face model are judgement
@@ -617,11 +634,146 @@ would separate the fill they produce from the TVG.
 
 ## 2026-10-21 audit — open follow-ups (`docs/engineering/issue_triage.md`)
 
-### [P1] Staged field calibration on session-split data
-The scaffolding exists (`blueboat_sss_sim/calibration/`, `docs/engineering/`); the
-fits do not. Next: write the manifest of the existing corpus (roles: the two NC #6
-anchors are calibration data), run `sss_calibration quality` on it, then stages 1-4 of
-`validation_and_experiment_plan.md` in order. Blocked on the private corpus.
+### [x] Staged field calibration on session-split data — pass 2 done 2026-10-30
+Engine `calibration/seabed.py` (`score`, `fit`, `scan`, the NC #4 FBR envelope);
+bundle B promoted, A and C provisional in `config/field_candidate_v1_sonar.yaml`.
+`docs/engineering/calibration_results.md`; the open items it leaves are below.
+
+### [P1] Pulse-length level law: confounded with the site, heterogeneous within file
+The real level rises with the pulse inside a file (+0.91 dB/dB pooled), which
+the shipped model ignores: most of its +3 dB at 1200 bins / 44.3 µs. With k = 1
+and the level triple refitted (bundle A) the 1200-bin sessions improve strongly
+but harbour 07-21 gets 3 dB worse and `lambert_exponent` sits on its 0.5 bound —
+each calibration site has one pulse, so k and the site level are one parameter.
+The within-file slope also differs by session (beach B2 +0.67, harbour 07-22-AM
++1.21): possibly a receiver-filter floor on the effective pulse at the short
+end (hypothesis). Needs: >= 3 altitudes over ONE classified bottom with the
+acquisition cycled at each (`validation_and_experiment_plan.md` §6).
+
+### [P2] Within-file altitude residual of the seabed level
+Inside the harbour anchor, sim − real rises from −2 dB at 6 m to +2 dB at 14 m
+after any refit; deeper harbour water may be a different bottom. Same capture.
+
+### [P2] Real port/starboard level imbalance (~1–1.5 dB) is not modelled
+Measured at both sites in every calibration fit (starboard reads lower). A
+per-transducer gain term would be a device constant; not added in pass 2.
+
+### [P2] Nadir ringing is a plateau then a fall, not dB-linear
+Harbour anchor: ~49.6 dB to 0.5 m, then fast decay; the model's 55 dB −
+22 dB/m is 3–6 dB off at 0.5–1 m. A dB-linear refit on the first metre
+over-fills the water column further out and lost the FBR at 5–10 m altitude
+(NC #4 envelope), so the shipped values stay. Needs a two-segment ringing
+shape, then the envelope.
+
+### [P2] K-distributed seabed (texture_k_inv_shape) not promoted
+ν ≈ 0.67 matches the calibration sessions' power-minus-dB and per-bin std, but
+raised harbour 07-22-AM's FBR crest +1.4 dB and overshoots its power-minus-dB;
+track lag-1 also rises (0.74 vs 0.37 real on the beach anchor). Ships off;
+on in the candidate profile. A range- or depth-dependent ν, or a smaller K
+cell, are the next hypotheses.
+
+### [x] Gazebo visuals stood every object on its own stamp — fixed 2026-11-02
+Found on the operator's screenshot of `pool_2w` (the boxed weight 0.55 m above the floor on a
+pyramid). `write_world_sdf` placed each object at `scene.sample_height` -- the STAMPED raster,
+i.e. the object's own top -- and meshed that raster, so each stamp became a bump. **Visual
+only**: the facet layer takes the seabed as `height - facet_bump` (every facet patch spans
+floor to top, measured). Fix: `write_world_sdf(terrain_height=...)` -- objects, walls and
+`seabed.stl` stand on the pre-stamp terrain (`build_world_folder` passes `depth.npz`'s raster,
+`generate_world` the new `generate_scene(terrain_out=...)`; without it the facet stamps are
+removed, `height - facet_bump`); smoke check in the limits/SDF block. **Every world built
+before 2026-11-02 with objects shows them floating in Gazebo** (sonar unaffected); a re-save
+(Edit) gives a corrected `_i` folder. The pool worlds were rebuilt that way:
+`~/worlds/pool_line_and_back/{pool_empty,pool_1w,pool_2w}_1`, `scene.npz` / `depth.npz` /
+`scene_manifest.yaml` bit-identical to the originals (`~/calib/pass3/worlds_v2/rebuild_report.json`),
+box centre -0.072 -> -0.622 m, nested weight -0.300 -> -0.850, bare weight -0.752 -> -0.844.
+
+### [x] Pass 3 (pool_october) done 2026-11-02 — shipped as a candidate, not "v1 stable"
+**Road to v1 stable**: `~/calib/pass3/V1_ROADMAP.md` (field week first; the pool TEST runs are spent,
+so v1 needs a new reserved hold-out).
+The 2026-10-27/28 pool recordings (18 runs) were inspected, split (operator-approved: FIT 10-28
+early, VALIDATION 10-27 + 10-28 line runs, TEST the two 2-weight runs), rebuilt as worlds
+`~/worlds/pool_line_and_back/{pool_empty,pool_1w,pool_2w}`, scored (phase 3), fixed and fitted
+(phase 4: only the installation moved), and tested once (phase 5). Release criteria fail on
+TEST: seabed level +9.5 dB (painted floor vs a sand stand-in), FBR crest +1.7 dB, objects
+under-detected (5/15 passes vs 14/15) and over-shadowed. Public summary:
+`docs/engineering/calibration_results.md` Part II; private: `~/calib/pass3/report_2026-11-02.md`,
+`RUNBOOK.md`, `GCS_PLAN.md` (the BlueBoat-SSS half, plan only). Open items it raised are below.
+
+### [P1] Texture: the pool's extra fluctuation is not ground-fixed (pass-2 C refuted here)
+Pool floor: per-bin std 6.29 dB real vs 4.99 default (power-minus-dB 3.47 vs 2.17), but range
+and track lag-1 already match (0.54/0.14 real, 0.55/0.12 default). Every K texture of the scan
+(1/nu 0.5-1.5, cell 0.05-0.5 m) closes the spread only by adding correlation
+(`~/calib/pass3/phase4/texture_scan/`). Needed: a per-sample heavy-tail mechanism with a physical
+basis (fluctuating medium / interfering surface paths in shallow water), or evidence that the
+painted floor alone explains it (the next sand session).
+
+### [P2] Near-range ringing: one device shape cannot fit pool and field (R)
+Measured over nine acquisitions (`~/calib/pass3/phase4/ringing_profiles.json`): plateau then a
+steep fall, -10 dB at 0.09-0.14 m (8-17 mm bins) / 6-11 bins (33-80 mm bins); the shipped
+dB-linear 55 - 22 dB/m leaves the pool's water column +19..+23 dB. A two-regime fit improves the
+pool (rms 20 -> 5-7 dB) and worsens bath3 / the harbour anchor -> not moved. Separate an
+environment water column from the acquisition: the pool's acquisition (20 m / 1200 / 44 us) in
+open water.
+
+### [P2] Object echo deficit on the pool (O)
+Boxed weight: echo 12.5 dB under the device vs the local floor, no extent (0 vs 0.9 m); on TEST
+the box reaches 10 dB on 1/8 passes (device 7/8), the bare weight on 4/7 (7/7), and both cast
+shadows on ~40 % of passes (device 0 %). No material/geometry constant closes it (NC #17).
+Next: the same weights on a sand bottom (separates object physics from the floor material),
+and the waveguide image comb of the wall item (the real echoes carry a tail the renderer lacks).
+
+### [x] Per-ping `vehicle_heading_deg` in REAL recordings is not the boat's heading — fixed 2026-11-02
+Measured 2026-11-01 (pass 3 phase 1): offset to the autopilot ATTITUDE yaw differs per
+transducer and per run — pool −44…−168°, beach bath3 −77/−56°, object_boiteVsDistance
+−107/−120°, harbour fullHarbourCleanExample +90/+60° — while ATTITUDE yaw and GPS heading
+agree with the course over ground within ~7°. Fixed in pass 3 phase 4:
+`analysis/svlog_reader.profile_heading_deg` (ATTITUDE yaw, MAVLink NED, on the profile
+clock or file order when the clock is frozen; the ping field only without ATTITUDE), used by
+`pose_track` and `analysis/backscatter._iter_placed_profiles`; smoke `[4c]` checks a file
+whose ping headers are 80° off. Any pre-2026-11-02 output of those two tools on a real
+recording placed every profile with the wrong look direction.
+
+### [P2] Device level depends on the bin width at a fixed pulse; the simulator does not
+Pool, same site/altitude/pulse (44.3 µs), minutes apart: 10 m / 1200 bins reads −2.0…−3.0
+dB against 20 m / 1200 at 1–8 m slant (FBR crest −2 dB, leading edge −7 dB, nadir ringing
++5 dB; outside the ±0.6 dB spread of the 20 m runs). The renderer is bin-count invariant
+(`sonar_model.md`). Close to energy-per-bin. Pass 3 phase 4 (device stage).
+
+### [P2] Wall echo shape and the beyond-wall level (E): a waveguide image comb (pass 3)
+Pool walls placed within ±0.1 m (median) of the measured outline; the simulated face line
+sits at the geometric face, but the real wall echo is followed by a ~1 m plateau (−1…−3 dB
+under the face peak at near-normal plan incidence) and the simulator is 30 dB under the
+device 0.5–2 m past the face (phase 3). Pass 3 phase 4 (`~/calib/pass3/phase4/PHASE4_REPORT.md`
+§T): **not a device kernel** (the boxed weight's tail is 11 dB weaker, same pulse), **not
+plan obliquity** (present at < 5° incidence), and it **grows** with the face range. Inferred:
+the wall is a mirror at near-normal incidence and the 0.9 m surface/floor waveguide (painted
+concrete totally reflects below ~66° grazing) adds the transducer image's vertical images;
+an offline image comb with the shipped beam (`~/calib/pass3/tools/wall_image_comb.py`)
+reproduces the growth with range and the 1–2 m extent, 4–8 dB weak. Next: a renderer
+image comb for coherent wall/object echoes (order limited by the beam), proved first against
+the closed form, then the pool walls (FIT) and the harbour quay's 7–10 dB "beyond" deficit.
+
+### [~] Transducer installation: 0.22 m deep, −0.345 m (drawing) / −0.60 m vs the pool nav fix
+Operator (2026-11-01): the transducers are on the rear-most hull mounting holes, **the same
+holes for every corpus**; the GPS sat ~0.10 m behind the bow for the pool corpus and at the
+hull centre for the older ones. Measured (pass 3 phase 2, `~/calib/pass3/phase2/transducer_mount.json`):
+`BlueBoat.dae` puts the holes 0.030 m above the keel, 0.345 m aft of the hull centre;
+`BlueBoat.stl` buoyancy puts the waterline 0.216-0.241 m above the keel at 16-22 kg; the
+pool (floor 0.90 m) reproduces every run's FBR altitude with **0.22 m** ± 0.03 m. **Done
+2026-11-02 (pass 3 phase 4, bundle G):** `sensor_depth_m` 0.15 → 0.22 and `mount_x_m`
+0.0 → −0.345 in `sonar/config.py` and every comparison profile (`field_candidate_v1`
+frozen at 0.15/0.0), registry entries with the evidence. Open: (1) the pool walls give
+−0.60 m from the navigation fix (FIT; VALIDATION −0.71), i.e. −0.10…−0.21 m from the hull
+centre with the GPS where the operator put it, against −0.345 m on the drawing — measure
+the acoustic centre / the EKF reference (reciprocal passes over a point target);
+(2) `sss_processor_node` / the GCS moved to 0.22 m on 2026-11-02 (operator's order); their
+fore/aft is still 0.0 and no georeference uses one — a per-session arm is BlueBoat-SSS's
+(`~/calib/pass3/GCS_PLAN.md` item 4).
+
+### [P2] Object edges (D) and walls (E) not calibrated in pass 2
+D needs attitude/heave replay over the field-box pass before any `penumbra_deg`;
+E (quay "beyond" zone 7–10 dB dark) needs a known structure. The walled-scene
+speckle fill (behind a quay) is fixed; nothing else changed.
 
 ### [P2] `objects.classes.<class>` ignores unknown keys
 `count: 3` (instead of `amount: {kind: count, value: 3}`) silently places nothing.

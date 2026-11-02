@@ -86,6 +86,24 @@ def _cal_config() -> SonarConfig:
     c.acquisition.gain_index = CAL_GAIN_INDEX
     return c
 
+
+#: The shipped fore/aft lever arm (field-calibration pass 3, 2026-11-02:
+#: -0.345 m, the rear-most hull holes). The object checks were written with
+#: the transducers abeam the vehicle origin; `_tx_pose` keeps that geometry
+#: by placing the TRANSDUCERS' along-track station at (x, y), so a target
+#: built at the vehicle's x stays on the beam line whatever the arm. Checks
+#: of the arm itself ([4b] defaults, [10] lever arm, [16] installation) and
+#: the render fixture use vehicle poses.
+_MOUNT_X = SonarConfig.from_yaml(
+    PKG_ROOT / "config" / "default_sonar.yaml").model.mount_x_m
+
+
+def _tx_pose(x: float, y: float, z: float = 0.0, yaw: float = 0.0) -> Pose3D:
+    """Level vehicle pose whose transducers sit at along-track station
+    (x, y): the vehicle origin moved back by the shipped fore/aft arm."""
+    return Pose3D(x - _MOUNT_X * float(np.cos(yaw)),
+                  y - _MOUNT_X * float(np.sin(yaw)), z, yaw=yaw)
+
 #: Minimal stand-in for analysis.svlog_reader.ProfileRecord, so the corpus's
 #: normalisation invariants can be asserted on freshly encoded pings without
 #: routing them through a file.
@@ -136,8 +154,10 @@ def _write_sim_svlog(scene, traj, anchor, out_path, *, n_pings: int = 200,
                      "alt": 5000, "relative_alt": 0, "vx": 0, "vy": 0, "vz": 0,
                      "hdg": int(round((90.0 - np.degrees(pyaw)) % 360.0 * 100))},
                     {"type": "ATTITUDE", "time_boot_ms": boot, "roll": 0.0,
-                     "pitch": 0.0, "yaw": float(pyaw), "rollspeed": 0.0,
-                     "pitchspeed": 0.0, "yawspeed": 0.0}):
+                     "pitch": 0.0,
+                     # MAVLink ATTITUDE yaw is NED (clockwise from north)
+                     "yaw": float((np.pi / 2 - pyaw + np.pi) % (2 * np.pi) - np.pi),
+                     "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}):
                 blob += _sim_frame(150, _j.dumps({"header": {"sequence": k % 256},
                                                   "message": msg}).encode(), src=3)
         for side in Side:
@@ -219,6 +239,52 @@ def _baseline_scene(objects=()):
                       material_id=np.zeros((241, 401), dtype=np.uint8),
                       material_names=["sand"], objects=objects, walls=[],
                       seed=0, config_snapshot={})
+
+
+def _encode_probe(model=None) -> dict[str, np.ndarray]:
+    """The noise + encoder path, frozen (2026-10-23): what the wire carries.
+
+    The render fixture pins the noiseless arrays only; nothing pinned the
+    stage after it, so a change in ``apply_ping_noise`` or ``PingEncoder``
+    (an extra RNG draw, a level term, a ceiling) could move every simulated
+    recording without any gate noticing. Eight pings per case through the
+    node's own noise call (all four optional inputs) and the encoder: counts
+    plus the two dB endpoints. Flat sand and the field box at the
+    calibration acquisition, one flat case at the shipped default
+    acquisition. No walls: a walled scene's noise path is pinned in [4d].
+    """
+    cfg = _cal_config()
+    model = model or cfg.model
+    box = [PlacedObject(0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425,
+                        0.323, 0.0, 0.18, "pp_shell", transmission=0.11)]
+    shipped = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+    shipped.acquisition.gain_index = CAL_GAIN_INDEX
+    cases = [("flat_cal", _baseline_scene(), cfg.acquisition),
+             ("box_cal", _baseline_scene(box), cfg.acquisition),
+             ("flat_shipped", _baseline_scene(), shipped.acquisition)]
+    out: dict[str, np.ndarray] = {}
+    for name, scene, acq in cases:
+        rr = GeometricRenderer(scene, acq, model)
+        enc = PingEncoder(Side.PORT, acq, model)
+        rng = np.random.default_rng(20261023)
+        bins = (acq.range_start_mm / 1000.0
+                + (np.arange(acq.num_results) + 0.5) * acq.bin_size_m)
+        counts, lo, hi = [], [], []
+        for k in range(8):
+            pg = rr.render(Side.PORT, Pose3D(9.8 + 0.05 * k, 0.0, 0.0), 0.0).ping
+            pg.power = apply_ping_noise(pg.power, bins < pg.altitude_m, 1.0,
+                                        model, rng, specular=pg.specular,
+                                        texture=pg.texture,
+                                        unoccluded=pg.unoccluded,
+                                        ambient=pg.ambient)
+            e = enc.encode(pg)
+            counts.append(np.asarray(e.pwr_results, dtype=np.int64))
+            lo.append(float(e.min_pwr_db))
+            hi.append(float(e.max_pwr_db))
+        out[f"{name}.counts"] = np.stack(counts)
+        out[f"{name}.min_pwr_db"] = np.asarray(lo)
+        out[f"{name}.max_pwr_db"] = np.asarray(hi)
+    return out
 
 
 def _reported_db(scene, side, pose, acq, model, seed=11, n_avg=16):
@@ -556,9 +622,27 @@ def main() -> None:
     # peak. (The corpus at gain 4 gives a median of about 32 dB, 10-90 %
     # 25-42, on the [2f] statistic: bins 10 to FBR-8, ringing tail included.)
     contrast_db = peak - float(wc.mean())
-    check("water column is quiet vs FBR peak (~31 dB incl. ringing bins)",
-          24.0 < contrast_db < 44.0,
-          f"{contrast_db:.1f} dB gap->peak contrast")
+    # 2026-10-30 re-anchor (pass-2 promotion of specular_strength 12 -> 1.75
+    # and the receiver ceiling): the window used to be 24-44 dB on the
+    # MEAN curve above -- set around the old simulator's ~31 dB, while the
+    # corpus band it cites (median 32, 10-90 % 25-42) is the PER-PING [2f]
+    # statistic, whose speckle maxima sit several dB above the mean curve's
+    # peak. The gate is now that statistic against that band; the mean-curve
+    # figure is reported beside it. Never widened to let a change through.
+    _pp = []
+    for _p2b in fbr_probe:
+        _i2b = fbr_bin(np.asarray(_p2b, dtype=np.float64))
+        if _i2b is None or _i2b < 30:
+            continue
+        _pp.append(float(np.max(_p2b[:_i2b + 40]))
+                   - float(np.mean(_p2b[10:max(_i2b - 8, 11)])))
+    contrast_pp = float(np.median(_pp)) if _pp else float("nan")
+    check("water column is quiet vs FBR peak: the corpus's per-ping "
+          "statistic (bins 10..FBR-8 vs max to FBR+40) inside its 10-90 % "
+          "band, 25-42 dB",
+          25.0 <= contrast_pp <= 42.0,
+          f"per-ping median {contrast_pp:.1f} dB over {len(_pp)} pings "
+          f"(corpus median 32); mean-curve gap->peak {contrast_db:.1f} dB")
     # Transmit ringing (corpus-measured 55 dB at the transducer decaying
     # to ~33 dB by 1 m): present, at level, and settled well before the
     # first bottom return.
@@ -652,8 +736,15 @@ def main() -> None:
     # 66.60 - 11.28*log10(altitude) dB -- 60.1 dB at this fixture's altitude.
     # The seabed *level* now matches the corpus within 0.6 dB at 1.4 m and at
     # 7.3 m; the peak still reads ~6 dB hot, which is the documented residual.
-    check("max_pwr_db sits on the measured level anchor (66.10 +- 0.5 dB)",
-          abs(float(np.mean(fbr_maxdb)) - 66.10) <= 0.5,
+    #
+    # 2026-10-30: 66.10 -> 61.20, deliberately, by the pass-2 promotion of
+    # bundle B through its pre-registered gate (specular_strength 12 -> 1.75,
+    # receiver ceiling on; docs/engineering/calibration_results.md). 12 had
+    # been fitted to max_pwr_db, which on the device is mostly not the first
+    # bottom return; fitted instead to the detector-located FBR crest, the
+    # peak now reads ~1 dB over the corpus law here instead of ~6.
+    check("max_pwr_db sits on the measured level anchor (61.20 +- 0.5 dB)",
+          abs(float(np.mean(fbr_maxdb)) - 61.20) <= 0.5,
           f"mean {np.mean(fbr_maxdb):.2f} dB at {mean_alt:.1f} m altitude "
           f"(calibration_db_offset {model.calibration_db_offset:g} dB; the "
           f"corpus law gives {66.60 - 11.28 * np.log10(mean_alt):.1f} dB "
@@ -666,37 +757,72 @@ def main() -> None:
     # the diffuse field -- sharing r^-4 gave 20-27 dB per decade, i.e. a
     # simulator that was right at one altitude and nowhere else. This gate is
     # the one that fails if that split is undone; it needs no corpus.
-    def _peak_at(alt_m: float) -> float:
+    # 2026-10-30 re-anchor (pass-2 promotion: specular_strength 12 -> 1.75,
+    # receiver ceiling on). The device's max_pwr_db is three regimes, not one
+    # line: at 1-2 m the diffuse near-tail peak piled up at the receiver
+    # ceiling, at 3-6 m the bottom return, above ~8 m the transmit ringing
+    # (pass-1 measurement, ~/calib/validation_scores/peak_anatomy.txt). The
+    # promoted model reproduces all three, so a single fitted slope no longer
+    # describes either side; the gate compares point by point instead --
+    # every altitude within +-4 dB (2.5 x the law's own 1.57 dB rms), mean
+    # within +-2 dB -- tighter than the old "level within 8 dB", which only
+    # the ~6 dB-hot model needed. The split it used to guard is tested
+    # directly below.
+    def _peak_at(alt_m: float, mdl=None) -> tuple[float, float]:
+        mdl = model if mdl is None else mdl
         g_a = GridSpec(-40.0, -40.0, 0.25, 321, 321)
-        h_a = np.full((g_a.ny, g_a.nx), -(alt_m + model.sensor_depth_m))
+        h_a = np.full((g_a.ny, g_a.nx), -(alt_m + mdl.sensor_depth_m))
         sc_a = SceneModel(grid=g_a, height=h_a,
                           reflectivity=np.full(h_a.shape, 0.55),
                           material_id=np.zeros(h_a.shape, dtype=np.uint8),
                           material_names=["sand"], objects=[], walls=[],
                           seed=0, config_snapshot={})
-        rr_a = GeometricRenderer(sc_a, acq, model)
-        en_a = PingEncoder(Side.PORT, acq, model)
+        rr_a = GeometricRenderer(sc_a, acq, mdl)
+        en_a = PingEncoder(Side.PORT, acq, mdl)
         rg_a = np.random.default_rng(7)
         bins_a = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
-        pk = []
+        pk, fb = [], []
         for k in range(3):
             pg_a = rr_a.render(Side.PORT, Pose3D(0.3 * k, 0.0, 0.0), 0.0).ping
             pg_a.power = apply_ping_noise(pg_a.power, bins_a < pg_a.altitude_m,
-                                          1.0, model, rg_a,
+                                          1.0, mdl, rg_a,
                                           specular=pg_a.specular,
                                           texture=pg_a.texture)
-            pk.append(en_a.encode(pg_a).max_pwr_db)
-        return float(np.median(pk))
+            e_a = en_a.encode(pg_a)
+            pk.append(e_a.max_pwr_db)
+            db_a = scale_to_db(e_a.pwr_results, e_a.min_pwr_db, e_a.max_pwr_db)
+            i_a = fbr_bin(db_a)
+            if i_a is not None:
+                fb.append(float(db_a[max(i_a - 2, 0):i_a + 5].max()))
+        return float(np.median(pk)), (float(np.median(fb)) if fb else np.nan)
     alts_a = np.array([1.0, 1.8, 3.2, 5.6, 10.0])
-    pk_a = np.array([_peak_at(a) for a in alts_a])
-    A_a = np.vstack([np.ones(alts_a.size), np.log10(alts_a)]).T
-    c0_a, sl_a = np.linalg.lstsq(A_a, pk_a, rcond=None)[0]
-    check("the reported peak follows the corpus's altitude law (the coherent "
-          "component spreads once, the diffuse twice)",
-          abs(sl_a + 11.28) < 2.5 and abs(c0_a - 66.60) < 8.0,
-          f"sim {c0_a:.1f} {sl_a:+.1f}*log10(alt); device 66.6 -11.3 "
-          f"(19 files, rms 1.6). Level residual {c0_a - 66.60:+.1f} dB -- the "
-          f"seabed itself matches within 0.6 dB (docs/sonar_model.md s6)")
+    pk_a = np.array([_peak_at(a)[0] for a in alts_a])
+    res_a = pk_a - (66.60 - 11.28 * np.log10(alts_a))
+    check("the reported peak follows the corpus's law point by point "
+          "(ceiling pile-up, bottom return, ringing): every altitude within "
+          "4 dB, mean within 2 dB",
+          float(np.max(np.abs(res_a))) <= 4.0 and abs(float(np.mean(res_a))) <= 2.0,
+          "residual " + ", ".join(f"{a:g} m {r:+.1f}" for a, r in zip(alts_a, res_a))
+          + f" dB; mean {np.mean(res_a):+.2f} (device 66.6 - 11.3 log10 alt, "
+          "19 files, rms 1.6)")
+    # The coherent channel spreads ONCE over the folded path
+    # (specular_spreading_exponent 2, NC #4 piece 5); spreading it twice like
+    # the diffuse field makes the first bottom return fall two to three
+    # times too fast with altitude. Measured on the detector-located FBR
+    # (max over [FBR-2, FBR+4]), not max_pwr_db, which the ringing takes
+    # over above ~8 m. With specular_strength 1.75 the coherent share of
+    # that window at 10 m is ~2/3, so spreading it twice costs 4.4 dB
+    # (2026-10-30), not the ~20 dB of a purely coherent return; 3 dB detects
+    # the undo with margin over the 3-ping median's ~0.5 dB noise.
+    _twice = dataclasses.replace(
+        model, specular_spreading_exponent=model.spreading_exponent)
+    _fb10, _fb10_twice = _peak_at(10.0)[1], _peak_at(10.0, _twice)[1]
+    check("the coherent bottom return spreads once: spreading it twice drops "
+          "the detector-located FBR at 10 m by more than 3 dB (or loses it)",
+          np.isfinite(_fb10) and (not np.isfinite(_fb10_twice)
+                                  or _fb10 - _fb10_twice > 3.0),
+          f"FBR at 10 m {_fb10:.1f} dB (spread once) vs {_fb10_twice:.1f} dB "
+          "(twice)")
 
     # Speckle lives in the LINEAR power field. The encoded array is a dB axis,
     # where Exp(1) does not have CV 1 -- checking it there would silently
@@ -796,18 +922,26 @@ def main() -> None:
     check("texture is correlated along track (corpus lag-1 0.36-0.66)",
           0.12 < t1 < 0.7, f"lag-1 along-track correlation {t1:.2f} at "
           f"{traj.speed if hasattr(traj, 'speed') else float('nan'):.2f} m/s")
-    tex_b = GeometricRenderer(
-        scene, acq, dataclasses.replace(model, scatterer_seed=99)).render(
-        Side.PORT, Pose3D(*traj.pose_at(0.0)[:2], 0.0,
-                          yaw=traj.pose_at(0.0)[2]), 0.0).ping.texture
+    # Cross-seed correlation over 20 pings, not one (2026-11-02): one ping's
+    # ~240 range-correlated bins give a correlation with SD 0.075 about 0
+    # (40 seeds, measured under both installations), so a single-ping test
+    # at 0.15 failed 5 % of geometry changes by chance (seed 99 read +0.17
+    # after the pass-3 mount change, +0.12 before). The stack's SD is ~0.017:
+    # the same 0.15 bound, now a real test of independence.
+    rend_b = GeometricRenderer(
+        scene, acq, dataclasses.replace(model, scatterer_seed=99))
+    tex_b = np.stack([rend_b.render(
+        Side.PORT, Pose3D(*traj.pose_at(k * period)[:2], 0.0,
+                          yaw=traj.pose_at(k * period)[2]),
+        k * period).ping.texture[mid] for k in range(20)])
     tex_a2 = renderer.render(Side.PORT, Pose3D(*traj.pose_at(0.0)[:2], 0.0,
                                                yaw=traj.pose_at(0.0)[2]),
                              0.0).ping.texture
+    _xseed = _corr(10 * np.log10(tex_b + 1e-9), tex_db[:20])
     check("texture is deterministic per seed and decorrelates across seeds",
-          np.array_equal(tex_a2, tex[0])
-          and abs(_corr(10 * np.log10(tex_b[mid] + 1e-9), tex_db[0])) < 0.15,
-          f"same seed identical; other seed correlation "
-          f"{_corr(10*np.log10(tex_b[mid]+1e-9), tex_db[0]):.2f}")
+          np.array_equal(tex_a2, tex[0]) and abs(_xseed) < 0.15,
+          f"same seed identical; other seed correlation {_xseed:.3f} "
+          f"(20 pings)")
     nospk = GeometricRenderer(scene, acq, dataclasses.replace(model, speckle=False))
     p_ns = nospk.render(Side.PORT, Pose3D(*traj.pose_at(0.0)[:2], 0.0,
                                           yaw=traj.pose_at(0.0)[2]), 0.0).ping
@@ -837,11 +971,18 @@ def main() -> None:
     def _extent(n_lines: int) -> float:
         c = dataclasses.replace(model, alongtrack_beam_lines=n_lines)
         rr = GeometricRenderer(_Bump(), acq, c)
-        b = int(np.hypot(12.8, 1.60) / acq.bin_size_m)
+        # The scan is placed from the profile's mount (2026-11-02): xs is the
+        # TRANSDUCER's along-track position, the bump top 1.75 m deep, 13 m
+        # off the hull centre. Hard-coded for the old 0.20 m / 0 / 0.15 m
+        # mount, the pass-3 installation (-0.345 m aft) slid the bump to the
+        # scan's edge, which is the background estimate.
+        b = int(np.hypot(13.0 - c.mount_y_abs_m, 1.75 - c.sensor_depth_m)
+                / acq.bin_size_m)
         xs = np.arange(-0.5, 0.5, 0.02)
 
         def _tot(x: float) -> float:
-            pg = rr.render(Side.PORT, Pose3D(x, 0, 0, 0, 0, 0), 0.0).ping
+            pg = rr.render(Side.PORT, Pose3D(x - c.mount_x_m, 0, 0, 0, 0, 0),
+                           0.0).ping
             comb = pg.power + (pg.specular if pg.specular is not None else 0.0)
             return float(comb[b - 5:b + 5].max())
 
@@ -916,8 +1057,13 @@ def main() -> None:
     #     original count-span plan does not work: a count histogram carries no
     #     level information at all, and `calibration_db_offset` is the sole
     #     level constant, determined from the reported max_pwr_db.
+    #     The receiver ceiling (on by default since 2026-10-30) is switched
+    #     off here: it is the one place the device's counts DO change with
+    #     level -- the top piles up -- and [17] tests it on its own; this
+    #     check is about the per-ping normalisation beneath it.
+    _m_noceil = dataclasses.replace(model, receiver_ceiling=False)
     shared = _pings(model, 60, seed=11)   # same field, encoded two ways
-    m_louder = dataclasses.replace(model,
+    m_louder = dataclasses.replace(_m_noceil,
                                    calibration_db_offset=
                                    model.calibration_db_offset + 20.0)
 
@@ -928,7 +1074,7 @@ def main() -> None:
                           for e in out]),
                 float(np.mean([e.max_pwr_db for e in out])))
 
-    c_a, db_a = _encoded(model)
+    c_a, db_a = _encoded(_m_noceil)
     c_b, db_b = _encoded(m_louder)
     check("level rides in max_pwr_db, not in the counts",
           np.array_equal(c_a, c_b) and abs((db_b - db_a) - 20.0) < 1e-6,
@@ -1072,18 +1218,50 @@ def main() -> None:
               16.0 < wc_med < 36.0,
               f"{wc_med:.1f} dB below the bottom return over {len(wc_gaps)} "
               "field pings (bins 10..FBR-8, ringing tail included); gate 16-36 dB")
-        # The range law. The shipped tvg_compensation of 0.90 left a ~2 dB per
-        # decade residual; the corpus falls an order of magnitude faster, which
-        # is what moved spreading_exponent to the two-way value with no TVG.
+        # The range law, as a sanity bound only: a TVG of 0.90 once left a
+        # nearly flat ~2 dB/decade, and the corpus seabed falls steeply. The
+        # level itself is checked against the corpus at matched geometry by
+        # the mean-intensity anchor gate further down (2026-10-23; until then
+        # this message quoted a pre-2026-09-18 "40-52 dB/decade").
         r_probe = np.array([5.0, 50.0])
         net = net_range_response(r_probe, model)
         model_slope = float(10 * np.log10(net[0] / net[1]))
-        check("the model's range law falls as steeply as the corpus does",
+        check("the model's net range law is a steep two-way loss (30-55 dB "
+              "per decade of slant range), not a TVG-flattened one",
               30.0 < model_slope < 55.0,
-              f"{model_slope:.1f} dB per decade of slant range "
-              f"(spreading {model.spreading_exponent:g}, tvg "
-              f"{model.tvg_compensation:g}); the corpus falls 40-52 dB/decade "
-              "and the old 0.90 TVG gave 2")
+              f"{model_slope:.1f} dB per decade (spreading "
+              f"{model.spreading_exponent:g}, tvg {model.tvg_compensation:g}, "
+              "absorption included)")
+        # The level itself, at the two NC #6 anchors and each one's OWN
+        # acquisition (bath3 20 m / 600 / 66.5 us at 1.4 m; the harbour
+        # 40 m / 600 / 106.4 us at 7.3 m): the shipped profile's expected
+        # mean intensity against the first 300 band pings' power average
+        # over the tail (calibration.seabed; 2026-10-24). Pass 1 measured
+        # +0.04..+0.77 dB here; 1.0 dB is the 0.83 dB real-vs-real floor
+        # plus margin, never widened to let a model change through.
+        from blueboat_sss_sim.calibration.seabed import \
+            anchor_level_bias as _alb
+        from blueboat_sss_sim.sonar.config import \
+            find_default_sonar_yaml as _fdsy2f
+        _cfg2f = SonarConfig.from_yaml(_fdsy2f())
+        _anch = {}
+        for _f2f, _band2f in (("beach_sept/bath3.svlog", (1.4, 1.6)),
+                              ("reflectionEvidenceFullharbour.svlog",
+                               (7.0, 8.0))):
+            if (corpus / _f2f).is_file():
+                _anch[_f2f] = _alb(corpus / _f2f, _cfg2f, band=_band2f)
+        if len(_anch) == 2:
+            check("corpus: the shipped profile reproduces the seabed LEVEL "
+                  "(power average, tail past 1.4 x altitude) at both NC #6 "
+                  "anchors at their own acquisitions, within 1.0 dB",
+                  all(v.get("level_bias_db") is not None
+                      and abs(v["level_bias_db"]) <= 1.0
+                      for v in _anch.values()),
+                  "; ".join(f"{Path(k).stem} {v.get('alt', 0):.2f} m: "
+                            f"{v.get('level_bias_db', float('nan')):+.2f} dB "
+                            f"({v.get('n')} pings)" for k, v in _anch.items()))
+        else:
+            print("  SKIP: the NC #6 anchor recordings are not in the corpus")
 
     # ---- 4. Shallow-regime world ------------------------------------------------
     # `config/shallow_water_world.yaml` ships alongside the 4 m default at
@@ -1141,17 +1319,28 @@ def main() -> None:
             _g2f, _gi2f = _cg2f(_rel2f, _snd2f)
             _q2f = _rq2f(_rel2f, _snd2f)
             _dt2f_r = _time.time() - _t2f_r
+            # Until 2026-10-23 this also asserted 0.1 <= gain <= 3.0 -- the
+            # very bounds calibrate_gain clips to, so it could not fail. The
+            # unclipped tie-line slope on bath1 is <= 0: the shading relief
+            # does not track the soundings measured where lines cross, and
+            # the "calibrated" 0.1 was the clip floor. The check now pins that
+            # measured finding (and that the clip is reported); a change that
+            # makes the relief track the soundings fails it on purpose.
             check("corpus: the beach recording's shading yields a relief field "
                   "over most of the survey hull, self-consistent between "
-                  "passes, and the tie lines calibrate its amplitude",
+                  "passes; its tie soundings do NOT support the amplitude "
+                  "(raw slope below the clip floor, reported as clipped)",
                   _q2f["coverage_fraction"] > 0.15 and _q2f["rms_m"] < 1.0
                   and (_q2f["overlap_rms_m"] or 0.0) < 0.5
-                  and _gi2f["gain_pairs"] >= 30 and 0.1 <= _g2f <= 3.0
+                  and _gi2f["gain_pairs"] >= 30 and _gi2f["clipped"] == "low"
+                  and _gi2f["gain_raw"] < 0.1 and _g2f == 0.1
                   and _dt2f_r < 120.0,
                   f"{100 * _q2f['coverage_fraction']:.0f} % of the hull, "
                   f"{_q2f['cells']} cells, rms {_q2f['rms_m']:.2f} m, overlap "
-                  f"{_q2f['overlap_rms_m']:.2f} m, gain x{_g2f:.2f} on "
-                  f"{_gi2f['gain_pairs']} pairs, {_dt2f_r:.1f} s")
+                  f"{_q2f['overlap_rms_m']:.2f} m, tie-line slope "
+                  f"{_gi2f['gain_raw']:+.3f} on {_gi2f['gain_pairs']} pairs "
+                  f"(returned the {_gi2f['clipped']} bound x{_g2f:.2f}), "
+                  f"{_dt2f_r:.1f} s")
             check("corpus: the beach recording inverts to a reflectivity map "
                   "(thousands of cells, a 6-25 dB p5-p95 spread, single-look "
                   "cell statistics) in a few seconds",
@@ -1341,10 +1530,14 @@ def main() -> None:
     # Gain is a level shift under the device's normalisation, so it must move
     # the reported dB and leave the counts alone -- the opposite of what an
     # absolute-count encoding does.
+    # Receiver ceiling off (on by default since 2026-10-30): a gain step
+    # that lifts the top into it changes the counts on the device too; this
+    # is the normalisation beneath it ([17] tests the ceiling).
+    _m_nc = dataclasses.replace(model, receiver_ceiling=False)
     e_g4 = PingEncoder(Side.PORT, dataclasses.replace(acq, gain_index=4),
-                       model).encode(rp.ping)
+                       _m_nc).encode(rp.ping)
     e_g6 = PingEncoder(Side.PORT, dataclasses.replace(acq, gain_index=6),
-                       model).encode(rp.ping)
+                       _m_nc).encode(rp.ping)
     check("a gain step moves the reported dB, not the normalised counts",
           np.array_equal(e_g4.pwr_results, e_g6.pwr_results)
           and abs((e_g6.max_pwr_db - e_g4.max_pwr_db)
@@ -1380,13 +1573,28 @@ def main() -> None:
           f"gain_index {bundle_acq['gain_index']}")
     # What a Gazebo run started from the station gets when nothing is passed
     # (MCS -> full_mission_launch.py -> this profile): the device's best
-    # acquisition, which is also the real driver's default (2026-09-28).
-    _best = {"range_start_mm": 0, "range_length_mm": 20000, "msec_per_ping": 0,
+    # acquisition, which is also the real driver's default (2026-09-28), at
+    # SonarView's ping interval (50 ms, 2026-10-27).
+    _best = {"range_start_mm": 0, "range_length_mm": 20000, "msec_per_ping": 50,
              "gain_index": -1, "num_results": 1200, "pulse_len_percent": 0.00125}
-    check("the shipped default profile is the device's best acquisition: "
-          "20 m, auto-gain, 1200 bins, pulse 0.00125",
+    check("the shipped default profile is the device's best acquisition at "
+          "SonarView's interval: 20 m, 50 ms, auto-gain, 1200 bins, pulse 0.00125",
           bundle_acq == _best,
           ", ".join(f"{k} {v}" for k, v in bundle_acq.items()))
+    # The ping law, as SonarView's recordings and our free-running driver
+    # measured it: 50 ms is the command, not a device cap.
+    _shipped = SonarConfig.from_yaml(profile_yaml)
+    _p20 = _shipped.acquisition.ping_period_s(_shipped.model.max_ping_rate_hz)
+    _free = dataclasses.replace(_shipped.acquisition, msec_per_ping=0)
+    _p20_free = _free.ping_period_s(_shipped.model.max_ping_rate_hz)
+    _far = dataclasses.replace(_shipped.acquisition, range_length_mm=95600)
+    _p96 = _far.ping_period_s(_shipped.model.max_ping_rate_hz)
+    check("ping law = SonarView's: 50 ms at 20 m, 2R/c + 3 ms beyond ~35 m; "
+          "free run (msec_per_ping 0) is not capped at 20 Hz",
+          abs(_p20 - 0.050) < 1e-9 and abs(_p96 - (2 * 95.6 / 1500 + 0.003)) < 1e-9
+          and 0.028 < _p20_free < 0.031,
+          f"{_p20 * 1e3:.1f} ms at 20 m, {_p96 * 1e3:.1f} ms at 95.6 m, "
+          f"free run {_p20_free * 1e3:.1f} ms at 20 m (device: 29.0)")
     # ... and equal to what the real driver declares, read from its source
     # (never imported -- CM-3). Skips visibly without the neighbour checkout.
     _real_node = (PKG_ROOT.parents[1] / "BlueBoat-SSS" / "blueboat_sss" / "src"
@@ -1633,6 +1841,11 @@ def main() -> None:
     # (wakamatsu_beach), so the soundings round-trip exactly there.
     anchor = GeoAnchor(lat0=33.930824, lon0=130.7311812)
     blob, blob_f, poses = bytearray(), bytearray(), {}
+    # a real device's ping header carries an unreferenced heading (pass 3,
+    # 2026-11-01): the same run with that field offset by 80 deg
+    blob_o = bytearray()
+    met_enc_o = {s: PingEncoder(s, met_cfg.acquisition, met_cfg.model)
+                 for s in Side}
 
     def _nav(k, t, px, py, pyaw, boot_ms):
         lat_k, lon_k = anchor.to_latlon(px, py)
@@ -1645,8 +1858,10 @@ def main() -> None:
                  "alt": 5000, "relative_alt": 0, "vx": 0, "vy": 0, "vz": 0,
                  "hdg": int(round((90.0 - np.degrees(pyaw)) % 360.0 * 100))},
                 {"type": "ATTITUDE", "time_boot_ms": boot_ms, "roll": 0.01,
-                 "pitch": 0.02, "yaw": float(pyaw), "rollspeed": 0.0,
-                 "pitchspeed": 0.0, "yawspeed": 0.0}):
+                 "pitch": 0.02,
+                 # MAVLink ATTITUDE yaw is NED (clockwise from north)
+                 "yaw": float((np.pi / 2 - pyaw + np.pi) % (2 * np.pi) - np.pi),
+                 "rollspeed": 0.0, "pitchspeed": 0.0, "yawspeed": 0.0}):
             out += _frame(150, _json.dumps({"header": {"sequence": k % 256},
                                             "message": msg}).encode(), src=3)
         return bytes(out)
@@ -1659,14 +1874,23 @@ def main() -> None:
         if k % 4 == 0:
             blob += _nav(k, t, px, py, pyaw, int(t * 1000) - SKEW_MS)
             blob_f += _nav(k, t, px, py, pyaw, FROZEN_MS)
+            blob_o += _nav(k, t, px, py, pyaw, int(t * 1000) - SKEW_MS)
         for side in Side:
-            enc = met_enc[side].encode(met_rend.render(side, ppose, t).ping)
+            png = met_rend.render(side, ppose, t).ping
+            enc = met_enc[side].encode(png)
             frame = _frame(2198, enc.raw_frame[8:-2],
                            src=1 if side is Side.PORT else 2)
             blob += frame
             blob_f += frame
+            png.pose = dataclasses.replace(png.pose, yaw=png.pose.yaw
+                                           - np.radians(80.0))
+            enc_o = met_enc_o[side].encode(png)
+            blob_o += _frame(2198, enc_o.raw_frame[8:-2],
+                             src=1 if side is Side.PORT else 2)
     svlog_path = OUT / "run.svlog"
     svlog_path.write_bytes(bytes(blob))
+    offset_path = OUT / "run_ping_heading_offset.svlog"
+    offset_path.write_bytes(bytes(blob_o))
     frozen_path = OUT / "run_frozen.svlog"
     frozen_path.write_bytes(bytes(blob_f))
 
@@ -1687,6 +1911,20 @@ def main() -> None:
           perr < 0.10 and yerr < 1e-5,
           f"{len(paired)}/{len(profs)} paired, max position error "
           f"{perr*100:.1f} cm, heading {np.degrees(yerr):.1e} deg")
+    # pass 3: the heading comes from the autopilot's ATTITUDE, never from the
+    # ping header, which a real device fills with its own unreferenced heading
+    _, paired_o = svlog_reader.pose_track(offset_path)
+    profs_o = svlog_reader.read_svlog(offset_path).profiles
+    yerr_o = max(abs((pp.yaw - poses[i // 2].yaw + np.pi) % (2 * np.pi) - np.pi)
+                 for i, pp in paired_o)
+    hdr_off = np.median([((p.vehicle_heading_deg
+                           - (90.0 - np.degrees(poses[i // 2].yaw))) + 180) % 360 - 180
+                         for i, p in enumerate(profs_o)])
+    check("the pose heading is the autopilot's ATTITUDE yaw, not the ping "
+          "header's (a real device's header heading is offset per unit and run)",
+          yerr_o < 1e-5 and abs(hdr_off - 80.0) < 0.5,
+          f"header off by {hdr_off:+.1f} deg, recovered heading error "
+          f"{np.degrees(yerr_o):.1e} deg")
 
     sv_obs = from_svlog(svlog_path, world_dir)
     check("svlog source re-derives contacts against the same scene",
@@ -2122,7 +2360,7 @@ def main() -> None:
     # A quay's wet face returns a bright coherent line at its own horizontal
     # distance and hides every seabed sample behind it -- the bright band
     # followed by a dark region that every real harbour mosaic shows.
-    d_face = W_Y - sensor_mp.y                       # 5.715 m with the 0.285 m mount
+    d_face = W_Y - sensor_mp.y                       # 5.715 m with the 0.285 m mount (any mount_x)
     r_foot = float(np.hypot(d_face, sensor_mp.z - W_DEPTH))
     b_face = int(d_face / mp_bin)
     echo_nowall, _, _ = _mp_render([], False, echo=True)
@@ -2224,6 +2462,24 @@ def main() -> None:
                              wall_gain=1.0, surface_enabled=False,
                              surface_reflectivity=0.9)[0].gain - 0.65 ** 2) < 1e-12,
           f"perfect mirror far ghost {smooth_far:+.1f} dB vs concrete {far_db:+.1f} dB")
+    # A ghost's coherent lobe is a per-sample MEAN like the direct path's
+    # (pass 4, 2026-11-02): normalised by the analytic diffuse denominator it
+    # was ~x1000 too hot, so the surface image put a spike at its own nadir
+    # far above the real first bottom return (+24 dB on this lab before the
+    # fix). Nadir and zenith both sit on the beam's sidelobe floor, so the
+    # image's own lobe lands only ~4 dB under the direct FBR -- a model
+    # property (pass 4: NC #4 risk of the surface image, checked in the pool
+    # gate); here it must at least stay under the FBR crest.
+    surf_on, _, _ = _mp_render([], True, surface=True)
+    surf_off, _, _ = _mp_render([], True, surface=False)
+    added = ((surf_on.ping.power + surf_on.ping.specular)
+             - (surf_off.ping.power + surf_off.ping.specular))
+    fbr_pk = float(surf_off.ping.specular.max())
+    check("the surface image's coherent lobe is a per-sample mean (no "
+          "nadir spike above the first bottom return)",
+          0.0 < float(added.max()) < fbr_pk,
+          f"image adds at most {10*np.log10(max(added.max(), 1e-30)/fbr_pk):+.1f} dB "
+          "re the direct FBR crest")
 
     # ---- occlusion of the wall features themselves (2026-09-18) -----------
     # Until this pass the face loop stopped at the first wet hit, so a
@@ -2287,9 +2543,11 @@ def main() -> None:
     col_q = float((_tot(cross_q)[wc] / np.maximum(_tot(cross_0)[wc], 1e-30)).min())
     check("crossing a pontoon line leaves the water column dark; a quay would not",
           col_p < 1e-12 and col_q > 100.0
-          and abs(cross_p.ping.altitude_m - 3.85) < 0.01,
+          and abs(cross_p.ping.altitude_m
+                  - (-W_DEPTH - mp_c.model.sensor_depth_m)) < 0.01,
           f"pontoon column identical to open water (max diff {col_p:.1e}); "
-          f"a quay 0.3 m away lights it x{col_q:.0f}")
+          f"a quay 0.3 m away lights it x{col_q:.0f}; altitude "
+          f"{cross_p.ping.altitude_m:.3f} m (depth - sensor_depth_m)")
     check("pontoon geometry is declared, validated and written for Gazebo",
           pont.z_bottom == -0.4 and basin_wall.z_bottom == -np.inf
           and "wall_pont" in write_world_sdf.__module__ + "wall_pont"
@@ -3505,9 +3763,9 @@ def main() -> None:
                           seed=0, config_snapshot={})
 
     p_wet = GeometricRenderer(_ridge_scene(False), acq, model).render(
-        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping.power
+        Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping.power
     p_dry = GeometricRenderer(_ridge_scene(True), acq, model).render(
-        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping.power
+        Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping.power
     b_beyond = int(math.hypot(6.6, 3.0 - model.sensor_depth_m)
                    / acq.bin_size_m) + 2
     check("no return from dry land, and nothing beyond it",
@@ -3520,7 +3778,7 @@ def main() -> None:
 
     def _echo_window(scene8):
         r8 = GeometricRenderer(scene8, acq, model)
-        ping8 = r8.render(Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+        ping8 = r8.render(Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping
         slant = math.hypot(6.0, 3.0 - model.sensor_depth_m)
         b0 = int((slant - 0.5) / acq.bin_size_m)
         b1 = int((slant + 0.8) / acq.bin_size_m)
@@ -3548,7 +3806,7 @@ def main() -> None:
     def _shadow_pw(obj8):
         sc8 = _flat_scene([obj8] if obj8 is not None else [])
         return GeometricRenderer(sc8, acq, model).render(
-            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping.power
+            Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping.power
     _open8 = _shadow_pw(None)
     _box8 = _shadow_pw(PlacedObject(
         0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425, 0.323, 0.0, 0.18,
@@ -3582,9 +3840,9 @@ def main() -> None:
     _yaw8 = math.radians(20.0)
     _db_box8 = _reported_db(_flat_scene([PlacedObject(
         0, "plastic_box", 10.0, 6.0, _yaw8, 0.716, 0.425, 0.323, 0.0, 0.18,
-        "pp_shell", transmission=0.11)]), Side.PORT, Pose3D(10.0, 0.0, 0.0),
+        "pp_shell", transmission=0.11)]), Side.PORT, _tx_pose(10.0, 0.0),
         acq, model)
-    _db_ref8 = _reported_db(_flat_scene([]), Side.PORT, Pose3D(10.0, 0.0, 0.0),
+    _db_ref8 = _reported_db(_flat_scene([]), Side.PORT, _tx_pose(10.0, 0.0),
                             acq, model)
     _sig8 = _object_signature(10.0 ** (_db_box8 / 10.0),
                               10.0 ** (_db_ref8 / 10.0), acq.bin_size_m,
@@ -3639,9 +3897,9 @@ def main() -> None:
         _bx = [PlacedObject(0, "plastic_box", 10.0, 6.0, 0.0, 0.716, 0.425,
                             0.323, 0.0, 0.18, "pp_shell", transmission=0.11)]
         _po = GeometricRenderer(_scene_at(_res, _bx), acq, model).render(
-            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+            Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping
         _pr = GeometricRenderer(_scene_at(_res, []), acq, model).render(
-            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+            Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping
         _to = (_po.power + _po.specular)[_c0:_c1]
         _tr = (_pr.power + _pr.specular)[_c0:_c1]
         _res_hl.append(10.0 * math.log10(_to.max() / max(_tr.max(), 1e-300)))
@@ -3662,10 +3920,10 @@ def main() -> None:
                                          0.60, 0.40, 0.35, 0.0, 0.8,
                                          "concrete")])
         rp_r = GeometricRenderer(sc_r, acq, m_r).render(
-            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)
+            Side.PORT, _tx_pose(10.0, 0.0), 0.0)
         sc_o = _flat_scene([])
         rp_o = GeometricRenderer(sc_o, acq, m_r).render(
-            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)
+            Side.PORT, _tx_pose(10.0, 0.0), 0.0)
         bins_r = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
         dark = (rp_r.ping.power == 0.0) & (bins_r > 6.4) & (bins_r < 7.0)
         acc_r = np.zeros(acq.num_results)
@@ -3697,7 +3955,7 @@ def main() -> None:
     # all three.
     def _label(objs, oid=0):
         rp8 = GeometricRenderer(_flat_scene(objs), acq, model).render(
-            Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)
+            Side.PORT, _tx_pose(10.0, 0.0), 0.0)
         for ct in rp8.contacts:
             if ct.object_id == oid:
                 return ct
@@ -3768,6 +4026,49 @@ def main() -> None:
     check("limits never enter the acoustic scene (walls list unchanged)",
           [w.name for w in back_l.walls] == ["q"])
     check("legacy worlds emit no limit models", "limit_" not in sdf)
+
+    # Gazebo visuals stand on the TERRAIN (2026-11-02): the stamped raster
+    # carries each object's own top, so the writer used to stand every
+    # object on itself and mesh its stamp as a bump (the pool's boxed weight
+    # 0.55 m above the floor on a pyramid). Visual only; the acoustic scene
+    # is the stamped raster, untouched.
+    from blueboat_sss_sim.worldgen.scene import stamp_objects as _so_sdf
+    g_sdf = GridSpec(origin_x=-5.0, origin_y=-5.0, resolution=0.1, nx=101, ny=101)
+    h_sdf = np.full((101, 101), -3.0)
+    terrain_sdf = h_sdf.copy()
+    r_sdf = np.full((101, 101), 0.5)
+    box_sdf = PlacedObject(0, "plastic_box", 0.0, 0.0, 0.0, 0.716, 0.425,
+                           0.323, 0.0, 0.18, "pp_shell", transmission=0.11)
+    ras_sdf = _so_sdf([box_sdf], g_sdf, h_sdf, r_sdf)
+    sc_sdf = SceneModel(grid=g_sdf, height=h_sdf, reflectivity=r_sdf,
+                        **ras_sdf.scene_kwargs(),
+                        material_id=np.zeros((101, 101), dtype=np.uint8),
+                        material_names=["sand"], objects=[box_sdf], walls=[],
+                        seed=1, config_snapshot={})
+    want_z = -3.0 + box_sdf.effective_height / 2.0
+    zs_sdf = {}
+    for tag, kw in (("terrain", {"terrain_height": terrain_sdf}), ("fallback", {})):
+        d_sdf = OUT / f"sdf_base_{tag}"
+        write_world_sdf(sc_sdf, d_sdf, **kw)
+        blk = (d_sdf / "world.sdf").read_text().split(
+            '<model name="obj_0000_plastic_box">')[1].split("</model>")[0]
+        zs_sdf[tag] = float(blk.split("<pose>")[1].split()[2])
+        stl = (d_sdf / "seabed.stl").read_bytes()
+        ntri = int.from_bytes(stl[80:84], "little")
+        tri = np.frombuffer(stl[84:], dtype=np.dtype(
+            [("n", "<f4", 3), ("v", "<f4", 9), ("a", "<u2")]), count=ntri)
+        zs_sdf[tag + "_mesh"] = float(tri["v"][:, 2::3].max())
+    check("an object's Gazebo visual stands on the terrain, and the seabed mesh "
+          "carries no object stamp (with the terrain raster, and for a facet "
+          "object without it)",
+          float(ras_sdf.scene_kwargs()["facet_bump"].max()) > 0.3
+          and abs(zs_sdf["terrain"] - want_z) < 1e-3
+          and abs(zs_sdf["fallback"] - want_z) < 1e-3
+          and abs(zs_sdf["terrain_mesh"] + 3.0) < 1e-6
+          and abs(zs_sdf["fallback_mesh"] + 3.0) < 1e-6,
+          f"box centre z {zs_sdf['terrain']:+.3f} / {zs_sdf['fallback']:+.3f} m "
+          f"(want {want_z:+.3f}); mesh top {zs_sdf['terrain_mesh']:+.3f} / "
+          f"{zs_sdf['fallback_mesh']:+.3f} m (terrain -3.000)")
 
     # Every class must introspect for the GUI's Info dialog: a non-empty
     # typical footprint and a shape description. Catches a future class
@@ -4550,11 +4851,18 @@ def main() -> None:
           resolve_world_anchor(wdir) == (anchor.lat0, anchor.lon0)
           and resolve_world_anchor(world_dir) is None
           and resolve_world_anchor(OUT / "does_not_exist") is None)
-    check("launch sonar-profile resolution: default / frozen / explicit",
+    _bare = resolve_sonar_config(wdir, "coverage_pass_sonar.yaml")
+    check("launch sonar-profile resolution: default / frozen / explicit, and "
+          "a bare profile name resolves against the package config/",
           resolve_sonar_config(wdir).endswith("default_sonar.yaml")
           and resolve_sonar_config(lab_dir).endswith(
               str(lab_dir / "sonar.yaml"))
-          and resolve_sonar_config(wdir, "/tmp/x.yaml") == "/tmp/x.yaml")
+          and resolve_sonar_config(wdir, "/tmp/x.yaml") == "/tmp/x.yaml"
+          and _bare.endswith("config/coverage_pass_sonar.yaml")
+          and Path(_bare).is_file()
+          and resolve_sonar_config(wdir, "no_such_profile.yaml")
+          == "no_such_profile.yaml",
+          _bare)
     check("path_publisher window sized from either trajectory schema",
           abs(trajectory_total_time(str(tdir / "wakamatsu_like.yaml"))
               - (90.0 * 1.1 + 30.0)) < 1e-6
@@ -5250,9 +5558,13 @@ def main() -> None:
 
     # Renderer pitch coupling: a pitched platform images the ground
     # `altitude * tan(pitch)` along-track from where a level one does, on
-    # both sides; zero pitch stays bit-identical.
+    # both sides; zero pitch stays bit-identical. The beam's pitch coupling
+    # is measured with the transducers at the vehicle origin (mount_x_m 0):
+    # with the shipped -0.345 m arm (2026-11-02) a 5 deg pitch also lifts
+    # them 3 cm, which this vehicle-shift matcher reads as a +-0.14 m side
+    # asymmetry; the arm under attitude is the next check's subject.
     r_pitch = GeometricRenderer(scene, acq, dataclasses.replace(
-        model, speckle=False, coherent_scatterers=False))
+        model, speckle=False, coherent_scatterers=False, mount_x_m=0.0))
     px0, py0 = 20.0, 15.0
     ref = r_pitch.render(Side.PORT, Pose3D(px0, py0, 0.0), 0.0).ping
     alt_p = ref.altitude_m
@@ -5285,22 +5597,24 @@ def main() -> None:
     # yaw-only mount of before.
     r_sp = GeometricRenderer(scene, acq, model)
     _base = Pose3D(10.0, 5.0, -0.11, yaw=0.4)
-    _my, _dd = model.mount_y_abs_m, model.sensor_depth_m
+    _mx, _my, _dd = model.mount_x_m, model.mount_y_abs_m, model.sensor_depth_m
     _phi, _th = np.radians(10.0), np.radians(5.0)
     _lvl = {sd: r_sp.sensor_pose(sd, _base) for sd in Side}
     _rol = {sd: r_sp.sensor_pose(sd, dataclasses.replace(_base, roll=_phi)) for sd in Side}
     _pit = r_sp.sensor_pose(Side.PORT, dataclasses.replace(_base, pitch=_th))
     _c, _s = np.cos(_base.yaw), np.sin(_base.yaw)
-    _old = Pose3D(_base.x - _s * _my, _base.y + _c * _my, _base.z - _dd, yaw=_base.yaw)
+    _old = Pose3D(_base.x + _c * _mx - _s * _my, _base.y + _s * _mx + _c * _my,
+                  _base.z - _dd, yaw=_base.yaw)
     _fwd = (_pit.x - _lvl[Side.PORT].x) * _c + (_pit.y - _lvl[Side.PORT].y) * _s
     _dzp = _rol[Side.PORT].z - _lvl[Side.PORT].z
     _dzs = _rol[Side.STARBOARD].z - _lvl[Side.STARBOARD].z
     check("roll moves the two transducers vertically in opposite senses "
-          "(m_y sin(roll) + d(1 - cos(roll))); pitch swings them -d sin(pitch) "
-          "along-track; a level pose is the yaw-only mount bit for bit",
+          "(m_y sin(roll) + d(1 - cos(roll))); pitch swings them "
+          "m_x(cos(pitch) - 1) - d sin(pitch) along-track; a level pose is the "
+          "yaw-only mount bit for bit",
           abs(_dzp - (_my * np.sin(_phi) + _dd * (1 - np.cos(_phi)))) < 1e-12
           and abs(_dzs - (-_my * np.sin(_phi) + _dd * (1 - np.cos(_phi)))) < 1e-12
-          and abs(_fwd + _dd * np.sin(_th)) < 1e-12
+          and abs(_fwd - (_mx * (np.cos(_th) - 1) - _dd * np.sin(_th))) < 1e-12
           and _lvl[Side.PORT] == _old,
           f"10 deg roll: port {_dzp * 1000:+.1f} mm, stbd {_dzs * 1000:+.1f} mm; "
           f"5 deg pitch: {_fwd * 1000:+.1f} mm along-track")
@@ -5347,6 +5661,50 @@ def main() -> None:
                   for v in _yshift.values()),
           f"port {_yshift[Side.PORT]:+.3f} m, stbd {_yshift[Side.STARBOARD]:+.3f} m "
           f"(15 sin 3 deg = {15 * np.sin(np.radians(3.0)):.3f} m)")
+    # Pitch moves the footprint; it must not re-draw the speckle. The
+    # coherent scatterer field is a ground lattice the azimuth lines stay
+    # on; until 2026-10-30 the pitch shift moved every sample off it, so a
+    # 0.4 deg/ping pitch walk (the beach corpus's) took the along-track
+    # lag-1 correlation from 0.76 to 0.24 while the SAME footprint
+    # displacement made by moving the boat kept 0.76 (found by the
+    # calibration engine's attitude replay). Flat sand, level vs pitch walk
+    # vs the equivalent along-track jitter; the mean level must not move.
+    from blueboat_sss_sim.calibration.seabed import flat_scene as _fs10
+    from blueboat_sss_sim.analysis.svlog_compare import texture_stats as _ts10
+    _acq10 = dataclasses.replace(acq, range_length_mm=20_000, num_results=600,
+                                 pulse_len_percent=0.002493, gain_index=4)
+    _sc10 = _fs10(1.2 + model.sensor_depth_m, 25.0)
+    _rr10 = GeometricRenderer(_sc10, _acq10, model)
+    _pw10 = np.cumsum(np.random.default_rng(3).normal(
+        0.0, np.radians(0.33), 80))
+    _pw10 -= _pw10.mean()
+    _bins10 = (np.arange(_acq10.num_results) + 0.5) * _acq10.bin_size_m
+
+    def _lag10(kind):
+        rng = np.random.default_rng(7)
+        rows, lv = [], []
+        for k in range(80):
+            x = -1.0 + 0.0236 * k
+            pose = (Pose3D(x, 0.0, 0.0, 0.0, float(_pw10[k]), 0.0)
+                    if kind == "pitch" else
+                    Pose3D(x + 1.2 * np.tan(_pw10[k]), 0.0, 0.0)
+                    if kind == "jitter" else Pose3D(x, 0.0, 0.0))
+            pg = _rr10.render(Side.PORT, pose, 0.0).ping
+            lv.append(pg.power.copy())
+            rows.append(10 * np.log10(np.maximum(apply_ping_noise(
+                pg.power, _bins10 < pg.altitude_m, 1.0, model, rng,
+                specular=pg.specular, texture=pg.texture), 1e-30)))
+        return (_ts10(np.array(rows))["track_corr_lag1"],
+                float(np.mean(np.array(lv)[:, 60:420])))
+    _l10 = {k: _lag10(k) for k in ("level", "jitter", "pitch")}
+    _dlv10 = 10 * np.log10(_l10["pitch"][1] / _l10["level"][1])
+    check("a pitching fan moves the footprint without re-drawing the speckle: "
+          "along-track lag-1 under a 0.4 deg/ping pitch walk matches the same "
+          "displacement made by moving the boat, and the level is unchanged",
+          abs(_l10["pitch"][0] - _l10["jitter"][0]) < 0.05
+          and _l10["pitch"][0] > 0.6 and abs(_dlv10) < 0.05,
+          f"lag-1 level {_l10['level'][0]:.3f}, jitter {_l10['jitter'][0]:.3f}, "
+          f"pitch {_l10['pitch'][0]:.3f}; level change {_dlv10:+.3f} dB")
 
     # ------------------------------------------------------------------
     print("[11] builder schema help: every form row explains itself")
@@ -6228,8 +6586,257 @@ def main() -> None:
     _section_object_physics()
     _section_consistency()
     _section_calibration()
+    _section_model_terms()
 
     print("\nALL CHECKS PASSED")
+
+
+def _encode_fixture_check() -> None:
+    """Compare :func:`_encode_probe` with ``encode_baseline_v1.npz``.
+
+    Counts must match exactly; the two dB endpoints to 1e-12 of their scale
+    (numpy 1.26 and 2.4 differ there by one or two ULP, never in a count).
+    Written on the first run, like the render fixture; delete it to
+    rebaseline a deliberate change of the noise or encoder stage.
+    """
+    now = _encode_probe()
+    path = FIXTURES / "encode_baseline_v1.npz"
+    if not path.exists():
+        np.savez_compressed(path, **now)
+        check("encode baseline fixture written (first run)", True,
+              f"{len(now)} arrays -> {path.name}")
+        return
+    old = np.load(path)
+    bad = []
+    for k in sorted(set(now) | set(old.files)):
+        if k not in now or k not in old.files or now[k].shape != old[k].shape:
+            bad.append(k)
+        elif k.endswith(".counts"):
+            if not np.array_equal(now[k], old[k]):
+                bad.append(k)
+        elif np.abs(now[k] - old[k]).max(initial=0.0) > 1e-12 * max(
+                float(np.abs(old[k]).max(initial=0.0)), 1e-300):
+            bad.append(k)
+    check("the noise and encoder stages reproduce the frozen baseline "
+          "(delete test/fixtures/encode_baseline_v1.npz to rebaseline a "
+          "deliberate change)", not bad,
+          f"{len(now)} arrays" + (f", differ: {bad}" if bad else ""))
+
+
+def _section_model_terms() -> None:
+    """[17] Configurable model terms (2026-10-23 field-calibration pass 2):
+    every term's default reproduces the frozen render and encode baselines
+    exactly; each term's own effect is checked against its analytic form."""
+    print("[17] model terms: defaults frozen, each term's analytic effect")
+    _encode_fixture_check()
+    from blueboat_sss_sim.core.types import Wall as _W17
+    from blueboat_sss_sim.sonar.acoustics import pulse_level_factors
+    from blueboat_sss_sim.sonar.encoder import ceiling_at, soft_ceiling_db
+    from blueboat_sss_sim.analysis.calibration import (
+        normalisation_invariants as _ni17)
+    cfg = _cal_config()
+    acq, base = cfg.acquisition, cfg.model
+    tau = acq.pulse_duration_s(base.max_ping_rate_hz)
+    flat = _baseline_scene()
+    pose = Pose3D(10.0, 0.0, 0.0)
+
+    # ---- pulse-level terms ----------------------------------------------
+    k1 = dataclasses.replace(base, pulse_level_exponent=1.0)
+    p0 = GeometricRenderer(flat, acq, base).render(Side.PORT, pose, 0.0).ping
+    p1 = GeometricRenderer(flat, acq, k1).render(Side.PORT, pose, 0.0).ping
+    # The coherent channel also carries the ringing, added before the pulse
+    # smear; compare it with the ringing off (ringing_level_db 0), and the
+    # unscaled ringing separately.
+    nr = dataclasses.replace(base, ringing_level_db=0.0)
+    pn0 = GeometricRenderer(flat, acq, nr).render(Side.PORT, pose, 0.0).ping
+    ps = GeometricRenderer(flat, acq, dataclasses.replace(
+        nr, specular_pulse_exponent=1.0)).render(Side.PORT, pose, 0.0).ping
+    pr = GeometricRenderer(flat, acq, dataclasses.replace(
+        base, specular_pulse_exponent=1.0)).render(Side.PORT, pose, 0.0).ping
+    ratio = tau / base.pulse_level_reference_s
+    lit = p0.power > 1e-30
+    coh0, cohs = pn0.specular, ps.specular
+    cl = coh0 > 1e-12 * float(coh0.max())
+    ring_only = (pr.specular - ps.specular) - (p0.specular - pn0.specular)
+
+    def _rel(a, b, m):
+        return float(np.max(np.abs(a[m] / b[m] - ratio))) if m.any() else 1.0
+
+    check("the pulse-level terms default to exactly 1, and k = 1 scales the "
+          "diffuse channel (and the shadow-floor references with it) or the "
+          "coherent one by tau/tau_ref, never the ringing",
+          pulse_level_factors(tau, base) == (1.0, 1.0)
+          and pulse_level_factors(None, k1) == (1.0, 1.0)
+          and _rel(p1.power, p0.power, lit) < 1e-9
+          and _rel(p1.ambient, p0.ambient, p0.ambient > 0) < 1e-9
+          and _rel(p1.unoccluded, p0.unoccluded, p0.unoccluded > 0) < 1e-9
+          and np.array_equal(p1.specular, p0.specular)
+          and _rel(cohs, coh0, cl) < 1e-9
+          and float(np.abs(ring_only).max()) <= 1e-12 * float(p0.specular.max())
+          and np.array_equal(ps.power, pn0.power),
+          f"tau {tau * 1e6:.1f} us -> x{ratio:.4f} "
+          f"({10 * np.log10(ratio):+.2f} dB) on {int(lit.sum())} bins")
+
+    # ---- receiver ceiling ------------------------------------------------
+    # The ceiling is ON in the shipped profile since the 2026-10-30
+    # promotion; the comparison takes it explicitly off and on.
+    c_off = dataclasses.replace(base, receiver_ceiling=False)
+    cc = dataclasses.replace(base, receiver_ceiling=True,
+                             receiver_ceiling_pulse_exponent=0.91)
+    c_tau = ceiling_at(tau, cc)
+    loud = p0.power.copy()
+    loud[int(np.argmax(loud))] *= 1e3                 # a 30 dB overload
+    pings_c = []
+    for scale, model in ((1.0, c_off), (1.0, cc), (1e-4, c_off), (1e-4, cc)):
+        pg = dataclasses.replace(p0, power=loud * scale)
+        pings_c.append(PingEncoder(Side.PORT, acq, model).encode(pg))
+    hot_off, hot_on, quiet_off, quiet_on = pings_c
+    inv_c = _ni17([_PowerRec(e.pwr_results, e.min_pwr_db, e.max_pwr_db)
+                   for e in pings_c])
+    # A ping whose top compresses into the knee: 40 bins ~8 dB over the
+    # ceiling, 0.01 dB apart -- before the 2026-10-30 encoder fix, bins a
+    # few hundredths of a dB apart rounded to the same 65535 (0.1 % of
+    # Gazebo profiles carried two full-scale bins; the device never does).
+    crowd = p0.power.copy()
+    _top = int(np.argmax(crowd))
+    _lin = 10.0 ** ((c_tau + 8.0 + 0.01 * np.arange(40)
+                     - cc.calibration_db_offset) / 10.0)
+    crowd[_top:_top + 40] = _lin[:len(crowd[_top:_top + 40])]
+    e_crowd = PingEncoder(Side.PORT, acq, cc).encode(
+        dataclasses.replace(p0, power=crowd))
+    pings_c.append(e_crowd)
+    inv_c = _ni17([_PowerRec(e.pwr_results, e.min_pwr_db, e.max_pwr_db)
+                   for e in pings_c])
+    x17 = np.linspace(40.0, 100.0, 6001)
+    y17 = soft_ceiling_db(x17, 67.9, 1.0)
+    check("the receiver ceiling holds an overload near c(tau) = 67.9 + "
+          "0.91*10log10(tau/66.5us), stays strictly increasing (one "
+          "full-scale bin, every invariant), and leaves a ping below its "
+          "knee bit-identical",
+          hot_off.max_pwr_db > c_tau + 5.0
+          and c_tau < hot_on.max_pwr_db < c_tau + 1.0
+          and np.array_equal(quiet_on.pwr_results, quiet_off.pwr_results)
+          and quiet_on.max_pwr_db == quiet_off.max_pwr_db
+          and inv_c["single_full_scale_bin"] == 1.0
+          and inv_c["zero_minimum"] == 1.0
+          and bool(np.all(np.diff(y17) > 0.0))
+          and np.array_equal(y17[x17 <= 66.9], x17[x17 <= 66.9]),
+          f"c(tau) {c_tau:.2f} dB; overload {hot_off.max_pwr_db:.1f} -> "
+          f"{hot_on.max_pwr_db:.2f} dB; a crowded top keeps "
+          f"{int(np.count_nonzero(e_crowd.pwr_results == 65535))} full-scale "
+          "bin")
+
+    # ---- ground-fixed Gamma texture (K-distributed seabed) ----------------
+    from scipy.special import digamma as _dg17
+    nu = 2.0
+    kk = dataclasses.replace(base, texture_k_inv_shape=1.0 / nu)
+    band = slice(int(0.3 * acq.num_results), int(0.7 * acq.num_results))
+
+    def _textures(model, seed_shift=0):
+        rr = GeometricRenderer(flat, acq, model)
+        return np.stack([rr.render(Side.PORT, Pose3D(4.0 + 0.4 * k, 0.0, 0.0),
+                                   0.0).ping.texture[band]
+                         for k in range(24)])
+    t_off, t_on = _textures(base), _textures(kk)
+    t_on2 = _textures(kk)
+    t_salt = _textures(dataclasses.replace(kk, scatterer_seed=7))
+
+    def _pmd(t):
+        return float(10 * np.log10(t.mean()) - np.mean(10 * np.log10(
+            np.maximum(t, 1e-12))))
+    d_pmd = _pmd(t_on) - _pmd(t_off)
+    want = 10.0 / np.log(10.0) * (np.log(nu) - _dg17(nu))
+    check("the Gamma texture (nu = 2) adds the K-distribution's "
+          "power-minus-dB, (10/ln10)(ln nu - psi(nu)), keeps unit mean, "
+          "and is ground-fixed (deterministic) and seed-salted",
+          abs(d_pmd - want) < 0.4 and abs(float(t_on.mean()) - 1.0) < 0.12
+          and np.array_equal(t_on, t_on2)
+          and not np.allclose(t_on, t_salt),
+          f"delta power-minus-dB {d_pmd:.2f} vs {want:.2f} dB analytic; "
+          f"mean {t_on.mean():.3f}")
+
+    # ---- per-ping level jitter ---------------------------------------------
+    jit = dataclasses.replace(base, ping_level_jitter_db=2.0, speckle=False,
+                              noise_floor=0.0, reverberation_db=0.0)
+    flat_p = np.ones(16)
+    no_wc = np.zeros(16, dtype=bool)
+    rng17 = np.random.default_rng(17)
+    fac = np.array([apply_ping_noise(flat_p, no_wc, 1.0, jit, rng17)[0]
+                    for _ in range(4000)])
+    rng_a, rng_b = np.random.default_rng(5), np.random.default_rng(5)
+    apply_ping_noise(p0.power, np.zeros_like(p0.power, dtype=bool), 1.0,
+                     base, rng_a, specular=p0.specular, texture=p0.texture)
+    apply_ping_noise(p0.power, np.zeros_like(p0.power, dtype=bool), 1.0,
+                     dataclasses.replace(base, ping_level_jitter_db=0.0),
+                     rng_b, specular=p0.specular, texture=p0.texture,
+                     speckle_fill=np.zeros_like(p0.power, dtype=bool))
+    check("per-ping level jitter has unit mean and the stated dB spread, and "
+          "at 0 dB (and an empty speckle fill) draws nothing extra from the RNG",
+          abs(float(fac.mean()) - 1.0) < 0.03
+          and abs(float(np.std(10 * np.log10(fac))) - 2.0) < 0.1
+          and rng_a.bit_generator.state == rng_b.bit_generator.state,
+          f"mean {fac.mean():.3f}, std {np.std(10 * np.log10(fac)):.2f} dB")
+
+    # ---- ghosts behind a quay are speckled ---------------------------------
+    g17 = GridSpec(-30.0, -30.0, 0.25, 241, 241)
+    quay = _W17(name="quay", x0=-30.0, y0=6.0, x1=30.0, y1=6.0, top_z=1.0,
+                reflectivity=0.65)
+    walled = SceneModel(grid=g17, height=np.full((g17.ny, g17.nx), -4.0),
+                        reflectivity=np.full((g17.ny, g17.nx), 0.5),
+                        material_id=np.zeros((g17.ny, g17.nx), np.uint8),
+                        material_names=["sand"], objects=[], walls=[quay],
+                        seed=3)
+    rw = GeometricRenderer(walled, acq, base)
+    pw = rw.render(Side.PORT, Pose3D(0.0, 0.0, 0.0), 0.0).ping
+    fill = pw.speckle_fill
+    rngw = np.random.default_rng(23)
+    vals = np.stack([apply_ping_noise(pw.power, np.zeros_like(fill), 1.0,
+                                      base, rngw, texture=pw.texture,
+                                      speckle_fill=fill)[fill]
+                     / pw.power[fill] for _ in range(200)]) if fill is not None \
+        else np.ones((2, 1))
+    cv = float(vals.std() / vals.mean())
+    check("ghost and single-bounce energy behind a quay, where the texture "
+          "has no lit seabed, gets its own Exp(1) speckle; a wall-free scene "
+          "marks nothing",
+          fill is not None and int(fill.sum()) > 5 and 0.8 < cv < 1.2
+          and p0.speckle_fill is None,
+          f"{int(fill.sum()) if fill is not None else 0} bins, CV {cv:.2f}")
+
+    # ---- the calibration engine's expected mode ----------------------------
+    # calibration.seabed fits the level on the noise-free mean intensity of
+    # the node's noisy ping: power + specular + E[max(aX, bY)] (receiver and
+    # reverberation floors, X, Y ~ Exp(1)) + the water column. The mean of
+    # 3000 noisy draws must agree with it (a real ping, and a synthetic one
+    # sweeping the reverberation floor b from a/10 to 10a).
+    from types import SimpleNamespace as _NS
+    from blueboat_sss_sim.calibration.seabed import expected_power
+    rbins = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+    wc17 = rbins < p0.altitude_m
+    rng_e = np.random.default_rng(31)
+    draws = np.mean([apply_ping_noise(p0.power, wc17, 1.0, base, rng_e,
+                                      specular=p0.specular,
+                                      unoccluded=p0.unoccluded,
+                                      ambient=p0.ambient)
+                     for _ in range(3000)], axis=0)
+    ex_p = expected_power(p0, base, rbins)
+    grp = lambda v: v[:len(v) // 20 * 20].reshape(-1, 20).mean(1)
+    err_p = float(np.max(np.abs(grp(draws) / grp(ex_p) - 1.0)))
+    amb = (base.noise_floor * 10.0 ** (base.reverberation_db / 10.0)
+           * np.geomspace(0.1, 10.0, acq.num_results))
+    syn = _NS(power=np.zeros(acq.num_results), specular=None,
+              unoccluded=None, ambient=amb, altitude_m=0.0)
+    draws_s = np.mean([apply_ping_noise(syn.power, np.zeros_like(wc17), 1.0,
+                                        base, rng_e, ambient=amb)
+                       for _ in range(3000)], axis=0)
+    err_s = float(np.max(np.abs(grp(draws_s) / grp(expected_power(
+        syn, base, rbins)) - 1.0)))
+    check("the calibration engine's expected mode is the mean of the node's "
+          "noisy ping: power + specular + E[max(aX, bY)] + water column "
+          "(3000 draws, 20-bin groups)",
+          err_p < 0.02 and err_s < 0.02,
+          f"max group error {100 * err_p:.2f} % (rendered ping), "
+          f"{100 * err_s:.2f} % (floors, b/a 0.1..10)")
 
 
 def _section_object_physics() -> None:
@@ -6314,6 +6921,23 @@ def _section_object_physics() -> None:
           f"PP 2 mm {r_pp2:+.1f} dB, 3 mm {r_pp3:+.1f} dB, steel {r_st:+.1f} "
           f"dB, air-backed |R| {r_air:.2f}")
 
+    # pass 3 (2026-11-01): a layer on a solid backing (pe_cement: PE skin on
+    # cement). A vanishing layer is the backing's half-space; the band mean
+    # lies between the quarter-wave value and the bare backing.
+    from blueboat_sss_sim.worldgen.materials import _half_space_r
+    pe = lib14.get("pe_cement")
+    z1, z2, z3 = 1025.0 * 1500.0, 950.0 * 2430.0, 2400.0 * 3700.0
+    r_qw = abs((z2 * z2 - z1 * z3) / (z2 * z2 + z1 * z3))
+    r_thin = acoustic_reflection(pe, wall_m=1e-9)
+    r_pe = acoustic_reflection(pe)
+    check("a PE skin on cement (pe_cement) reflects between its quarter-wave "
+          "value and bare concrete; a vanishing skin is bare concrete; it is "
+          "smooth (facet) and opaque",
+          abs(r_thin - _half_space_r(2400.0, 3700.0)) < 1e-9
+          and r_qw - 1e-6 < r_pe < r_thin and abs(r_pe - 0.597) < 0.01
+          and pe.roughness_m < 1.6e-3 and pe.transmission == 0.0,
+          f"|R| {r_pe:.3f} (quarter-wave {r_qw:.3f}, concrete {r_thin:.3f})")
+
     # ---- which objects the rule sends to the facet layer -----------------
     def _inst(t, **kw):
         spec = _CAT14[t]
@@ -6342,6 +6966,48 @@ def _section_object_physics() -> None:
           "buried object",
           not wrong and not is_facet_object(_inst("drum_200l", burial=1.0)),
           f"misclassified: {wrong or 'none'}")
+
+    # pass 3 (2026-11-01): contents of a shell. A weight INSIDE a flooded
+    # box (params nested: true) stands on the seabed: the occluder column is
+    # the box's height, not box + weight, and the opaque weight wins the
+    # transmission over its footprint. Without the flag, objects still stack.
+    from blueboat_sss_sim.worldgen.objects import (facet_bump_raster,
+                                                   rasterize_objects,
+                                                   transmission_raster)
+    from blueboat_sss_sim.core.types import GridSpec as _G14
+
+    def _nest(flag):
+        g = _G14(origin_x=-1.0, origin_y=-1.0, resolution=0.02, nx=101, ny=101)
+        box = _inst("plastic_box")
+        box.length, box.width, box.proud_height = 0.45, 0.27, 0.20
+        box.params = {"wall_mm": 2.0, "flooded": True}
+        wt = _inst("pail_20l", material="pe_cement")
+        wt.length = wt.width = 0.228
+        wt.proud_height = 0.094
+        wt.params = {"nested": True} if flag else {}
+        objs = [box, wt]
+        h = np.full((g.ny, g.nx), -0.9)
+        rf = np.full((g.ny, g.nx), 0.55)
+        tr = transmission_raster(objs, g)
+        fb = facet_bump_raster(objs, g)
+        rasterize_objects(objs, g, h, rf, tr, None, fb)
+        return h, tr, fb, g
+    h_n, tr_n, fb_n, g14n = _nest(True)
+    h_s, tr_s, fb_s, _ = _nest(False)
+    jc, ic = g14n.ny // 2, g14n.nx // 2
+    edge_i = ic + int(round(0.19 / 0.02))          # inside the box, outside the weight
+    check("a weight nested in a flooded box stands on the seabed: column = "
+          "the box (0.20 m) not the sum, the column keeps the shell's 0.11 "
+          "transmission (the contents fill only its foot); without the flag "
+          "objects still stack",
+          abs((h_n.max() + 0.9) - 0.20) < 1e-6
+          and abs((h_s.max() + 0.9) - 0.294) < 1e-6
+          and np.allclose(h_n - fb_n, -0.9)
+          and abs(tr_n[jc, ic] - 0.11) < 1e-9 and abs(tr_n[jc, edge_i] - 0.11) < 1e-9
+          and abs(tr_s[jc, ic] - 0.11) < 1e-9,
+          f"column nested {h_n.max() + 0.9:.3f} m / stacked {h_s.max() + 0.9:.3f} m; "
+          f"T centre {tr_n[jc, ic]:.2f} (stacked {tr_s[jc, ic]:.2f}), "
+          f"box rim {tr_n[jc, edge_i]:.2f}")
 
     # ---- the field box at the field's own geometry -----------------------
     # object_boiteVsDistance, GCS seabed images 22 and 33 (1200 bins over
@@ -6376,7 +7042,7 @@ def _section_object_physics() -> None:
         acc = 0.0
         for j in range(n):
             u = (j - 0.5 * (n - 1)) * step
-            pg = rr.render(Side.PORT, Pose3D(10.0 + u, 0.0, 0.0), 0.0).ping
+            pg = rr.render(Side.PORT, _tx_pose(10.0 + u, 0.0), 0.0).ping
             wc = (np.arange(acq14.num_results) + 0.5) * bm14 < pg.altitude_m
             acc = acc + apply_ping_noise(np.array(pg.power), wc, 1.0, mdl, rg,
                                          specular=pg.specular,
@@ -6460,7 +7126,7 @@ def _section_object_physics() -> None:
           "dependence the thesis rests on emerges from the geometry",
           al0["near"] > 10.0, f"heading 0 deg: near-edge {al0['near']:+.1f} dB")
     gt14 = GeometricRenderer(al0["scene"], acq14, model).render(
-        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).contacts
+        Side.PORT, _tx_pose(10.0, 0.0), 0.0).contacts
     gt14 = [c for c in gt14 if c.object_type == "plastic_box"]
     check("ground truth still labels the shell visible, with its shadow "
           "(read on the occluder surface, NC #15)",
@@ -6494,9 +7160,9 @@ def _section_object_physics() -> None:
                          0.0, 0.8, "concrete")
     sc_r = _scene14([rough])
     p_on = GeometricRenderer(sc_r, acq14, model).render(
-        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+        Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping
     p_off = GeometricRenderer(sc_r, acq14, off).render(
-        Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0).ping
+        Side.PORT, _tx_pose(10.0, 0.0), 0.0).ping
     check("a rough object stays on the raster path, bit-identically with the "
           "facet layer on or off, and stamps no facet_bump",
           sc_r.facet_bump is None
@@ -6524,10 +7190,10 @@ def _section_object_physics() -> None:
 
     def _ms(sc, mdl):
         rr = GeometricRenderer(sc, acq14, mdl)
-        rr.render(Side.PORT, Pose3D(10.0, 0.0, 0.0), 0.0)     # warm caches
+        rr.render(Side.PORT, _tx_pose(10.0, 0.0), 0.0)     # warm caches
         t1 = _time.perf_counter()
         for j in range(6):
-            rr.render(Side.PORT, Pose3D(10.0 + 0.01 * j, 0.0, 0.0), 0.0)
+            rr.render(Side.PORT, _tx_pose(10.0 + 0.01 * j, 0.0), 0.0)
         return (_time.perf_counter() - t1) / 6.0 * 1e3
     ms0, ms10 = _ms(sc0, model), _ms(sc10, model)
     print(f"  [----] facet layer cost: {ms0:.1f} ms per ping-side without "
@@ -6596,7 +7262,7 @@ def _section_consistency() -> None:
                 reflectivity=0.65)
     pont = Wall(name="p", x0=-10.0, y0=6.0, x1=10.0, y1=6.0, top_z=0.3,
                 reflectivity=0.65, kind="pontoon", draft_m=0.4)
-    pose15 = Pose3D(0.0, 0.0, 0.0)
+    pose15 = _tx_pose(0.0, 0.0)        # transducers abeam the 0.6 m cylinder
     win = (bins > 8.5) & (bins < 9.8)
 
     def _echo(walls, mdl=model):
@@ -6784,6 +7450,26 @@ def _section_calibration() -> None:
           "constant marked tunable, a default outside its bounds)",
           "cannot be tunable" in reg_msg and "outside bounds" in reg_msg,
           reg_msg.splitlines()[1][:90] if reg_msg else "accepted")
+    # 2026-10-23: five values held "NC #4 ..." unquoted, and YAML read
+    # everything after " #" as a comment -- the registry said "held at the
+    # NC" and nothing complained. The loader now refuses such a line.
+    _raw16 = Path(reg.path).read_text()
+    _hash16 = _raw16.replace('"sonar/acoustics.py (NC #4 item 5)"',
+                             "sonar/acoustics.py (NC #4 item 5)", 1)
+    (out16 / "hash_registry.yaml").write_text(_hash16)
+    try:
+        R.load_registry(out16 / "hash_registry.yaml")
+        hash_msg = ""
+    except ValueError as exc:
+        hash_msg = str(exc)
+    _spec_owner = next(p.owner for p in reg
+                       if p.name == "model.specular_spreading_exponent")
+    check("an unquoted ' #' inside a registry value is refused (YAML would "
+          "silently drop the rest of the line); the shipped entries keep "
+          "their full text",
+          _hash16 != _raw16 and "unquoted ' #'" in hash_msg
+          and _spec_owner.endswith("(NC #4 item 5)"),
+          hash_msg.splitlines()[1][:80] if hash_msg else "accepted")
 
     # ---- artifacts: what may be applied, and what never ------------------
     ex = A.example_artifact()
@@ -6891,7 +7577,8 @@ def _section_calibration() -> None:
           "reported as not applied, never silently dropped",
           c.model.calibration_db_offset == 82.4
           and c.model.sensor_depth_m == 0.18
-          and eff0.config.model.sensor_depth_m == 0.15
+          and eff0.config.model.sensor_depth_m == SonarConfig.from_yaml(
+              PKG_ROOT / "config" / "default_sonar.yaml").model.sensor_depth_m
           and c.acquisition.range_length_mm == 30000
           and eff.provenance["model.sensor_depth_m"].endswith("session:S1")
           and eff.provenance["acquisition.range_length_mm"] == "run"
@@ -6910,6 +7597,37 @@ def _section_calibration() -> None:
           and set(doc16["model"]) == {f.name for f in
                                       dataclasses.fields(c.model)},
           f"{len(doc16['model'])} model fields")
+    # An artifact names the profile it was fitted on; applying it to another
+    # (other name, or same name with other content) is refused unless asked
+    # for, and the provenance records both (2026-10-23: the block was never
+    # read, so a candidate's constants could land on the wrong switches).
+    _bp_errs = {}
+    for _lbl, _bp in (("name", {"name": "field_candidate_v1_sonar.yaml"}),
+                      ("sha256", {"name": "default_sonar.yaml",
+                                  "sha256": "0" * 64})):
+        _a = copy.deepcopy(art)
+        _a["base_profile"] = _bp
+        try:
+            A.effective_config(None, _a, None, None, reg)
+            _bp_errs[_lbl] = ""
+        except A.ArtifactError as exc:
+            _bp_errs[_lbl] = str(exc)
+    _a = copy.deepcopy(art)
+    _a["base_profile"] = {"name": "field_candidate_v1_sonar.yaml"}
+    _eff_m = A.effective_config(None, _a, None, None, reg,
+                                allow_base_mismatch=True)
+    _p_m = A.write_effective_profile(_eff_m, out16 / "mismatch_sonar.yaml")
+    _prov_m = _y16.safe_load(_p_m.read_text())["provenance"]["base_profile"]
+    check("an artifact applied to another base profile (name or content) is "
+          "refused unless re-applied deliberately, and the effective profile "
+          "then records the expected and the used base",
+          all("another base profile" in v for v in _bp_errs.values())
+          and _prov_m["used"]["name"] == "default_sonar.yaml"
+          and _prov_m["expected"]["name"] == "field_candidate_v1_sonar.yaml"
+          and len(_prov_m["mismatch"]) == 1
+          and len(_prov_m["used"]["sha256"]) == 64,
+          f"refusals {[k for k, v in _bp_errs.items() if v]}, recorded "
+          f"{_prov_m['mismatch']}")
 
     # ---- manifests: split by whole session --------------------------------
     man = M.example_manifest()
@@ -6932,6 +7650,57 @@ def _section_calibration() -> None:
           "content or one site-day under two roles is leakage and refused",
           mrep.ok and all(not r.ok for r in leaks.values()),
           "; ".join(f"{k}: {r.errors[:1]}" for k, r in leaks.items()))
+
+    # pass 3 (2026-11-01): a session scored against its own world (the pool)
+    # declares regime.forward_model: scene; the flat-sand engine never picks
+    # it up, so adding such sessions leaves every pass-1/2 selection identical
+    from blueboat_sss_sim.calibration.seabed import manifest_recordings
+    m5 = copy.deepcopy(man)
+    m5["sessions"].append(copy.deepcopy(m5["sessions"][1]))
+    m5["sessions"][-1].update(id="S3", group="pool_A/2026-11-03")
+    m5["sessions"][-1]["regime"]["forward_model"] = "scene"
+    m5["sessions"][-1]["recordings"] = [{"path": "S3/pool.svlog",
+                                         "kind": "svlog"}]
+    m6 = copy.deepcopy(m5)
+    m6["sessions"][-1]["regime"]["forward_model"] = "flat_mud"
+    sel_before = manifest_recordings(man, roles=tuple(M.ROLES))
+    sel_after = manifest_recordings(m5, roles=tuple(M.ROLES))
+    check("a session with regime.forward_model: scene validates, is never "
+          "selected by the flat-sand engine, and an unknown forward model is "
+          "refused",
+          M.validate_manifest(m5).ok and sel_after == sel_before
+          and not M.validate_manifest(m6).ok
+          and M.forward_model(man["sessions"][0]) == "flat_sand",
+          f"selected {len(sel_after)} (was {len(sel_before)}); "
+          f"m6 errors {M.validate_manifest(m6).errors[:1]}")
+
+    # pass 3: the scene engine replays poses through a world; on the seabed
+    # engine's own flat sand and poses it must be the same renderer, bit for bit
+    from blueboat_sss_sim.calibration import seabed as _sb16
+    from blueboat_sss_sim.calibration.scene_replay import (ReplayPose,
+                                                           render_rows,
+                                                           with_installation)
+    _cfg16, _ = _sb16.load_config(None)
+    _acq16 = _sb16.acquisition_for(_cfg16, 20000, 1200, 44.3, 4)
+    _ref16 = _sb16._render_noisy(_cfg16, _acq16, "port", 1.4, 0.05, 6, 5, None)
+    _sc16 = _sb16.flat_scene(1.4 + _cfg16.model.sensor_depth_m,
+                             _acq16.range_length_mm / 1000.0 + 0.3 + 5.0)
+    _poses16 = [ReplayPose("port", -0.15 + 0.05 * k, 0.0, 0.0, 0.0, 0.0, 0.0,
+                           20000, 1200, 44.3, 4) for k in range(6)]
+    _got16 = render_rows(_sc16, _cfg16, _poses16, mode="noisy", seed=5)
+    _inst16 = with_installation(_cfg16, sensor_depth_m=0.22, mount_x_m=-0.6)
+    check("the scene-replay engine reproduces the seabed engine's flat-sand "
+          "render bit for bit, and an installation override leaves the "
+          "acoustic model untouched",
+          np.array_equal(_ref16["rows"], _got16["rows"])
+          and np.array_equal(_ref16["fbr"], _got16["fbr"])
+          and _got16["out_of_map"] == 0
+          and _inst16.model.sensor_depth_m == 0.22
+          and _inst16.model.mount_x_m == -0.6
+          and _inst16.model.calibration_db_offset
+          == _cfg16.model.calibration_db_offset,
+          f"rows equal {np.array_equal(_ref16['rows'], _got16['rows'])}, "
+          f"fbr {list(_got16['fbr'])}")
 
     # ---- quality report on a synthetic recording --------------------------
     traj16 = _line_trajectory(out16 / "line16.yaml", 3.0, 17.0, 0.0)
@@ -6957,6 +7726,51 @@ def _section_calibration() -> None:
           and "port_gain_walk" in codes_w and "first_fix" not in text16
           and str(out16) not in text16 and len(q["sha256"]) == 64,
           f"flags {sorted(codes)} / walk {sorted(codes_w)}")
+    # Ping-counter census (2026-10-23): drop every 7th port packet among the
+    # first 70 and repeat one -- gaps and a duplicate must be reported; the
+    # clean file reports none. Mixed range settings: three settings whose
+    # median interval differs from the most common setting's law (the
+    # toOptimize-harbourScan case) must not raise a period warning, because
+    # each setting is judged against its own law.
+    from blueboat_sss_sim.analysis.svlog_reader import iter_packets as _ip16
+    _blob16, _np16 = bytearray(), 0
+    for _pk in _ip16(sv16):
+        if _pk.packet_id == 2198 and _pk.raw[6] == 1:
+            _np16 += 1
+            if _np16 <= 70 and _np16 % 7 == 0:
+                continue
+            if _np16 == 80:
+                _blob16 += _pk.raw
+        _blob16 += _pk.raw
+    (out16 / "gappy16.svlog").write_bytes(bytes(_blob16))
+    qg = svlog_quality(out16 / "gappy16.svlog")
+    codes_g = {(f["level"], f["code"]) for f in qg["flags"]}
+    _mixed16 = bytearray()
+    for _L, _n in ((20_000, 25), (22_000, 25), (40_000, 35)):
+        _c = _cal_config()
+        _c.acquisition.range_length_mm = _L
+        _p, _ = _write_sim_svlog(_baseline_scene(), traj16, anchor16,
+                                 out16 / f"mixed_{_L}.svlog", n_pings=_n,
+                                 noise_seed=16, sonar_cfg=_c)
+        _mixed16 += _p.read_bytes()
+    (out16 / "mixed16.svlog").write_bytes(bytes(_mixed16))
+    qm = svlog_quality(out16 / "mixed16.svlog")
+    _pm = qm["digest"]["sides"]["port"]
+    check("quality counts ping-number gaps and duplicates per side and judges "
+          "each range setting's ping period against its own law (a mixed "
+          "file whose overall median differs from its most common setting's "
+          "law is not a period defect)",
+          ("warn", "port_ping_gaps") in codes_g
+          and ("warn", "port_duplicate_pings") in codes_g
+          and qg["counter_census"]["port"]["missing"] == 10
+          and "port_ping_gaps" not in codes and "port_duplicate_pings" not in codes
+          and abs(_pm["period_ms"] - _pm["period_law_ms"]) > 5.0
+          and not any(f["code"].endswith("_period") for f in qm["flags"])
+          and len(qm["acquisition_periods"]["port"]) == 3,
+          f"gappy: {sorted(c for _, c in codes_g if 'ping' in c)}, missing "
+          f"{qg['counter_census']['port']['missing']}; mixed: overall "
+          f"{_pm['period_ms']:.1f} vs law {_pm['period_law_ms']:.1f} ms, "
+          f"per setting {[(r['range_m'], r['period_ms'], r['law_ms']) for r in qm['acquisition_periods']['port']]}")
     try:
         cal_main(["quality", "--out", str(out16 / "q"), str(sv16)])
         inside = False
@@ -6964,6 +7778,73 @@ def _section_calibration() -> None:
         inside = "write-once" in str(exc)
     check("the quality CLI refuses to write inside a recording's directory "
           "(field data are write-once, CM-7)", inside)
+    # The guard protects the whole tree, not only each file's own folder
+    # (until 2026-10-23 `--out SSS_data/x` passed for a recording in
+    # SSS_data/beach_sept/), and the two other report CLIs now use it.
+    from blueboat_sss_sim.calibration.io_guard import refuse_inside as _ri16
+    _tree16 = out16 / "tree"
+    for _d16 in ("sub_a", "sub_b"):
+        (_tree16 / _d16).mkdir(parents=True, exist_ok=True)
+        (_tree16 / _d16 / "x.svlog").write_bytes(b"")
+    _cases16 = []
+    for _o, _ins, _roots in (
+            (_tree16 / "rep", [_tree16 / "sub_a" / "x.svlog"], [_tree16]),
+            (_tree16 / "rep", [_tree16 / "sub_a" / "x.svlog",
+                               _tree16 / "sub_b" / "x.svlog"], []),
+            (_tree16 / "sub_a" / "rep", [_tree16 / "sub_a" / "x.svlog"], []),
+            (out16 / "elsewhere", [_tree16 / "sub_a" / "x.svlog"], [_tree16])):
+        try:
+            _ri16(_o, _ins, _roots, include_corpus=False)
+            _cases16.append(False)
+        except SystemExit:
+            _cases16.append(True)
+    from blueboat_sss_sim.analysis.svlog_compare import main as _svc_main16
+    try:
+        _svc_main16([str(sv16), "--out", str(sv16.parent / "cmp")])
+        _svc_refused = False
+    except SystemExit as exc:
+        _svc_refused = "write-once" in str(exc)
+    check("the output guard protects a manifest root, the inputs' common "
+          "ancestor and each input's folder (and only those); "
+          "sss_svlog_compare refuses too",
+          _cases16 == [True, True, True, False] and _svc_refused,
+          f"refused {_cases16}, svlog_compare {_svc_refused}")
+
+    # ---- the shading relief gain: a fit, or a reported bound -----------------
+    # calibrate_gain regresses the tie soundings' relief on the shading
+    # relief at the same ground points. Built here from its own detrending,
+    # so the true slope is known exactly: 0.6 must come back unclipped,
+    # -0.5 and 5.0 must come back as the reported low/high bound.
+    from blueboat_sss_sim.analysis.shading import (ReliefSamples as _RS16,
+                                                   calibrate_gain as _cg16,
+                                                   soundings_relief as _sr16)
+    # 1.25 m apart: each sounding pairs with exactly one sample (radius 0.5 m)
+    _x16 = np.arange(0.0, 40.0, 1.25)
+    _snd16 = {"east": _x16, "north": np.zeros_like(_x16),
+              "depth": 2.0 + 0.2 * np.sin(2 * np.pi * _x16 / 7.0),
+              "t_ms": 1000.0 * _x16}
+    _rel16 = _sr16(_snd16["east"], _snd16["north"], _snd16["depth"],
+                   _snd16["t_ms"], 15.0)
+    _gains16 = {}
+    for _true in (0.6, -0.5, 5.0):
+        _n = _x16.size
+        _smp = _RS16(_x16.copy(), np.zeros(_n), _rel16 / _true, np.zeros(_n),
+                     np.zeros(_n), np.ones(_n), np.arange(_n, dtype=np.int64),
+                     np.ones(_n, dtype=np.int8), _snd16["t_ms"] + 120_000.0,
+                     np.zeros(_n, dtype=np.uint8), np.zeros(_n))
+        _gains16[_true] = _cg16(_smp, _snd16)
+    _g06, _i06 = _gains16[0.6]
+    check("calibrate_gain recovers a known relief gain and reports, instead "
+          "of hiding, a fit outside its [0.1, 3] clip (raw slope, which bound)",
+          abs(_g06 - 0.6) < 1e-9 and _i06["clipped"] is None
+          and _gains16[-0.5][0] == 0.1 and _gains16[-0.5][1]["clipped"] == "low"
+          and abs(_gains16[-0.5][1]["gain_raw"] + 0.5) < 1e-9
+          and _gains16[5.0][0] == 3.0 and _gains16[5.0][1]["clipped"] == "high"
+          and _i06["gain_mode"] == "calibrated on tie soundings",
+          f"0.6 -> {_g06:.6f}; -0.5 -> {_gains16[-0.5][0]} "
+          f"({_gains16[-0.5][1]['clipped']}, raw "
+          f"{_gains16[-0.5][1]['gain_raw']:+.3f}); 5.0 -> {_gains16[5.0][0]} "
+          f"({_gains16[5.0][1]['clipped']})")
 
     # ---- the wire never spans more than the device's 90 dB ----------------
     acq16, mdl16 = _cal_config().acquisition, _cal_config().model
@@ -7000,6 +7881,68 @@ def _section_calibration() -> None:
           f"one altitude corr {one2.correlation[0][1]:.4f}, cond3 "
           f"{one3.condition_number:.3g}; two altitudes cond "
           f"{two3.condition_number:.3g}, max |corr| {max_two:.3f}")
+    # The anchors at their OWN acquisitions (bath3 20 m / 600 / 66.5 us;
+    # reflectionEvidence 40 m / 600 / 106.4 us) with a free level per site:
+    # one pulse per site makes a pulse-level exponent indistinguishable from
+    # the harbour's level (2026-10-23) -- the reason pass 2 takes it from
+    # physics and within-file evidence, never from these two sessions.
+    from blueboat_sss_sim.sonar.config import AcquisitionParams as _AP16
+    _acq_b = _AP16(range_length_mm=20_000, num_results=600,
+                   pulse_len_percent=66.5e-6 / (2 * 20.0 / 1500.0), gain_index=4)
+    _acq_h = _AP16(range_length_mm=40_000, num_results=600,
+                   pulse_len_percent=106.4e-6 / (2 * 40.0 / 1500.0), gain_index=4)
+    site3 = analyse(["model.pulse_level_exponent", "model.tvg_compensation",
+                     "model.lambert_exponent"], [1.40, 7.33],
+                    acqs=[_acq_b, _acq_h], sites=["beach", "harbour"])
+    _pk = {(a, b): c for a, b, c in site3.ridges}
+    _r_pk = _pk.get(("model.pulse_level_exponent", "site_level:harbour"), 0.0)
+    try:
+        analyse(["model.no_such_field"], [1.4])
+        _bad_name = False
+    except KeyError:
+        _bad_name = True
+    check("with each anchor at its own pulse and a free level per site, the "
+          "pulse-level exponent is confounded with the site level (|r| = 1); "
+          "unregistered names are refused",
+          abs(_r_pk) > 0.999 and _bad_name,
+          f"r(pulse exponent, harbour level) {_r_pk:+.4f}; reported "
+          f"r(tvg, lambert) {site3.correlation[1][2]:+.3f}")
+    # ---- the field-calibration candidate profile (pass 2, 2026-10-30) -----
+    # Self-contained (every field stated), its declared differences from the
+    # shipped profile are exactly its differences, and -- when the private
+    # artifact is on this machine -- it IS the artifact composed onto its
+    # base profile (regenerated, never hand-edited).
+    _cp = PKG_ROOT / "config" / "field_candidate_v1_sonar.yaml"
+    import yaml as _y16c
+    _cdoc = _y16c.safe_load(_cp.read_text())
+    _ccfg = SonarConfig.from_yaml(_cp)
+    _sh = SonarConfig.from_yaml(PKG_ROOT / "config" / "default_sonar.yaml")
+    _stated = (set(_cdoc["model"]) == {f.name for f in dataclasses.fields(_sh.model)}
+               and set(_cdoc["acquisition"]) == {
+                   f.name for f in dataclasses.fields(_sh.acquisition)})
+    _diff = {f"model.{k}" for k, v in dataclasses.asdict(_ccfg.model).items()
+             if dataclasses.asdict(_sh.model)[k] != v}
+    _decl = set(_cdoc["provenance"]["differs_from_default_sonar_yaml"])
+    check("the field-calibration candidate profile is self-contained, and the "
+          "differences it declares from default_sonar.yaml are exactly its "
+          "differences (acquisition identical)",
+          _stated and _diff == _decl
+          and _ccfg.acquisition == _sh.acquisition,
+          f"{len(_diff)} model values differ: {sorted(_diff)}")
+    _cal16 = Path.home() / "calib" / "pass2" / "candidates"
+    if (_cal16 / "cal-2026-10-30-b.yaml").is_file():
+        from blueboat_sss_sim.calibration.artifact import (
+            effective_config as _ec16, load_artifact as _la16)
+        _eff16 = _ec16(_cal16 / "prior_base_v1.yaml",
+                       artifact=_la16(_cal16 / "cal-2026-10-30-b.yaml"))
+        check("the candidate profile is its artifact composed onto its base "
+              "profile, value for value",
+              _eff16.config.model == _ccfg.model
+              and _eff16.config.acquisition == _ccfg.acquisition,
+              "cal-2026-10-30-b on prior_base_v1.yaml")
+    else:
+        print("  SKIP: the candidate's private artifact (~/calib/pass2) is "
+              "not on this machine")
     rc = cal_main(["registry", "--check", "--json",
                    str(out16 / "registry_check.json")])
     rv = cal_main(["validate-artifact", str(paths16["yaml"]), "--json",

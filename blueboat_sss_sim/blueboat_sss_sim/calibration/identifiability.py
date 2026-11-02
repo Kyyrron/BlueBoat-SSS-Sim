@@ -117,7 +117,10 @@ def analyse(params: list[str], altitudes_m: list[float],
             acq: AcquisitionParams | None = None,
             steps: dict[str, float] | None = None,
             sigma_db: float = DEFAULT_SIGMA_DB,
-            ridge_threshold: float = 0.95) -> Identifiability:
+            ridge_threshold: float = 0.95,
+            acqs: list[AcquisitionParams] | None = None,
+            sites: list[str] | None = None,
+            check_registry: bool = True) -> Identifiability:
     """Local identifiability of ``params`` (``model.<field>`` names) from
     seabed dB-vs-slant profiles at ``altitudes_m``.
 
@@ -126,26 +129,50 @@ def analyse(params: list[str], altitudes_m: list[float],
     condition number is that of the Jacobian with columns scaled by those
     steps (sensitivity to a comparable change of each parameter); the
     correlations and sd do not depend on that scaling.
+
+    ``acqs`` (one per altitude) renders each altitude at its own
+    acquisition -- the pulse and range a session actually recorded; ``acq``
+    is the single acquisition otherwise. ``sites`` (one label per altitude)
+    adds a free level per site, ``site_level:<label>`` in ``params``: what
+    the data look like when each site carries an unmodelled offset (an
+    un-modelled pulse term, a gain error, another bottom). With one pulse
+    per site, a pulse-level exponent is then confounded with the site
+    levels by construction (2026-10-23). Parameter names are checked
+    against the registry unless ``check_registry`` is False.
     """
     model = model or SonarModelConfig()
-    acq = acq or calibration_acquisition()
+    if acqs is not None and len(acqs) != len(altitudes_m):
+        raise ValueError("acqs needs one acquisition per altitude")
+    if sites is not None and len(sites) != len(altitudes_m):
+        raise ValueError("sites needs one label per altitude")
+    acq_list = list(acqs) if acqs is not None else \
+        [acq or calibration_acquisition()] * len(altitudes_m)
     keys = []
+    reg = None
+    if check_registry:
+        from .registry import load_registry
+        reg = load_registry()
     for name in params:
         if not name.startswith("model."):
             raise ValueError(f"{name}: only model.* parameters are rendered")
         k = name.split(".", 1)[1]
         if not hasattr(model, k):
             raise KeyError(f"{name}: no such SonarModelConfig field")
+        if reg is not None and name not in reg.parameters:
+            raise KeyError(f"{name}: not in the parameter registry "
+                           "(config/parameter_registry.yaml)")
         keys.append(k)
     hs = []
     for name, k in zip(params, keys):
         v = float(getattr(model, k))
         hs.append(float((steps or {}).get(name, 0.02 * abs(v) if v else 0.02)))
-    probes = {a: default_probes(a) for a in altitudes_m}
+    probes = [default_probes(a, r_max=min(14.5, 0.725 * q.range_max_m))
+              for a, q in zip(altitudes_m, acq_list)]
 
     def stack(m: SonarModelConfig) -> np.ndarray:
-        return np.concatenate([seabed_profile_db(m, acq, a, probes[a])
-                               for a in altitudes_m])
+        return np.concatenate([seabed_profile_db(m, q, a, pr)
+                               for a, q, pr in zip(altitudes_m, acq_list,
+                                                   probes)])
 
     cols = []
     for k, h in zip(keys, hs):
@@ -153,6 +180,13 @@ def analyse(params: list[str], altitudes_m: list[float],
         up = stack(dataclasses.replace(model, **{k: v + h}))
         dn = stack(dataclasses.replace(model, **{k: v - h}))
         cols.append((up - dn) / (2.0 * h))
+    names = list(params)
+    if sites is not None:
+        row_site = [s for s, pr in zip(sites, probes) for _ in pr]
+        for s in dict.fromkeys(sites):
+            cols.append(np.array([1.0 if r == s else 0.0 for r in row_site]))
+            hs.append(1.0)                       # one dB of site level
+            names.append(f"site_level:{s}")
     jac = np.column_stack(cols)
     ok = np.all(np.isfinite(jac), axis=1)
     jac = jac[ok]
@@ -165,11 +199,11 @@ def analyse(params: list[str], altitudes_m: list[float],
     with np.errstate(invalid="ignore", divide="ignore"):
         corr = cov / np.outer(sd, sd)
     corr = np.where(np.isfinite(corr), corr, 0.0)
-    ridges = [(params[i], params[j], float(corr[i, j]))
-              for i in range(len(params)) for j in range(i + 1, len(params))
+    ridges = [(names[i], names[j], float(corr[i, j]))
+              for i in range(len(names)) for j in range(i + 1, len(names))
               if abs(corr[i, j]) >= ridge_threshold]
     return Identifiability(
-        params=list(params), altitudes_m=[float(a) for a in altitudes_m],
+        params=names, altitudes_m=[float(a) for a in altitudes_m],
         steps=hs, singular_values=[float(s) for s in sv],
         condition_number=cond, correlation=corr.round(6).tolist(),
         sd=[float(s) for s in sd], sigma_db=float(sigma_db), ridges=ridges,

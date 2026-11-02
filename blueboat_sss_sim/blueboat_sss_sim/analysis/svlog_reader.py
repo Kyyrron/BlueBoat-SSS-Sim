@@ -394,9 +394,10 @@ def pose_track(path: str | Path) -> tuple[list[ProfileRecord],
 
     Position comes from the id-150 track, linearly interpolated onto the
     profile's own clock after removing the boot skew. Heading comes from the
-    **profile itself** -- every ping carries ``vehicle_heading_deg``, so no
-    attitude packet is needed and the heading is exact per ping rather than
-    interpolated.
+    autopilot's ATTITUDE yaw (:func:`profile_heading_deg`), NOT from the
+    ping's ``vehicle_heading_deg``: on real recordings that field is the
+    device's own unreferenced heading (2026-11-01, pass 3: offset to the
+    autopilot yaw differs per transducer and per run, -168..+90 deg).
 
     Returns ``(profiles, [(index into profiles, pose)])``. Profiles falling
     outside the position track's time span are dropped rather than
@@ -409,13 +410,14 @@ def pose_track(path: str | Path) -> tuple[list[ProfileRecord],
     profiles, positions, skew = s.profiles, s.positions, s.skew_ms
     if not profiles or not positions:
         return profiles, []
+    hdg = profile_heading_deg(s)
 
     if s.clock_frozen:
         idx = pair_by_order(np.array([p.order for p in profiles]),
                             np.array([p.order for p in positions]))
         return profiles, [
             (i, Pose3D(x=positions[j].x, y=positions[j].y, z=positions[j].z,
-                       yaw=compass_deg_to_enu_yaw(prof.vehicle_heading_deg)))
+                       yaw=compass_deg_to_enu_yaw(float(hdg[i]))))
             for i, (prof, j) in enumerate(zip(profiles, idx))]
 
     pos_t = np.array([p.time_boot_ms + skew for p in positions],
@@ -435,9 +437,49 @@ def pose_track(path: str | Path) -> tuple[list[ProfileRecord],
             x=float(np.interp(t, pos_t, pos_x)),
             y=float(np.interp(t, pos_t, pos_y)),
             z=float(np.interp(t, pos_t, pos_z)),
-            yaw=compass_deg_to_enu_yaw(prof.vehicle_heading_deg),
+            yaw=compass_deg_to_enu_yaw(float(hdg[i])),
         )))
     return profiles, paired
+
+
+def profile_heading_deg(streams: SvlogStreams,
+                        index: np.ndarray | None = None) -> np.ndarray:
+    """Vehicle compass heading [deg] at each profile (``index`` into
+    ``streams.profiles``, default all), from the autopilot's ATTITUDE yaw
+    (MAVLink NED: radians clockwise from north) -- interpolated on the
+    profile clock after the boot skew (circularly), or the most recent sample
+    in file order on a frozen clock. The ping's own ``vehicle_heading_deg``
+    is used only when the file carries no ATTITUDE.
+
+    Why not the ping field: on the real corpus it is the device's own
+    unreferenced heading -- its offset to the autopilot yaw differs per
+    transducer and per run (pass 3, 2026-11-01: pool -44..-168 deg, beach
+    bath3 -77/-56, object_boiteVsDistance -107/-120, harbour
+    fullHarbourCleanExample +90/+60), while ATTITUDE yaw and the GPS heading
+    agree with the course over ground within ~7 deg. The GCS replay uses
+    ATTITUDE yaw too. A simulated recording carries the true heading in both.
+    """
+    prof = streams.profiles
+    idx = (np.arange(len(prof)) if index is None
+           else np.asarray(index, dtype=np.int64))
+    att = streams.attitude
+    if not att:
+        return np.array([prof[i].vehicle_heading_deg for i in idx],
+                        dtype=np.float64) % 360.0
+    if streams.clock_frozen:
+        j = pair_by_order(np.array([prof[i].order for i in idx]),
+                          np.array([a.order for a in att]))
+        return np.degrees(np.array([att[k].yaw for k in j],
+                                   dtype=np.float64)) % 360.0
+    t = np.array([a.time_boot_ms + streams.skew_ms for a in att],
+                 dtype=np.float64)
+    o = np.argsort(t, kind="stable")
+    t = t[o]
+    yaw = np.array([att[i].yaw for i in o], dtype=np.float64)
+    pt = np.array([prof[i].timestamp_ms for i in idx], dtype=np.float64)
+    c = np.interp(pt, t, np.cos(yaw))
+    sn = np.interp(pt, t, np.sin(yaw))
+    return np.degrees(np.arctan2(sn, c)) % 360.0
 
 
 def gps_track(path: str | Path, streams: SvlogStreams | None = None

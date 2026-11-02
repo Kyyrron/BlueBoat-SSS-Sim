@@ -1,0 +1,157 @@
+# Field-calibration CANDIDATE v1 (pass 2, 2026-10-30) -- PROVISIONAL, NOT PROMOTED.
+#
+# Self-contained sonar profile: every acquisition and model field is stated, so
+# this file renders with exactly these constants whatever the dataclass defaults
+# become. It is default_sonar.yaml with the field-calibration terms switched on:
+#   A  seabed level ~ (pulse / 66.5 us)^1 (prior) + refitted offset / TVG / Lambert;
+#   B  receiver ceiling 67.9 dB (measured), coherent channel ~ pulse^1 (prior),
+#      specular_strength 12 -> 6 (the NC #4 FBR-envelope bound; the field crest
+#      alone would take 2.5, which loses the first bottom return at 5-21 m);
+#   C  K-distributed seabed texture (texture_k_inv_shape 1.5).
+# `provenance.differs_from_default_sonar_yaml` lists every changed value and
+# where it came from; docs/engineering/calibration_results.md has the
+# per-session comparison against the default and why it is not the default
+# (CLAUDE.md NC #6: the shipped calibration moves only through the
+# pre-registered gate). Use it explicitly:
+#     ros2 launch blueboat_sss_sim sss_sim_launch.py ... sonar_config:=field_candidate_v1_sonar.yaml
+# Unlike the other profiles it changes more than one idea: it is a calibration
+# artifact composed onto a base profile -- regenerate it, never hand-edit it.
+acquisition:
+  range_start_mm: 0
+  range_length_mm: 20000
+  msec_per_ping: 50
+  gain_index: -1
+  num_results: 1200
+  pulse_len_percent: 0.00125
+model:
+  sensor_depth_m: 0.15
+  mount_x_m: 0.0
+  mount_y_abs_m: 0.285
+  beam_tilt_deg: 20.0
+  vertical_aperture_deg: 50.0
+  horizontal_aperture_deg: 0.5
+  max_ping_rate_hz: 0.0
+  lambert_exponent: 0.5356
+  absorption_db_per_m: 0.1
+  spreading_exponent: 4.0
+  specular_spreading_exponent: 2.0
+  tvg_compensation: 0.235
+  array_length_m: 0.0
+  beam_sidelobe_floor: 0.004
+  specular_strength: 6.0
+  specular_width_deg: 8.0
+  specular_looks: 25
+  pulse_smearing: true
+  filter_duration_percent: 0.0015
+  range_filter_bins: 0
+  ringing_level_db: 55.0
+  ringing_decay_db_per_m: 22.0
+  alongtrack_beam_lines: 5
+  calibration_db_offset: 79.646
+  max_span_db: 90.0
+  multipath_enabled: false
+  multipath_gain: 0.12
+  wall_multipath_enabled: true
+  wall_multipath_gain: 1.0
+  surface_mirror_enabled: false
+  surface_reflectivity: 0.9
+  wall_echo_enabled: true
+  wall_echo_strength: 30.0
+  wall_echo_obliquity_floor: 0.1
+  wall_face_diffuse: 0.5
+  wall_pontoon_specular: 0.15
+  wall_corner_gain: 1.0
+  wall_diffuse_fraction: 0.04
+  ghost_beam_lines: 1
+  speckle: true
+  speckle_looks: 1
+  coherent_scatterers: true
+  scatterer_cell_m: 0.01
+  scatterer_seed: 0
+  reverberation_reference: ambient
+  volume_scattering_coeff: 0.0
+  penumbra_deg: 0.0
+  shore_taper_m: 0.0
+  coherent_split: true
+  sonar_frequency_hz: 450000.0
+  smooth_lobe_width_deg: 0.0
+  object_facets: true
+  facet_patch_m: 0.01
+  sand_lambert_mu_db: -12.0
+  image_formation: energy
+  facet_area_jacobian: true
+  layover_gain_max_db: 20.0
+  reverberation_db: 18.0
+  noise_floor: 3.39e-09
+  fault_gain_walk_pings: 0
+  fault_counter_reset_pings: 0
+  fault_counter_offset: 0
+  fault_channel_255: false
+  gain_drift_amp: 0.0
+  gain_drift_period_s: 45.0
+  dropped_ping_prob: 0.0
+  watercolumn_noise: 4.68e-06
+  pulse_level_exponent: 1.0
+  specular_pulse_exponent: 1.0
+  pulse_level_reference_s: 6.65e-05
+  receiver_ceiling: true
+  receiver_ceiling_db: 67.9
+  receiver_ceiling_pulse_exponent: 1.0
+  receiver_ceiling_knee_db: 1.0
+  texture_k_inv_shape: 1.5
+  texture_k_cell_m: 0.5
+  ping_level_jitter_db: 0.0
+  sample_step_m: 0.05
+provenance:
+  format: blueboat_effective_profile/1
+  status: 'PROVISIONAL candidate -- not promoted (pass-2 gate: bundle A fails on harbour_A-2026-07-21)'
+  artifact:
+    id: cal-2026-10-30-b
+    file: ~/calib/pass2/candidates/cal-2026-10-30-b.yaml
+    sha256: b130162c698939ccbd10fe1ac6002fba95d43f88367c676e84a888ace6486362
+  base_profile:
+    name: prior_base_v1.yaml
+    file: ~/calib/pass2/candidates/prior_base_v1.yaml
+    sha256: 5c11f62febce35a3b7e5cdbdcd57c4ed01ad87950c3edd8e59a881accf10d9dd
+  composed_by: python3 -m blueboat_sss_sim.calibration effective-profile --profile
+    prior_base_v1.yaml --artifact cal-2026-10-30-b.yaml
+  differs_from_default_sonar_yaml:
+    model.sensor_depth_m:
+      default: 0.22
+      candidate: 0.15
+      source: 'pass-2 installation, kept frozen: default_sonar.yaml moved to the measured
+        pass-3 installation (2026-11-02, sensor_depth_m 0.22, mount_x_m -0.345)'
+    model.mount_x_m:
+      default: -0.345
+      candidate: 0.0
+      source: 'pass-2 installation, kept frozen: default_sonar.yaml moved to the measured
+        pass-3 installation (2026-11-02, sensor_depth_m 0.22, mount_x_m -0.345)'
+    model.lambert_exponent:
+      default: 1.0
+      candidate: 0.5356
+      source: artifact cal-2026-10-30-b (fitted/measured on the calibration sessions)
+    model.tvg_compensation:
+      default: 0.3
+      candidate: 0.235
+      source: artifact cal-2026-10-30-b (fitted/measured on the calibration sessions)
+    model.specular_strength:
+      default: 1.75
+      candidate: 6.0
+      source: artifact cal-2026-10-30-b (fitted/measured on the calibration sessions)
+    model.calibration_db_offset:
+      default: 81.1
+      candidate: 79.646
+      source: artifact cal-2026-10-30-b (fitted/measured on the calibration sessions)
+    model.pulse_level_exponent:
+      default: 0.0
+      candidate: 1.0
+      source: prior base profile (physics prior / structural switch, not fitted)
+    model.specular_pulse_exponent:
+      default: 0.0
+      candidate: 1.0
+      source: prior base profile (physics prior / structural switch, not fitted)
+    model.texture_k_inv_shape:
+      default: 0.0
+      candidate: 1.5
+      source: artifact cal-2026-10-30-b (fitted/measured on the calibration sessions)
+  evidence: docs/engineering/calibration_results.md

@@ -109,6 +109,12 @@ class Ping:
     # seabed is the scene's `outside` rule (a phantom plain under "fill",
     # the repeated edge under "edge"), not authored terrain -- diagnostics
     # only, the render is unchanged (2026-10-21; sonar_model.md A13).
+    speckle_fill: np.ndarray | None = None
+    # Bins where `texture` holds its 1.0 fallback (no lit direct seabed under
+    # the pulse) but wall ghosts / the single-bounce band put energy: the
+    # noise stage gives them their own Exp(1) speckle (2026-10-23 fix -- the
+    # docs said ghosts are speckled, the code left them steady behind a
+    # quay). None or all-False in a scene without walls.
 
 
 @dataclass

@@ -353,7 +353,10 @@ sorted name order — deterministic per seed.
 `type, x, y` (required) and `yaw` (**radians**, default 0), plus the
 verbatim overrides `length, width, proud_height, burial, fill_fraction,
 reflectivity, material`, the 3-D pose `roll_deg, pitch_deg, rest` and
-`params` (the class's construction knobs, e.g. `wall_mm`, `flooded`).
+`params` (the class's construction knobs, e.g. `wall_mm`, `flooded`; and
+`nested: true` for an object lying *inside* a facet object placed before it,
+on the same seabed — its stamp takes the maximum with the container's
+instead of stacking, `sonar_model.md` §12).
 *Only what the entry states is pinned*: every other field is drawn from
 the shared placement stream, so an entry giving just `type, x, y` changes
 size and burial whenever anything before it in the list changes. Pin all
@@ -482,11 +485,13 @@ never acoustic.
 Per material: `reflectivity`, `texture_amp`, `texture_cells`,
 `micro_roughness_m`, `color`, `transmission`, `roughness_m`, and — since
 2026-09-28 — the **acoustic constants** `density_kgm3`, `sound_speed_mps`,
-`backing` (`solid` | `water` | `air`) and `wall_m`. Built-ins: seabed
-`sand/mud/gravel/rocks/seagrass`; object
+`backing` (`solid` | `water` | `air` | a solid material's name, e.g.
+`concrete`: a layer of `wall_m` on that half-space, since 2026-11-01) and
+`wall_m`. Built-ins: seabed `sand/mud/gravel/rocks/seagrass`; object
 `rubber/pvc/plastic/metal/concrete/brickclay/rope/generic` plus the
-target-family additions `glass/wood/eps/tinplate` and the field box's
-`pp_shell`.
+target-family additions `glass/wood/eps/tinplate`, the field box's
+`pp_shell` and the pool weights' `pe_cement` (PE skin on cement,
+`sonar_model.md` §12).
 
 How an object sounds follows from these, never from a per-object gain
 (NC #17, `sonar_model.md` §12): a material whose `roughness_m` is under
@@ -525,7 +530,8 @@ The shipped default profile is **20 m, gain −1 (device auto), 1200 bins,
 pulse 0.00125** — the device's best range resolution and, since 2026-09-28,
 exactly the real `sss_node.py`'s defaults; see `docs/topics.md §2`. A Gazebo run started from the Mission Control Station
 passes none, so it gets this profile. Four more profiles ship, each the
-default file with one idea changed:
+default file with one idea changed (a sixth, the field-calibration
+candidate, is different in kind -- below):
 
 | Profile | What differs | For |
 |---|---|---|
@@ -538,17 +544,31 @@ default file with one idea changed:
 study: wall multipath, which `default_sonar.yaml` now enables too; the
 surface mirror is **off** in it).
 
+`config/field_candidate_v1_sonar.yaml` (2026-10-30) is **not** "the default
+plus one idea": it is a calibration artifact (`cal-2026-10-30-b`, kept
+privately with its base profile) composed into a **self-contained** profile
+-- every field stated -- by `calibration effective-profile`. It switches on
+the pass-2 terms that did not pass the promotion gate: the pulse-length level
+law with a refitted level triple, `specular_strength` 6.0 and the K-distributed
+seabed texture. **Provisional**: use it explicitly
+(`sonar_config:=field_candidate_v1_sonar.yaml`) to see the calibrated
+statistics, never as the comparison profile. Its `provenance:` block lists
+every value that differs from `default_sonar.yaml` and where it came from;
+regenerate it, never hand-edit it. Evidence:
+`docs/engineering/calibration_results.md`.
+
 `model:` (no hardware equivalent):
 
 | Group | Keys | Guidance |
 |---|---|---|
 | Mounting | `sensor_depth_m` (transducer face below the **still waterline** with the boat level at rest; in Gazebo the node first moves the base_link pose onto that datum, `base_link_rest_z_m`), `mount_x_m`, `mount_y_abs_m`, `beam_tilt_deg` (20), `vertical_aperture_deg` (50, spec), `horizontal_aperture_deg` (0.5, spec) | match the physical bracket; tilt+aperture set the usable swath |
-| Timing | `max_ping_rate_hz` (20, the device law measured on the corpus: 50 ms to 30 m, 2R/c + 3 ms beyond) | set 0 to disable the cap (experiment only) |
-| Acoustics | `lambert_exponent` (1.0), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (4.0), `tvg_compensation` (**0.30**), `specular_spreading_exponent` (**2.0**), `array_length_m` (**0.0**), `beam_sidelobe_floor` (0.004), `specular_strength` (**12**), `specular_width_deg` (8.0), `specular_looks` (25), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | the range law was re-fitted on **two altitudes at once** on 2026-09-18 (beach 1.40 m + harbour 7.33 m): `tvg_compensation` 0 → 0.30, and the coherent component got its own spreading (an image source spreads once, not twice) so the first-bottom return follows the device's altitude law. Only the product `spreading_exponent · (1 − tvg_compensation)` is determined; raising the TVG flattens the image. Sidelobe/specular shape the FBR line — don't zero them if downstream bottom tracking must lock. `array_length_m` floors the along-track footprint at the aperture; 0 because the corpus says the device focuses its near field |
+| Timing | `max_ping_rate_hz` (0 = off since 2026-10-27; the corpus's 50 ms to ~35 m is SonarView's `acquisition.msec_per_ping = 50`, now the default, and the device free-runs at 34.5 Hz at 20 m) | > 0 caps the rate (experiment only) |
+| Acoustics | `lambert_exponent` (1.0), `absorption_db_per_m` (0.10 @450 kHz), `spreading_exponent` (4.0), `tvg_compensation` (**0.30**), `specular_spreading_exponent` (**2.0**), `array_length_m` (**0.0**), `beam_sidelobe_floor` (0.004), `specular_strength` (**1.75**, was 12 until 2026-10-30), `specular_width_deg` (8.0), `specular_looks` (25), `pulse_smearing` (true), `alongtrack_beam_lines` (5) | the range law was re-fitted on **two altitudes at once** on 2026-09-18 (beach 1.40 m + harbour 7.33 m): `tvg_compensation` 0 → 0.30, and the coherent component got its own spreading (an image source spreads once, not twice) so the first-bottom return follows the device's altitude law. Only the product `spreading_exponent · (1 − tvg_compensation)` is determined; raising the TVG flattens the image. Sidelobe/specular shape the FBR line — don't zero them if downstream bottom tracking must lock; `specular_strength` 1.75 is the FBR crest fit raised to the NC #4 bound (`calibration.seabed.fbr_envelope`), so lowering it further loses the bottom over dark seabed at altitude. `array_length_m` floors the along-track footprint at the aperture; 0 because the corpus says the device focuses its near field |
 | Multipath | `multipath_enabled` (false), `multipath_gain` (0.12) | optional second-bottom-echo ghost, +altitude in slant range |
 | Wall multipath | `wall_multipath_enabled` (true), `wall_multipath_gain` (1.0), `wall_diffuse_fraction` (0.04), `wall_corner_gain` (1.0), `surface_mirror_enabled` (false), `surface_reflectivity` (0.9), `ghost_beam_lines` (1) | mirror-source ghosts off the world's `walls:` at `reflectivity²` × the Rayleigh roughness law (+ the lumped diffuse share) and the single-bounce band just beyond a quay — `sonar_model.md` §10–11, anchored on the corpus quay. ×1.25 per ping-side with one wall in range, ×1.50 with three, ×1.00 all culled |
 | Calibration | `calibration_db_offset` (**81.1**), `max_span_db` (90) | the only level constant — fit against the reported `max_pwr_db`, never a count histogram (NC #6). Re-fitted with the range law on 2026-09-18 (was 97.2, which was right at the harbour's altitude and 18 dB hot at the beach's). See `sonar_model.md` §6 |
 | Noise | `speckle` (true), `speckle_looks` (1), `coherent_scatterers` (true), `scatterer_cell_m` (0.01), `scatterer_seed` (0), `filter_duration_percent` (0.0015, the receive filter: range envelope = pulse/Ts + this·N + 1 bins; the deprecated `range_filter_bins` > 0 restores the old fixed floor), `noise_floor` (**3.39e-09**, measured receiver floor), `watercolumn_noise` (**4.68e-06**, measured 1–3 m water column), `reverberation_db` (**18.0**, a shadow's floor under the lit seabed), `gain_drift_amp` (0 — augmentation-stage concern), `dropped_ping_prob` (0 — same) | zero everything for "clean physics" ablation images; `coherent_scatterers: false` restores the uncorrelated per-bin speckle. The two floor constants encode *levels* (−3.6 and +27.8 dB reported) and moved with `calibration_db_offset` on 2026-09-18 without changing them. `reverberation_db: 0` restores the pre-2026-09-18 white floor, i.e. shadows 30 dB too deep |
+| Field-calibration terms (pass 2) | `pulse_level_exponent` (0), `specular_pulse_exponent` (0), `pulse_level_reference_s` (6.65e-05, structural), `receiver_ceiling` (**true** since 2026-10-30), `receiver_ceiling_db` (**67.9**, measured), `receiver_ceiling_pulse_exponent` (1.0), `receiver_ceiling_knee_db` (1.0, structural), `texture_k_inv_shape` (0), `texture_k_cell_m` (0.5), `ping_level_jitter_db` (0) | each off value reproduces the model without the term bit for bit (smoke `[17]`). The receiver ceiling is a C¹ soft knee on reported dB that keeps one full-scale bin; `texture_k_inv_shape` 1/ν > 0 adds a ground-fixed Gamma (K-distribution) intensity field; the pulse exponents scale the diffuse / coherent level by (τ/66.5 µs)^k. `sonar_model.md` §13 |
 | Fault injection | `fault_gain_walk_pings` (0), `fault_counter_reset_pings` (0), `fault_counter_offset` (0), `fault_channel_255` (false) | **test knobs, not fidelity**: the downstream paths a clean simulation never takes (gain compensation, counter re-base, channel-255 side fallback, one-sided rows). `config/fault_injection_sonar.yaml` turns them on together |
 | Wall echo | `wall_echo_enabled` (true), `wall_echo_strength` (30), `wall_echo_obliquity_floor` (0.1), `wall_face_diffuse` (0.5), `wall_pontoon_specular` (0.15) | direct face return (specular lobe + Lambert over the wet face, range law floored at the altitude) + occlusion by the face band, per wall `kind` — `sonar_model.md` §11; strict no-op without walls |
 | Objects (NC #17) | `object_facets` (true), `facet_patch_m` (0.01), `sand_lambert_mu_db` (−12.0) | smooth solid objects scatter from their exact geometry (`sonar/facets.py`); `false` keeps their shadows and drops their returns (a diagnostic). The patch keeps the phase linear across it and the beam constant over it (valid from ~2 m). μ is sand's Lambert parameter at 450 kHz from the literature — the one constant tying an object's cross-section to the calibrated seabed; never fit it to an object |

@@ -5,7 +5,8 @@ Two layers, mirroring the real system exactly:
 * **Acquisition parameters** -- the same six run-dependent parameters the
   real ``sss_node.py`` exposes (``range_start_mm``, ``range_length_mm``,
   ``msec_per_ping``, ``gain_index``, ``num_results``, ``pulse_len_percent``);
-  identical names, identical semantics (``msec_per_ping = 0`` -> free-run).
+  identical names, identical semantics and defaults (``msec_per_ping`` 50,
+  SonarView's interval; ``0`` -> free-run).
 
 * **Simulation-only parameters** -- sensor geometry, acoustic model and
   noise knobs that a real operator does not control (the physics of the
@@ -49,12 +50,16 @@ def find_default_sonar_yaml() -> Path:
 OMNISCAN_FREQ_HZ = 451_127          # observed on the real device
 DEVICE_PROCESSING_MS = 3.0          # free-run overhead beyond two-way travel:
                                     # MEASURED 2.5-3.5 ms on every corpus file
-                                    # past the 30 m cap (38 m -> 54 ms, 40 ->
+                                    # past ~35 m (38 m -> 54 ms, 40 ->
                                     # 56, 52 -> 73, 72 -> 99, 80 -> 110,
-                                    # 95.6 -> 131, 125.6 -> 170 ms)
-MIN_PING_PERIOD_S = 0.050           # spec + corpus: 20 pings/s up to 30 m
-                                    # (18.4 m and 20 m recordings sit at
-                                    # exactly 50 ms), range-limited beyond
+                                    # 95.6 -> 131, 125.6 -> 170 ms), and
+                                    # 2.3 ms at 20 m (29.0 ms, our driver's
+                                    # free-run recordings of 2026-10-27)
+MIN_PING_PERIOD_S = 0.050           # SonarView's msec_per_ping command: 20
+                                    # pings/s up to ~35 m (18.4 m and 20 m
+                                    # recordings sit at exactly 50 ms),
+                                    # range-limited beyond -- the default of
+                                    # AcquisitionParams.msec_per_ping
 PULSE_MIN_S = 44.3e-6               # shortest transmit pulse the device
                                     # reports (16-27 m at 1200 bins)
 
@@ -80,11 +85,12 @@ _RETIRED_MODEL_KEYS = {
 class AcquisitionParams:
     """Run-dependent parameters, identical to the real node's ROS params --
     names, semantics and (since 2026-09-28) defaults, which are also
-    ``config/default_sonar.yaml``'s: the device's best acquisition."""
+    ``config/default_sonar.yaml``'s: the device's best acquisition, at
+    SonarView's ping interval (2026-10-27)."""
 
     range_start_mm: int = 0
     range_length_mm: int = 20_000
-    msec_per_ping: int = 0                 # 0 = free-run (device behaviour)
+    msec_per_ping: int = 50                # SonarView's command; 0 = free-run
     gain_index: int = AUTO_GAIN_INDEX      # resolves to the calibrated 4
     num_results: int = 1200                # the device maximum
     pulse_len_percent: float = 0.00125     # 44.3 us floor up to ~27 m
@@ -127,16 +133,19 @@ class AcquisitionParams:
         return self.range_length_mm / 1000.0 / max(self.num_results, 1)
 
     def ping_period_s(self, max_ping_rate_hz: float = 0.0) -> float:
-        """Effective ping period -- the device law, measured on the corpus.
+        """Effective ping period -- the device law, measured.
 
         ``period = max(msec_per_ping, 2R/c + DEVICE_PROCESSING_MS,
-        1/max_ping_rate_hz)``. The Omniscan 450 pings at 20 pings/s up to
-        30 m and is range-limited beyond (spec sheet); all seven corpus
-        recordings follow exactly that: 50 ms at 18.4 m and 20 m, then
-        two-way travel plus ~3 ms (54 ms at 38 m ... 131 ms at 95.6 m,
-        170 ms at 125.6 m). ``max_ping_rate_hz`` is the 20 Hz cap; 0
-        disables it (a model knob, kept for experiments -- the device itself
-        never exceeds 20 Hz)."""
+        1/max_ping_rate_hz)``. The device honours ``msec_per_ping`` as a
+        lower bound and is range-limited beyond it. With SonarView's 50 ms
+        (the default since 2026-10-27) that is the corpus law: 50 ms at
+        18.4 m and 20 m, then two-way travel plus ~3 ms (54 ms at 38 m ...
+        131 ms at 95.6 m, 170 ms at 125.6 m) -- every corpus file was
+        recorded by SonarView, which commands 50 ms. With 0 the device
+        free-runs: 29.0 ms (34.5 Hz) at 20 m, MEASURED on our driver's
+        2026-10-27 recordings, so there is no 20 Hz device cap.
+        ``max_ping_rate_hz`` is a model knob, 0 by default (off); it used to
+        stand in for SonarView's 50 ms as if it were a device limit."""
         two_way = 2.0 * self.range_max_m / SPEED_OF_SOUND_MPS
         free_run = two_way + DEVICE_PROCESSING_MS / 1000.0
         period = max(self.msec_per_ping / 1000.0, free_run)
@@ -168,21 +177,31 @@ class SonarModelConfig:
     # -sensor_depth] from the vehicle pose, whose z = 0 is the boat floating
     # level at rest on the still waterline (the sonar node moves Gazebo's
     # base_link pose onto that datum first, `base_link_rest_z_m`).
-    sensor_depth_m: float = 0.15           # transducer below still water
-                                           # (JUDGED estimate, unmeasured)
-    mount_x_m: float = 0.0                 # fore/aft offset from base_link
+    sensor_depth_m: float = 0.22           # transducer below still water:
+                                           # MEASURED 2026-11-01 (pass 3) --
+                                           # rear-most hull holes 0.03 m above
+                                           # the keel, BlueBoat waterline 0.229 m
+                                           # above it (hull model buoyancy, 19 kg);
+                                           # the pool reproduces every run's FBR
+                                           # altitude to +-0.03 m (was 0.15, judged)
+    mount_x_m: float = -0.345              # fore/aft offset from base_link: the
+                                           # rear-most hull mounting holes in the
+                                           # BlueBoat model (operator: the brackets
+                                           # sit there, all corpora); was 0.0
     mount_y_abs_m: float = 0.285           # lateral offset magnitude per side
     beam_tilt_deg: float = 20.0            # pattern centre below horizontal
     vertical_aperture_deg: float = 50.0    # Omniscan 450 spec: 50 deg beam height
     horizontal_aperture_deg: float = 0.5   # Omniscan 450 spec: 0.5 deg azimuth
 
     # Timing.
-    max_ping_rate_hz: float = 20.0         # Omniscan 450 cap: 20 pings/s up
-                                           # to 30 m, range-limited beyond.
-                                           # MEASURED on all seven corpus
-                                           # files (see AcquisitionParams.
-                                           # ping_period_s). 0 disables the
-                                           # cap -- an experiment knob only.
+    max_ping_rate_hz: float = 0.0          # off: the device has no 20 Hz cap
+                                           # (it free-runs at 34.5 Hz at 20 m,
+                                           # measured 2026-10-27); the corpus's
+                                           # 20 Hz is SonarView's msec_per_ping
+                                           # = 50, now the acquisition default
+                                           # (AcquisitionParams.ping_period_s).
+                                           # > 0 caps the rate -- an
+                                           # experiment knob only.
 
     # Acoustic model.
     lambert_exponent: float = 1.0          # single-power angular law,
@@ -249,12 +268,20 @@ class SonarModelConfig:
                                            # >0.55 deg of roll-up, a smaller
                                            # tilt / aperture, or for upward
                                            # (surface-image) paths
-    specular_strength: float = 12.0        # near-normal-incidence specular lobe
+    specular_strength: float = 1.75        # near-normal-incidence specular lobe
                                            # amplitude (relative to Lambert).
-                                           # Sized so the FBR clears a +8 dB
-                                           # noise-floor threshold even over
-                                           # dark bottoms (mud/seagrass), as
-                                           # on the real device
+                                           # 2026-10-30 (field calibration,
+                                           # pass 2): 12 -> 1.75. The harbour
+                                           # anchor's detector-located FBR
+                                           # crest gives 1.36; 1.75 is the
+                                           # smallest value with which the
+                                           # FBR still clears the detector
+                                           # over the darkest seabed
+                                           # (seagrass) across the corpus's
+                                           # acquisitions at 0.6-22 m
+                                           # (calibration.seabed.fbr_envelope,
+                                           # NC #4). 12 had been fitted to
+                                           # max_pwr_db, mostly NOT the FBR
     specular_width_deg: float = 8.0        # angular width of the specular lobe
     specular_looks: int = 25               # fluctuation of the *coherent*
                                            # specular return: Gamma(L,1/L),
@@ -646,6 +673,53 @@ class SonarModelConfig:
                                            # peak, the margin growing as the
                                            # altitude falls, so bottom
                                            # tracking locks with margin.
+
+    # --- field-calibration terms (pass 2, 2026-10-23) -------------------
+    # Each default reproduces the 2026-10-21 model bit for bit (smoke [17]:
+    # the render and encode fixtures). A candidate profile switches them on;
+    # docs/engineering/calibration_results.md records the evidence.
+    pulse_level_exponent: float = 0.0     # diffuse (area) level x (tau/tau_ref)^k.
+                                           # MEASURED within file on the corpus:
+                                           # +0.93 dB per dB of pulse [0.66,
+                                           # 1.17]; physics (insonified area
+                                           # c*tau/2) gives 1. acoustics.
+                                           # pulse_level_factors
+    specular_pulse_exponent: float = 0.0  # the same for the coherent channel
+                                           # (bottom return, glints, wall face):
+                                           # the FBR crest measures +1.07 dB/dB
+                                           # [0.70, 1.38]; the ringing +0.30
+                                           # (not scaled)
+    pulse_level_reference_s: float = 66.5e-6
+                                           # the pulse the level constants were
+                                           # fitted at (bath3: 20 m / 600 bins,
+                                           # SonarView's 1.5-bin pulse)
+    receiver_ceiling: bool = True         # the device's reported-level ceiling
+                                           # (encoder, a C1 soft knee that keeps
+                                           # one full-scale bin); on since the
+                                           # 2026-10-30 promotion, with
+                                           # specular_strength 1.75
+    receiver_ceiling_db: float = 67.9     # ceiling at pulse_level_reference_s
+                                           # [reported dB]. MEASURED: pile-up at
+                                           # 67.9 dB on the beach at gains 4-7;
+                                           # over 26 acquisition groups of the
+                                           # corpus 67.81 + 0.91*10log10(tau/
+                                           # 66.5 us), residual sd 0.18 dB
+    receiver_ceiling_pulse_exponent: float = 1.0
+                                           # the ceiling's own pulse slope
+                                           # (measured 0.91)
+    receiver_ceiling_knee_db: float = 1.0 # width of the soft knee below it
+    texture_k_inv_shape: float = 0.0      # 1/nu of a ground-fixed Gamma(nu,
+                                           # 1/nu) intensity texture on the
+                                           # diffuse field (K-distributed
+                                           # seabed); 0 = off (Exp(1) speckle
+                                           # only). Unit mean: levels unchanged
+    texture_k_cell_m: float = 0.5         # ground cell of that texture
+    ping_level_jitter_db: float = 0.0     # per-ping, per-side log-normal level
+                                           # factor (unit mean) on the echoes;
+                                           # drawn only when > 0, so the RNG
+                                           # stream is unchanged at 0. The
+                                           # corpus measures independent port /
+                                           # starboard anomalies (corr ~0)
 
     # Ground-line sampling: renderer step is min(sample_step_m, ~half the
     # slant bin) so every range bin receives samples at any num_results

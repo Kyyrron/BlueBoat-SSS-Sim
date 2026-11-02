@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..core.geometry import bilinear_sample
 from ..core.types import PlacedObject, Wall
 from .materials import MaterialLibrary
 from .objects import CATALOG
@@ -67,12 +68,14 @@ def _write_stl(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
             f.write(b"\0\0")
 
 
-def _seabed_mesh(scene: SceneModel, max_verts_axis: int = 200
+def _seabed_mesh(scene: SceneModel, max_verts_axis: int = 200,
+                 height: np.ndarray | None = None
                  ) -> tuple[np.ndarray, np.ndarray]:
-    """Decimate the heightmap into a triangle grid mesh (world coords)."""
+    """Decimate the heightmap into a triangle grid mesh (world coords).
+    ``height`` (default ``scene.height``) is the raster meshed."""
     g = scene.grid
     step = max(1, int(np.ceil(max(g.nx, g.ny) / max_verts_axis)))
-    hz = scene.height[::step, ::step]
+    hz = (scene.height if height is None else height)[::step, ::step]
     ny, nx = hz.shape
     xs = g.origin_x + np.arange(0, g.nx, step)[:nx] * g.resolution
     ys = g.origin_y + np.arange(0, g.ny, step)[:ny] * g.resolution
@@ -245,14 +248,37 @@ def _limits_sdf(scene: SceneModel) -> str:
     return "".join(out)
 
 
+def _terrain(scene: SceneModel, terrain_height: np.ndarray | None) -> np.ndarray:
+    """The raster the Gazebo visuals stand on (see :func:`write_world_sdf`)."""
+    if terrain_height is not None:
+        t = np.asarray(terrain_height, dtype=np.float64)
+        if t.shape != scene.height.shape:
+            raise ValueError(f"terrain_height {t.shape} != the scene grid "
+                             f"{scene.height.shape}")
+        return t
+    fb = getattr(scene, "facet_bump", None)
+    if fb is not None and np.shape(fb) == scene.height.shape:
+        return scene.height - np.asarray(fb, dtype=np.float64)
+    return scene.height
+
+
 def write_world_sdf(scene: SceneModel, out_dir: str | Path,
                     world_name: str = "generated_ocean",
                     plugin_prefix: str = "gz",
                     water_alpha: float = 0.4,
                     seabed_collision: bool = False,
                     material_overrides: dict | None = None,
-                    limits_collision: bool = False) -> Path:
+                    limits_collision: bool = False,
+                    terrain_height: np.ndarray | None = None) -> Path:
     """Write ``world.sdf`` + ``seabed.stl`` into ``out_dir``.
+
+    The Gazebo visuals stand on the **terrain**, never on the acoustic
+    raster (2026-11-02): ``scene.height`` carries every object's own stamp
+    (a facet object's top as its occluder, a Lambert object's relief), so
+    placing an object at ``scene.sample_height`` stood it on its own top and
+    meshing that raster drew each stamp as a bump under it -- the boxed
+    weight of the pool worlds sat 0.55 m above the floor on a pyramid.
+    Visual only: ``scene.npz`` is written elsewhere and untouched.
 
     Args:
         plugin_prefix: ``"gz"`` (Garden/Harmonic plugin naming) or
@@ -260,13 +286,23 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
         limits_collision: emit four invisible collision-only boxes along
             the world extent (the builder's impenetrable, non-reflective
             limits).
+        terrain_height: the pre-object-stamp height raster on
+            ``scene.grid`` (``depth.npz``'s). Objects, walls and the seabed
+            mesh use it. Without it the facet objects' stamps are removed
+            (``height - facet_bump``); a Lambert object's relief then stays
+            in the mesh.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     lib = MaterialLibrary(material_overrides)
 
-    verts, faces = _seabed_mesh(scene)
+    terrain = _terrain(scene, terrain_height)
+    verts, faces = _seabed_mesh(scene, height=terrain)
     _write_stl(out / "seabed.stl", verts, faces)
+
+    def ground(x, y):
+        return bilinear_sample(terrain, scene.grid, np.asarray(x, float),
+                               np.asarray(y, float), fill=float(terrain.min()))
 
     if plugin_prefix == "gz":
         p, n = "gz-sim", "gz::sim::systems"
@@ -306,12 +342,12 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
         </collision>"""
 
     objects_sdf = "".join(
-        _object_sdf(o, float(scene.sample_height(np.array([o.x]), np.array([o.y]))[0]), lib)
+        _object_sdf(o, float(ground(np.array([o.x]), np.array([o.y]))[0]), lib)
         for o in scene.objects)
     # Walls sit on the deepest point they span, so a sloping basin never
     # leaves one floating above the seabed.
     walls_sdf = "".join(
-        _wall_sdf(w, float(np.min(scene.sample_height(
+        _wall_sdf(w, float(np.min(ground(
             np.linspace(w.x0, w.x1, 16), np.linspace(w.y0, w.y1, 16)))))
         for w in scene.walls)
     limits_sdf = _limits_sdf(scene) if limits_collision else ""

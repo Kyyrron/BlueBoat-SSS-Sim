@@ -184,11 +184,36 @@ class SurfaceResponse(NamedTuple):
     range_coherent: np.ndarray   #: net range response, coherent spreading law
 
 
+def pulse_level_factors(pulse_s: float | None,
+                        cfg: SonarModelConfig) -> tuple[float, float]:
+    """Level factors ``(diffuse, coherent)`` for a transmit pulse ``pulse_s``.
+
+    ``(pulse_s / pulse_level_reference_s) ** exponent``, one exponent per
+    channel (``pulse_level_exponent``, ``specular_pulse_exponent``); exactly
+    ``(1.0, 1.0)`` when the exponents are 0 (the shipped default) or the
+    pulse is unknown. Measured on the corpus (2026-10-23, within file, same
+    side and altitude band, different pulse): the reported seabed level rises
+    +0.93 dB per dB of pulse length [0.66, 1.17], the bottom-return crest
+    +1.07 [0.70, 1.38], the device's level ceiling +0.91; the ringing does
+    not move (+0.30 [-0.15, 0.82]). The diffuse part is the insonified area
+    (c tau / 2) of a pulse-limited resolution cell; why the coherent return
+    follows too is not established -- an energy-like detector would do it.
+    The reference is the pulse the level constants were fitted at.
+    """
+    if pulse_s is None:
+        return 1.0, 1.0
+    ratio = float(pulse_s) / float(cfg.pulse_level_reference_s)
+    kd, kc = float(cfg.pulse_level_exponent), float(cfg.specular_pulse_exponent)
+    return (ratio ** kd if kd != 0.0 else 1.0,
+            ratio ** kc if kc != 0.0 else 1.0)
+
+
 def surface_response(reflectivity: np.ndarray, cos_incidence: np.ndarray,
                      depression_rad: np.ndarray, slant: np.ndarray,
                      cfg: SonarModelConfig,
                      roll_toward_side: float = 0.0,
-                     roughness_m: np.ndarray | None = None
+                     roughness_m: np.ndarray | None = None,
+                     pulse_s: float | None = None
                      ) -> SurfaceResponse:
     """The one place the per-sample acoustic response is composed.
 
@@ -198,10 +223,17 @@ def surface_response(reflectivity: np.ndarray, cos_incidence: np.ndarray,
     through that, ``analysis/shading.py`` (the relief inversion). Any new
     term -- volume scattering, a coherent/incoherent roughness split -- is
     added here once and reaches all three.
+
+    ``pulse_s`` (the acquisition's transmit pulse) applies the pulse-level
+    terms of :func:`pulse_level_factors`; ``None`` or zero exponents leave
+    both channels bit-identical.
     """
     diffuse = backscatter(reflectivity, cos_incidence,
                           cfg.lambert_exponent,
                           cfg.volume_scattering_coeff)
+    f_d, f_c = pulse_level_factors(pulse_s, cfg)
+    if f_d != 1.0:
+        diffuse = diffuse * f_d
     width = None
     incoh = None
     if cfg.coherent_split and roughness_m is not None:
@@ -237,6 +269,8 @@ def surface_response(reflectivity: np.ndarray, cos_incidence: np.ndarray,
     coherent = specular(reflectivity, cos_incidence, cfg, width)
     if incoh is not None:
         coherent = coherent * incoh
+    if f_c != 1.0:
+        coherent = coherent * f_c
     rng_d = net_range_response(slant, cfg)
     rng_c = net_range_response(slant, cfg, coherent=True)
     if incoh is not None and np.ndim(rng_c) > 0:

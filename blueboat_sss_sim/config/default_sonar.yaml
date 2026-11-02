@@ -16,7 +16,9 @@ acquisition:
   range_start_mm: 0
   range_length_mm: 20000    # 20 m per side: the 2026-09-07 beach day's setting
                             # and the real sss_node.py default. 16.7 mm bins
-  msec_per_ping: 0          # 0 = free run (device-native: 20 pings/s to 30 m)
+  msec_per_ping: 50         # SonarView's command (2026-10-27): 20 pings/s to
+                            # ~35 m, range-limited beyond. 0 = free run:
+                            # 2R/c + ~2.3 ms, 34.5 Hz at 20 m (measured)
   gain_index: -1            # device auto-gain, the real sss_node.py default.
                             # The simulator has no AGC: -1 resolves to the
                             # calibrated index 4 and reports 4 (the profile's
@@ -31,19 +33,20 @@ acquisition:
 
 model:
   # Mounting (vehicle frame) -- Omniscan 450 SS beam geometry
-  sensor_depth_m: 0.15
-  mount_x_m: 0.0
+  sensor_depth_m: 0.22   # measured 2026-11-01 (pass 3: hull holes + buoyancy + pool datum)
+  mount_x_m: -0.345     # rear-most hull holes vs base_link (was 0.0)
   mount_y_abs_m: 0.285
   beam_tilt_deg: 20.0
   vertical_aperture_deg: 50.0   # spec: 50 deg beam height
   horizontal_aperture_deg: 0.5  # spec: 0.5 deg along-track beam
 
-  # Timing -- the device law, MEASURED on all seven corpus recordings:
-  # period = max(50 ms, 2R/c + 3 ms). 20 pings/s up to 30 m (18.4 m and
-  # 20 m files sit at exactly 50 ms), range-limited beyond (54 ms at 38 m,
-  # 131 ms at 95.6 m, 170 ms at 125.6 m), as the spec sheet states. This
-  # is the 20 Hz cap; 0 disables it (experiment knob only).
-  max_ping_rate_hz: 20.0
+  # Timing. Every corpus recording (SonarView's) follows period =
+  # max(50 ms, 2R/c + 3 ms): 50 ms at 18.4 m and 20 m, 54 ms at 38 m,
+  # 131 ms at 95.6 m, 170 ms at 125.6 m. The 50 ms is SonarView's
+  # msec_per_ping command, not a device limit -- the device free-runs at
+  # 29 ms (34.5 Hz) at 20 m (our driver, 2026-10-27) -- so it now lives in
+  # acquisition.msec_per_ping and this experiment-only cap is off (0).
+  max_ping_rate_hz: 0.0
 
   # Acoustics
   # Range law, RE-FITTED 2026-09-18 on two altitudes at once -- the lever the
@@ -75,9 +78,15 @@ model:
   # inside ~3 m -- a point target at 3 and 12 m would settle it.
   array_length_m: 0.0
   beam_sidelobe_floor: 0.004    # pattern floor (~-24 dB), real sidelobes
-  specular_strength: 12.0       # near-normal-incidence lobe amplitude,
-                                # sized so the FBR clears a +8 dB detector
-                                # threshold even over dark mud/seagrass
+  specular_strength: 1.75       # near-normal-incidence lobe amplitude.
+                                # 2026-10-30 (field calibration pass 2,
+                                # promoted through its pre-registered gate):
+                                # 12 -> 1.75 = the harbour anchor's FBR crest
+                                # (1.36) raised to the smallest value that
+                                # keeps the FBR above the +8 dB detector
+                                # threshold over seagrass, the darkest seabed,
+                                # at 0.6-22 m on every corpus acquisition
+                                # (calibration.seabed.fbr_envelope, NC #4)
   specular_width_deg: 8.0       # angular width of the specular lobe
   specular_looks: 25            # coherent-return fluctuation: Gamma(L,1/L),
                                 # CV ~0.2 -- the nadir echo is Rician/high-K,
@@ -281,6 +290,30 @@ model:
   # A vertical cliff folds an unbounded ground length into a single bin;
   # the device's dynamic range does not.
   layover_gain_max_db: 20.0
+
+  # --- field-calibration terms (pass 2, 2026-10-23) --------------------
+  # Stated at their OFF values, which reproduce the 2026-10-21 model bit for
+  # bit (smoke [17]: render + encode fixtures). The candidate profile
+  # config/field_candidate_v1_sonar.yaml switches them on;
+  # docs/engineering/calibration_results.md has the evidence.
+  # Seabed / coherent level x (tau / pulse_level_reference_s)^k: measured
+  # within file +0.93 (diffuse) and +1.07 (FBR crest) dB per dB of pulse.
+  pulse_level_exponent: 0.0
+  specular_pulse_exponent: 0.0
+  pulse_level_reference_s: 6.65e-05
+  # The device's reported-level ceiling (measured 67.81 + 0.91*10log10(tau /
+  # 66.5 us) over 26 acquisition groups), as a C1 soft knee in the encoder.
+  # ON since 2026-10-30 (pass-2 bundle B, promoted with specular_strength
+  # 1.75): 67.9 dB = the max_pwr_db pile-up of the beach calibration files.
+  receiver_ceiling: true
+  receiver_ceiling_db: 67.9
+  receiver_ceiling_pulse_exponent: 1.0
+  receiver_ceiling_knee_db: 1.0
+  # Ground-fixed Gamma intensity texture (K-distributed seabed): 0 = off.
+  texture_k_inv_shape: 0.0
+  texture_k_cell_m: 0.5
+  # Per-ping, per-side log-normal level jitter (unit mean), 0 = off.
+  ping_level_jitter_db: 0.0
 
   # Sampling: coarse upper bound only -- the renderer automatically
   # refines the ground step to ~half the slant-bin size so every range

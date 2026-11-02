@@ -1101,12 +1101,24 @@ def _stamp_surface(o: PlacedObject, win: tuple, bump: np.ndarray,
     Every other object is stamped exactly as it always was.
     """
     facet = facet_bump is not None and is_facet_object(o)
+    nested = is_nested(o) and facet_bump is not None
     if facet:
-        facet_bump[win] += bump
+        if nested:
+            np.maximum(facet_bump[win], bump, out=facet_bump[win])
+        else:
+            facet_bump[win] += bump
     else:
         w = np.clip(prof, 0.0, 1.0) * (1.0 - 0.8 * o.burial)
         reflectivity[win] = (1.0 - w) * reflectivity[win] + w * o.reflectivity
-    if transmission is not None and o.transmission > 0.0:
+    if nested:
+        # Contents of a shell keep the CONTAINER's transmission: a 2.5-D
+        # column carries one value, and the shell spans it from the seabed to
+        # its top while the contents fill only the lowest part (the pool's
+        # 0.094 m weight in a 0.55 m box). Letting the contents' opacity win
+        # put a black shadow behind the box on 27 % of the simulated pool
+        # passes where the device shows one on 3 % (pass 3, phase 3).
+        pass
+    elif transmission is not None and o.transmission > 0.0:
         t = o.transmission * (1.0 - o.burial)
         foot = prof > 0.0
         if facet:
@@ -1159,6 +1171,19 @@ def object_roughness_m(o: PlacedObject) -> float:
 #: The solid primitives the facet layer tessellates (``solids.tessellate``).
 FACET_SOLID_KINDS = frozenset({"box", "cylinder", "capsule", "cone",
                                "annulus"})
+
+
+def is_nested(o: PlacedObject) -> bool:
+    """True for an instance whose ``params`` say ``nested: true``: it lies
+    INSIDE an object stamped before it (a weight in a flooded box, pass 3's
+    pool), on the seabed rather than on top of it. Its flat stamp then takes
+    the maximum with the facet bumps already there instead of adding to them,
+    and it leaves the container's transmission in place (one value per 2.5-D
+    column; the shell spans it). Honoured when the
+    container is a facet object (the bump to compare with lives in
+    ``facet_bump``); flat stamps only. Absent -- every world built before
+    2026-11-01 -- objects stack exactly as they always did."""
+    return bool(dict(getattr(o, "params", None) or {}).get("nested", False))
 
 
 def is_facet_object(o: PlacedObject) -> bool:
@@ -1269,7 +1294,13 @@ def rasterize_objects(objects: list[PlacedObject], grid: GridSpec,
             continue
         h_eff = o.effective_height
         bump = h_eff * prof
-        height[j0:j1, i0:i1] += bump
+        if is_nested(o) and facet_bump is not None:
+            # Inside a facet container standing on the same seabed: the
+            # occluder column is the taller of the two, never their sum.
+            fb = facet_bump[j0:j1, i0:i1]
+            height[j0:j1, i0:i1] += np.maximum(bump - fb, 0.0)
+        else:
+            height[j0:j1, i0:i1] += bump
         # Reflectivity blend (weakened with burial), transmission, roughness
         # -- or, for a facet object, only its occluder (``_stamp_surface``).
         _stamp_surface(o, (slice(j0, j1), slice(i0, i1)), bump, prof,
@@ -1288,7 +1319,7 @@ PINNED_FIELDS = ("length", "width", "proud_height", "burial",
 #: Class knobs that describe how an instance is BUILT and that the renderer
 #: reads (NC #17), so a pinned entry carries them. The size knobs
 #: (``length_m`` ...) are already pinned as the sizes they produced.
-_CONSTRUCTION_PARAMS = ("wall_mm", "flooded")
+_CONSTRUCTION_PARAMS = ("wall_mm", "flooded", "nested")
 
 
 def placed_to_explicit(o: PlacedObject) -> dict[str, Any]:

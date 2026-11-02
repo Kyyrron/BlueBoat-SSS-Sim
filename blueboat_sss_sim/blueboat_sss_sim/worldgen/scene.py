@@ -378,8 +378,13 @@ def stamp_objects(objects: list[PlacedObject], grid: GridSpec,
 
 
 def generate_scene(cfg: WorldConfig,
-                   raw_config: Mapping[str, Any] | None = None) -> SceneModel:
+                   raw_config: Mapping[str, Any] | None = None,
+                   terrain_out: list | None = None) -> SceneModel:
     """World config -> fully populated SceneModel (deterministic per seed).
+
+    ``terrain_out`` (a list, optional) receives a copy of the pre-object-stamp
+    height raster -- what the Gazebo visuals stand on (``write_world_sdf``'s
+    ``terrain_height``); no draw changes.
 
     For a world with authored bathymetry (a ``depth:`` section), terrain
     and object placement draw from *separate* RNG streams derived from the
@@ -404,6 +409,8 @@ def generate_scene(cfg: WorldConfig,
         grid, cfg.terrain, materials, rng_terrain, base_height=base)
     objects = place_objects(grid, cfg.objects, materials, rng_objects,
                             height=terrain.height)
+    if terrain_out is not None:
+        terrain_out.append(terrain.height.copy())
     rasters = stamp_objects(objects, grid, terrain.height,
                             terrain.reflectivity)
 

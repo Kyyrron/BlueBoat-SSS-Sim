@@ -57,14 +57,14 @@ parameters:
   - name: model.sensor_depth_m
     unit: m
     class: installation
-    status: judged
-    default: 0.15
+    status: measured
+    default: 0.22
     bounds: [0.0, 0.6]
     tunable: true
     meaning: Transducer face below the STILL WATERLINE when the boat floats level at rest (body-frame lever-arm z, sign flipped).
-    identified_by: tape measure at the dock (face to waterline), cross-checked by FBR slant at nadir against an independent depth
+    identified_by: "pass 3 (2026-11-01): rear-most hull holes 0.030 m above the keel (BlueBoat.dae), waterline 0.216-0.241 m above the keel at 16-22 kg (BlueBoat.stl buoyancy) -> 0.20-0.23 m; the pool (floor 0.90 m, operator) reproduces every run's FBR altitude with 0.22 m, sim - real median 0.000, p10/p90 -0.017/+0.027 m over 36 run-sides (~/calib/pass3/phase2/transducer_mount.json); operator: same holes for every corpus"
     metric: FBR altitude vs independent depth, per session
-    uncertainty: unmeasured; estimate only
+    uncertainty: +-0.03 m (pool datum spread, mass 16-22 kg)
     confounders: [node.base_link_rest_z_m, bathymetry.datum_offset_m]
     experiment: dock measurement of both transducers at rest, loaded as for survey; repeat after every re-mount
     owner: sonar/renderer.py (_sensor_pose); analysis/bathymetry.py (inversion)
@@ -72,13 +72,13 @@ parameters:
     unit: m
     class: installation
     status: judged
-    default: 0.0
+    default: -0.345
     bounds: [-0.6, 0.6]
     tunable: true
-    meaning: Fore/aft transducer offset from base_link (amidships assumed)
-    identified_by: tape measure; along-track position of a surveyed point target on reciprocal headings
-    metric: along-track position error of a known target, reciprocal passes
-    uncertainty: unmeasured
+    meaning: Fore/aft transducer offset from base_link (the hull centre)
+    identified_by: "operator (2026-11-01): brackets on the rear-most hull mounting holes; BlueBoat.dae puts them 0.345 m aft of the hull centre. Data tension: the pool walls under fast yaw give -0.60 m relative to the reported navigation position (FIT, -0.75..-0.45; VALIDATION -0.71), i.e. -0.10..-0.21 m from the centre if the GPS sat 0.10 m behind the bow as stated -- the acoustic centre may sit forward of the bolts, or the EKF reference is not the antenna (unresolved)"
+    metric: along-track position error of a known target, reciprocal passes; wall-edge rms under fast yaw
+    uncertainty: "-0.345 m from the drawing; the pool suggests -0.10..-0.35 m from the centre"
     confounders: [installation.timing_latency_s]
     experiment: reciprocal passes over a surveyed point target at constant speed
     owner: sonar/renderer.py (_sensor_pose)
@@ -202,21 +202,21 @@ parameters:
     uncertainty: simulated slope -11.5 vs -11.28 dB/decade; intercept still +4..7 dB hot
     confounders: [model.specular_strength, model.specular_width_deg, model.beam_tilt_deg]
     experiment: FBR peak at >=5 altitudes, fixed gain
-    owner: sonar/acoustics.py (NC #4 item 5)
+    owner: "sonar/acoustics.py (NC #4 item 5)"
   - name: model.specular_strength
     unit: "1"
     class: device
-    status: joint
-    doc_label: Strength constrained
-    default: 12.0
+    status: estimated
+    doc_label: "Fitted to the FBR crest, bounded by NC #4"
+    default: 1.75
     bounds: [0.0, 60.0]
     tunable: true
     meaning: Strength of the near-normal specular lobe (the FBR downstream tracking locks on)
-    identified_by: reported-peak slope with specular_spreading_exponent
-    metric: FBR peak level and altitude slope
-    uncertainty: peak still +4..7 dB hot (documented residual)
+    identified_by: "detector-located FBR crest of the harbour calibration anchor (1.36, pass 2, 2026-10-30), raised to the NC #4 FBR-envelope bound over seagrass (1.75); was 12, fitted to max_pwr_db"
+    metric: FBR crest bias (calibration.seabed P2) and calibration.seabed.fbr_envelope
+    uncertainty: "crest +-1 dB = [1.0, 2.6]; the beach crest is ceiling-limited, so one site/altitude band identifies it"
     confounders: [model.specular_width_deg, model.specular_spreading_exponent, model.beam_sidelobe_floor]
-    experiment: nadir peak vs altitude over one bottom; keep NC #4 lock gates green
+    experiment: "nadir peak vs altitude over one bottom; keep NC #4 lock gates green"
     owner: sonar/acoustics.py
   - name: model.specular_width_deg
     unit: deg
@@ -226,7 +226,7 @@ parameters:
     bounds: [2.0, 30.0]
     tunable: true
     meaning: RMS-slope width of the near-normal lobe (sand's fitted RMS slope)
-    identified_by: not determined by the corpus; held at the NC #4-gated value
+    identified_by: "not determined by the corpus; held at the NC #4-gated value"
     metric: FBR onset width and peak level vs altitude
     uncertainty: undetermined
     confounders: [model.specular_strength, model.beam_tilt_deg]
@@ -240,7 +240,7 @@ parameters:
     bounds: [1, 200]
     tunable: true
     meaning: Gamma looks of the coherent channel (CV ~0.2; real nadir echo Rician, high K)
-    identified_by: not determined; held at the NC #4-gated value
+    identified_by: "not determined; held at the NC #4-gated value"
     metric: CV of the FBR peak ping to ping on a straight, level line
     uncertainty: undetermined
     confounders: [vehicle heave/roll statistics]
@@ -253,7 +253,7 @@ parameters:
     default: 0.004
     bounds: [0.0, 0.05]
     tunable: true
-    meaning: Floor of the vertical beam weight (~ -24 dB sidelobes); guards the FBR under roll (NC #4 item 1)
+    meaning: "Floor of the vertical beam weight (~ -24 dB sidelobes); guards the FBR under roll (NC #4 item 1)"
     identified_by: judgement (spec-like sidelobe level)
     metric: FBR presence and nadir level under roll
     uncertainty: unmeasured
@@ -364,14 +364,14 @@ parameters:
     unit: Hz
     class: device
     status: measured
-    default: 20.0
-    bounds: [1.0, 50.0]
+    default: 0.0
+    bounds: [0.0, 50.0]
     tunable: false
-    meaning: Ping-rate cap of the device law max(50 ms, 2R/c + 3 ms)
-    identified_by: ping period on seven corpus recordings
+    meaning: Experiment-only ping-rate cap, off (0). The device has none -- it free-runs at 29.0 ms (34.5 Hz) at 20 m; the corpus's 50 ms is SonarView's msec_per_ping command (acquisition.msec_per_ping)
+    identified_by: ping period on seven SonarView corpus recordings + our driver's free-running 2026-10-27 recordings
     metric: ping period vs range
     uncertainty: exact at the measured ranges
-    confounders: []
+    confounders: [acquisition.msec_per_ping]
     experiment: none
     owner: sonar/config.py (ping_period_s)
   - name: model.noise_floor
@@ -644,6 +644,22 @@ parameters:
     experiment: profilometer on the target, or an aspect sweep of the box
     owner: worldgen/materials.py (_ROUGHNESS_M)
     source: {material: pp_shell.roughness_m}
+  - name: material.pe_cement.wall_m
+    unit: m
+    class: environment
+    status: judged
+    default: 6.0e-3
+    tolerance: 1.0e-12
+    bounds: [1.0e-3, 0.02]
+    tunable: false
+    meaning: "Nominal PE skin of the pool's cement-filled weights (RISU #60R); the echo is the mean |R|^2 over 2/3..4/3 of it (4-8 mm), |R| 0.60"
+    identified_by: "inferred from the maker's mass (6.0 kg) and size (228 x 94 mm) with cement 2.0-2.3 g/cm3; not published"
+    metric: weight echo level vs the pool floor at matched geometry (pass 3)
+    uncertainty: "|R| between 0.44 (quarter-wave) and 0.71 (bare concrete): -7.2 to -3.0 dB"
+    confounders: [material.pe_cement.roughness_m]
+    experiment: cut or measure one weight's skin
+    owner: worldgen/materials.py (_ACOUSTIC)
+    source: {material: pe_cement.wall_m}
   - name: model.smooth_lobe_width_deg
     unit: deg
     class: environment
@@ -878,6 +894,20 @@ parameters:
     confounders: []
     experiment: n/a
     owner: sonar/config.py
+  - name: acquisition.msec_per_ping
+    unit: ms
+    class: acquisition
+    status: run_setting
+    default: 50
+    bounds: [0, 1000]
+    tunable: false
+    meaning: Ping interval lower bound, SonarView's command (period = max(msec_per_ping, 2R/c + 3 ms)); 0 = free run
+    identified_by: run setting (SonarView's, 2026-10-27)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/config.py (AcquisitionParams.ping_period_s)
 
   # ------------------------------------------------------------ augmentation
   - name: model.scatterer_seed
@@ -994,3 +1024,149 @@ parameters:
     confounders: []
     experiment: n/a
     owner: sonar/noise.py
+  # --- field-calibration terms (pass 2, 2026-10-23): shipped OFF -----------
+  - name: model.pulse_level_exponent
+    unit: "1"
+    class: device
+    status: undetermined
+    doc_label: Shipped off; corpus within-file 0.93
+    default: 0.0
+    bounds: [0.0, 2.0]
+    tunable: true
+    meaning: Diffuse level x (tau / pulse_level_reference_s)^k (insonified area of a pulse-limited cell)
+    identified_by: "within-file pulse changes at matched side and altitude band: +0.93 dB/dB [0.66, 1.17] (validation-role files; calibration sessions hold one pulse each)"
+    metric: seabed mean-intensity level per acquisition (pulse) group
+    uncertainty: "physics prior 1.0; corpus 0.93 [0.66, 1.17], 41 file/side/band groups"
+    confounders: [model.calibration_db_offset, model.tvg_compensation, model.specular_pulse_exponent]
+    experiment: fixed altitude, one bottom, cycle pulse length (range setting) at fixed gain
+    owner: sonar/acoustics.py (pulse_level_factors)
+  - name: model.specular_pulse_exponent
+    unit: "1"
+    class: device
+    status: undetermined
+    doc_label: Shipped off; corpus FBR crest 1.07
+    default: 0.0
+    bounds: [0.0, 2.0]
+    tunable: true
+    meaning: Coherent level (bottom return, glints, wall face) x (tau / pulse_level_reference_s)^k
+    identified_by: "within-file FBR crest vs pulse: +1.07 dB/dB [0.70, 1.38], 49 groups (validation-role files)"
+    metric: detector-located FBR crest per pulse group
+    uncertainty: "corpus 1.07 [0.70, 1.38]; the ringing does not scale (+0.30 [-0.15, 0.82])"
+    confounders: [model.specular_strength, model.pulse_level_exponent]
+    experiment: as pulse_level_exponent
+    owner: sonar/acoustics.py (pulse_level_factors)
+  - name: model.pulse_level_reference_s
+    unit: s
+    class: model_structure
+    status: structural
+    default: 6.65e-05
+    bounds: [1.0e-05, 1.0e-03]
+    tunable: false
+    meaning: Pulse at which the level constants hold (bath3, 20 m / 600 bins, the 1.5-bin pulse)
+    identified_by: structural
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/acoustics.py (pulse_level_factors)
+  - name: model.receiver_ceiling
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: true
+    tunable: false
+    meaning: Switch for the device's reported-level ceiling (encoder soft knee)
+    identified_by: structural
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/encoder.py (soft_ceiling_db)
+  - name: model.receiver_ceiling_db
+    unit: dB
+    class: device
+    status: measured
+    doc_label: Measured pile-up 67.9 dB
+    default: 67.9
+    bounds: [55.0, 90.0]
+    tunable: true
+    meaning: Reported-level ceiling at pulse_level_reference_s (gain-independent)
+    identified_by: "max_pwr_db pile-up on bath1-3 (66.5 us): 67.9 dB at gains 4-7 (calibration session)"
+    metric: max_pwr_db upper tail per acquisition group
+    uncertainty: "+-0.1 dB at 66.5 us; fit over 26 groups 67.81 +- 0.18 dB"
+    confounders: [model.receiver_ceiling_pulse_exponent]
+    experiment: any long-range pass with strong returns at two pulse lengths
+    owner: sonar/encoder.py (ceiling_at)
+  - name: model.receiver_ceiling_pulse_exponent
+    unit: "1"
+    class: device
+    status: undetermined
+    doc_label: Corpus 0.91 (validation-role files)
+    default: 1.0
+    bounds: [0.0, 2.0]
+    tunable: true
+    meaning: Pulse slope of the ceiling, dB per dB of pulse
+    identified_by: "26 piled acquisition groups, both sites: 0.91, residual sd 0.18 dB (needs files beyond the calibration sessions)"
+    metric: piled max_pwr_db vs 10log10(tau)
+    uncertainty: "0.91 from 26 groups; calibration sessions alone hold one pulse"
+    confounders: [model.receiver_ceiling_db]
+    experiment: as receiver_ceiling_db
+    owner: sonar/encoder.py (ceiling_at)
+  - name: model.receiver_ceiling_knee_db
+    unit: dB
+    class: model_structure
+    status: judged
+    default: 1.0
+    bounds: [0.1, 10.0]
+    tunable: false
+    meaning: Width of the soft knee below the ceiling
+    identified_by: judged (pile-up pings show more bins within 1 dB of the maximum)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/encoder.py (soft_ceiling_db)
+  - name: model.texture_k_inv_shape
+    unit: "1"
+    class: environment
+    status: undetermined
+    doc_label: Shipped off
+    default: 0.0
+    bounds: [0.0, 5.0]
+    tunable: true
+    meaning: 1/nu of a ground-fixed Gamma intensity texture (K-distributed seabed); 0 = Exp(1) speckle only
+    identified_by: "seabed fluctuation statistics (power-minus-dB, per-bin and high-pass std) vs the corpus"
+    metric: power-minus-dB, high-pass std, track/range lag-1
+    uncertainty: not fitted
+    confounders: [model.ping_level_jitter_db, model.texture_k_cell_m]
+    experiment: long straight lines per classified bottom at constant speed
+    owner: sonar/renderer.py (_k_gamma, _texture)
+  - name: model.texture_k_cell_m
+    unit: m
+    class: environment
+    status: undetermined
+    default: 0.5
+    bounds: [0.05, 10.0]
+    tunable: true
+    meaning: Ground correlation cell of the Gamma texture
+    identified_by: track and range correlation beyond the speckle cell
+    metric: lag-10 track correlation
+    uncertainty: not fitted
+    confounders: [model.texture_k_inv_shape]
+    experiment: as texture_k_inv_shape
+    owner: sonar/renderer.py (_k_gamma)
+  - name: model.ping_level_jitter_db
+    unit: dB
+    class: device
+    status: undetermined
+    doc_label: Shipped off
+    default: 0.0
+    bounds: [0.0, 6.0]
+    tunable: true
+    meaning: Per-ping, per-side unit-mean log-normal level factor (motion, AGC, patchiness not otherwise modelled)
+    identified_by: "per-ping level anomaly std beyond speckle averaging (corpus: port/starboard uncorrelated)"
+    metric: per-ping level anomaly std, power-minus-dB
+    uncertainty: not fitted
+    confounders: [model.texture_k_inv_shape]
+    experiment: straight lines with logged attitude
+    owner: sonar/noise.py (apply_ping_noise)

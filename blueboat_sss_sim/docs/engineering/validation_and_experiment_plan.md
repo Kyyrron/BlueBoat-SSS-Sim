@@ -114,3 +114,76 @@ reverse is not true either.
 - **Recordings:** the `.svlog` (sonar), the run bag and poslog (Control),
   and the GCS session; their SHA-256 values computed on the day.
 - **Pass log:** heading, speed and the start and end times of each pass.
+
+## 6. Second-pass runbook (new field data)
+
+Written 2026-10-30 after pass 2 (`calibration_results.md`). Commands run
+from the package source root with `PYTHONPATH=$PWD`; M is the session
+manifest, R the corpus root (`$BLUEBOAT_SSS_CORPUS`), every output under a
+private folder outside R (the tools refuse otherwise, `io_guard`).
+
+1. **Inventory and quality, nothing else.** For every new `.svlog`:
+   `python3 -m blueboat_sss_sim.calibration quality --out OUT/quality F...`.
+   Record acquisition, gain census, ping period per setting, missing /
+   duplicated ping numbers, FBR detection rate and altitude spread. Run **no
+   simulator comparison** yet: a session looked at through a level or crest
+   metric is no longer an untouched hold-out.
+2. **Roles before metrics.** Add the sessions to M with their roles (the
+   operator decides; `validate-manifest --verify-hashes` refuses a recording
+   or a site-day under two roles). Reserve at least one whole session -- a
+   different day, ideally a different site -- as `test`: never fitted,
+   never inspected, scored once against the frozen candidate. Mark sessions
+   whose FBR the detector cannot find (deep water with a near-surface band)
+   `exploratory`.
+3. **Pre-register.** Write the gates (metrics, strata, floors, the
+   promotion rule) and log their hash before any fit. Amend only before a
+   fit, and say so.
+4. **Baseline.** `calibration score --manifest M --root R --out OUT/baseline
+   --mode both --replay attitude --cache OUT/cache` on the shipped profile.
+5. **Fit, calibration sessions only.** `calibration fit ... --param ...
+   --metric level|nadir` (validation sessions refused unless
+   `--allow-reuse "<reason>"`, which is recorded); `calibration scan ...
+   --grid model.X=...` for statistics a least-squares fit cannot use (crest,
+   texture), with the selection rule written down before the scan.
+6. **NC #4 before anything is accepted.** `calibration envelope --profile
+   CANDIDATE.yaml --out OUT/envelope.json` (`calibration.seabed.fbr_envelope`:
+   sand and seagrass, 0.6-22 m, the corpus acquisitions) must show no
+   regression against the shipped profile (exit 0); `test/calibration_fit_test.py`
+   checks the candidate's tracker lock against the device's own (>= 0.55).
+7. **Candidate.** A write-once `blueboat_calibration_artifact/1` (fitted
+   values only; priors and structural switches go in its base profile),
+   composed with `calibration effective-profile` into a self-contained
+   profile.
+8. **Compare** baseline vs candidate on every session: per session, role,
+   acquisition and altitude regime, both LEVEL modes, crest, texture, FBR
+   detection; regressions listed, not averaged away.
+9. **Promote per bundle**, each on the last accepted model, only when its
+   primary metric improves on every calibration and validation session, no
+   session is worse than the floor (0.83 dB), NC #4 holds, and the smoke
+   (both interpreters), GUI smoke, registry check, colcon build and the
+   Gazebo gate are green. Promotion moves the dataclass, `default_sonar.yaml`,
+   every profile that restates the value and the registry together,
+   rebaselines the fixtures deliberately and re-anchors -- never widens --
+   the gates it moves, each with a dated note.
+10. **Score the test sessions once**, report the result whatever it is.
+
+What the next field session should measure, to identify what pass 2 could
+not: the seabed level at >= 3 altitudes >= 5x apart over **one** classified
+bottom with the acquisition cycled (600 / 1200 bins x several pulses) at
+each altitude -- that separates the pulse-level exponent from the site level
+and the altitude law; reciprocal headings; fixed gain; and a few minutes
+with both transducers over the same bottom (the measured ~1-1.5 dB
+port/starboard imbalance).
+
+**After pass 3 (2026-11-02, the pool; `calibration_results.md` Part II).** The runbook above held,
+plus two things a known-geometry site needs. (a) A scene engine: sessions whose forward model is a
+world folder (`regime.forward_model: scene`) are scored ping for ping with
+`calibration/scene_replay.py` at their registered poses, never by the flat-sand engine. (b)
+Installation per corpus: the fore/aft arm is relative to that corpus's navigation fix, so record
+where the GPS antenna sits in every session's notes. The pool confirmed the request above and
+sharpened it. A site of a different material brings its own level, so the level law (pass-2 A)
+stays blocked until **one** bottom is swept in altitude. The recommended next session is a sand
+bottom swept from ~1 to ~8 m depth at the shipped acquisition (20 m / 1200 / 50 ms, plus 10 m
+range), lines in both directions, with the pool's two weights placed on the sand at a surveyed
+point. Add a quay or pontoon seen at two water depths (the wall-tail mechanism) and a dock
+measurement of the transducers' depth.

@@ -5,7 +5,9 @@
 acquisition:
   range_start_mm: 0
   range_length_mm: 20000
-  msec_per_ping: 0          # 0 = free run (device-native: 20 pings/s to 30 m)
+  msec_per_ping: 50         # SonarView's command (2026-10-27): 20 pings/s to
+                            # ~35 m, range-limited beyond. 0 = free run:
+                            # 2R/c + ~2.3 ms, 34.5 Hz at 20 m (measured)
   gain_index: -1            # device auto-gain, the real sss_node.py default.
                             # The simulator has no AGC: -1 resolves to the
                             # calibrated index 4 and reports 4 (the profile's
@@ -19,13 +21,13 @@ acquisition:
                             # (33 mm true range resolution)
 
 model:
-  sensor_depth_m: 0.15
-  mount_x_m: 0.0
+  sensor_depth_m: 0.22   # measured 2026-11-01 (pass 3: hull holes + buoyancy + pool datum)
+  mount_x_m: -0.345     # rear-most hull holes vs base_link (was 0.0)
   mount_y_abs_m: 0.285
   beam_tilt_deg: 20.0
   vertical_aperture_deg: 50.0
   horizontal_aperture_deg: 0.5
-  max_ping_rate_hz: 20.0
+  max_ping_rate_hz: 0.0      # off: no device cap; 50 ms is msec_per_ping
 
   # Range law, RE-FITTED 2026-09-18 on two altitudes at once -- the lever the
   # single-altitude fit never had: bath3 (beach, 1.40 m altitude, 12371 pings)
@@ -54,7 +56,7 @@ model:
   # inside ~3 m -- a point target at 3 and 12 m would settle it.
   array_length_m: 0.0
   beam_sidelobe_floor: 0.004
-  specular_strength: 12.0
+  specular_strength: 1.75     # = default_sonar.yaml (2026-10-30)
   specular_width_deg: 8.0
   specular_looks: 25
   pulse_smearing: true

@@ -27,7 +27,8 @@ pulse_len_percent -- re-read each time pinging is enabled.
 
 These ROS parameters are the node's acquisition interface, exactly as on the
 real node -- names, semantics and (since 2026-09-28) defaults: 20 m, device
-auto-gain, 1200 bins, pulse 0.00125, the device's best range resolution.
+auto-gain, 1200 bins, pulse 0.00125, the device's best range resolution, and
+(since 2026-10-27) SonarView's 50 ms per ping.
 ``sss_sim_launch.py`` still passes all six from the resolved sonar profile, so
 a run's acquisition is traceable to a named file; a profile whose
 ``acquisition:`` block disagrees with the parameters actually in force is
@@ -127,7 +128,7 @@ class SideScanSonarSimNode(Node):
         # and defaults; the launches pass the resolved profile's values) ----
         self.declare_parameter("range_start_mm", 0)
         self.declare_parameter("range_length_mm", 20000)
-        self.declare_parameter("msec_per_ping", 0)
+        self.declare_parameter("msec_per_ping", 50)     # SonarView's interval
         self.declare_parameter("gain_index", -1)
         self.declare_parameter("num_results", 1200)
         self.declare_parameter("pulse_len_percent", 0.00125)
@@ -393,7 +394,8 @@ class SideScanSonarSimNode(Node):
                 specular=rendered.ping.specular,
                 texture=rendered.ping.texture,
                 unoccluded=rendered.ping.unoccluded,
-                ambient=rendered.ping.ambient)
+                ambient=rendered.ping.ambient,
+                speckle_fill=rendered.ping.speckle_fill)
             rendered.ping.power = noisy
             enc = ch.encoder.encode(rendered.ping)  # type: ignore[union-attr]
             self._publish(ch, enc)

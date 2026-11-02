@@ -45,7 +45,8 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
                      specular: np.ndarray | None = None,
                      texture: np.ndarray | None = None,
                      unoccluded: np.ndarray | None = None,
-                     ambient: np.ndarray | None = None) -> np.ndarray:
+                     ambient: np.ndarray | None = None,
+                     speckle_fill: np.ndarray | None = None) -> np.ndarray:
     """Return the noisy linear power vector (does not modify inputs).
 
     Speckle statistics, per component:
@@ -66,13 +67,25 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
       Gamma(``specular_looks``, 1/looks), CV = 1/sqrt(looks) (~0.2 at the
       default 25). This is what makes the real device's first bottom
       return a *stable* feature that bottom-tracking can lock onto
-      ping after ping."""
+      ping after ping.
+
+    ``speckle_fill`` (``Ping.speckle_fill``) marks bins where the texture
+    holds its 1.0 fallback but wall ghosts or the single-bounce band carry
+    energy (behind a quay): they get their own Exp(1) draw, like any diffuse
+    echo. ``ping_level_jitter_db`` > 0 multiplies the echoes (diffuse +
+    coherent) by one unit-mean log-normal factor per call -- per side per
+    ping, as the corpus's uncorrelated port/starboard anomalies say. Both
+    draw from ``rng`` only when active, so a wall-free scene at zero jitter
+    consumes exactly the stream it always did."""
     out = power.astype(np.float64, copy=True)
     if cfg.speckle:
         looks = max(int(cfg.speckle_looks), 1)
         if looks == 1:
             if texture is not None and cfg.coherent_scatterers:
                 out *= texture
+                if speckle_fill is not None and np.any(speckle_fill):
+                    m = np.asarray(speckle_fill, dtype=bool)
+                    out[m] *= rng.exponential(1.0, size=int(m.sum()))
             else:
                 out *= rng.exponential(1.0, size=out.shape)
         else:
@@ -83,6 +96,10 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
             slooks = max(int(cfg.specular_looks), 1)
             spec *= rng.gamma(slooks, 1.0 / slooks, size=spec.shape)
         out += spec
+    sigma_db = float(cfg.ping_level_jitter_db)
+    if sigma_db > 0.0:
+        s = sigma_db * np.log(10.0) / 10.0
+        out *= float(np.exp(s * rng.standard_normal() - 0.5 * s * s))
     # Reverberation floor: a shadow is dark, not empty. What the receiver
     # hears where the main lobe is blocked is the same seabed at the same
     # range through the beam's sidelobes, plus the water volume -- so the

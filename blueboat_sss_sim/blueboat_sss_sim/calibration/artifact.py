@@ -26,6 +26,7 @@ calibration artifact. ROS-free; YAML + the registry only.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import datetime as _dt
 import json
 import re
@@ -192,6 +193,19 @@ def validate_artifact(doc: Mapping[str, Any],
     except ValueError:
         e.append("created must be an ISO date (YYYY-MM-DD...)")
     _walk(doc, "artifact", e)
+    bp = doc.get("base_profile")
+    if bp is not None:
+        if not isinstance(bp, Mapping) or not str(bp.get("name", "")).strip():
+            e.append("base_profile must be a mapping with a non-empty 'name' "
+                     "(and optionally the profile's 'sha256')")
+        elif bp.get("sha256") is not None and not (
+                isinstance(bp["sha256"], str) and len(bp["sha256"]) == 64
+                and all(c in "0123456789abcdef" for c in bp["sha256"])):
+            e.append("base_profile.sha256 must be 64 lowercase hex digits")
+    else:
+        rep.warnings.append("no base_profile: the profile this artifact was "
+                            "fitted on is not recorded, so applying it to "
+                            "another profile cannot be detected")
 
     data = doc.get("data") or {}
     cal = [str(s) for s in (data.get("calibration_sessions") or [])]
@@ -285,13 +299,15 @@ class EffectiveConfig:
     config: Any                         # sonar.config.SonarConfig
     provenance: dict[str, str]          # "model.x" -> layer label
     not_applied: dict[str, str]         # artifact names outside the profile
+    base_profile: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 def effective_config(profile_path: str | Path | None = None,
                      artifact: Mapping[str, Any] | None = None,
                      session_id: str | None = None,
                      run_overrides: Mapping[str, Any] | None = None,
-                     registry: Registry | None = None) -> EffectiveConfig:
+                     registry: Registry | None = None,
+                     allow_base_mismatch: bool = False) -> EffectiveConfig:
     """Compose the model in the documented precedence order (module doc).
 
     Raises :class:`ArtifactError` for an invalid artifact and ``ValueError``
@@ -299,6 +315,14 @@ def effective_config(profile_path: str | Path | None = None,
     parameters that live outside the sonar profile (materials, hull, ...)
     are returned in ``not_applied`` with their owner: this function does
     not pretend to apply them.
+
+    An artifact's ``base_profile`` (name, optional SHA-256) is compared with
+    the profile it is applied to: a mismatch raises :class:`ArtifactError`
+    unless ``allow_base_mismatch`` -- re-applying a calibration to another
+    profile is allowed, but deliberately, and the result records both
+    (``EffectiveConfig.base_profile``). Until 2026-10-23 the block was never
+    read, so a candidate's constants could land on a profile with different
+    model switches without notice.
     """
     from ..sonar.config import (AcquisitionParams, SonarConfig,
                                 SonarModelConfig, find_default_sonar_yaml)
@@ -325,11 +349,27 @@ def effective_config(profile_path: str | Path | None = None,
         setattr(getattr(cfg, p.section), p.key, value)
         prov[name] = label
 
+    base: dict[str, Any] = {}
     if artifact is not None:
         rep = validate_artifact(artifact, reg)
         if not rep.ok:
             raise ArtifactError(rep.errors)
         aid = str(artifact["id"])
+        used_sha = hashlib.sha256(profile_path.read_bytes()).hexdigest()
+        bp = artifact.get("base_profile") or {}
+        base = {"expected": dict(bp), "used": {"name": profile_path.name,
+                                               "sha256": used_sha}}
+        bad = []
+        if bp.get("name") and str(bp["name"]) != profile_path.name:
+            bad.append(f"name {bp['name']!r} != {profile_path.name!r}")
+        if bp.get("sha256") and str(bp["sha256"]) != used_sha:
+            bad.append(f"sha256 {str(bp['sha256'])[:12]}... != {used_sha[:12]}...")
+        base["mismatch"] = bad
+        if bad and not allow_base_mismatch:
+            raise ArtifactError([f"artifact {aid} was fitted on another base "
+                                 f"profile ({'; '.join(bad)}); pass "
+                                 "allow_base_mismatch / --allow-base-mismatch "
+                                 "to re-apply it deliberately"])
         for name, entry in (artifact.get("parameters") or {}).items():
             _set(str(name), entry["value"], f"artifact:{aid}")
         if session_id is not None:
@@ -360,7 +400,7 @@ def effective_config(profile_path: str | Path | None = None,
     # Re-run the dataclass checks (gain ladder) on the composed values.
     cfg.acquisition = AcquisitionParams(**dataclasses.asdict(cfg.acquisition))
     return EffectiveConfig(config=cfg, provenance=prov,
-                           not_applied=not_applied)
+                           not_applied=not_applied, base_profile=base)
 
 
 def write_effective_profile(eff: EffectiveConfig, path: str | Path,
@@ -382,6 +422,7 @@ def write_effective_profile(eff: EffectiveConfig, path: str | Path,
             "from_layer": {k: v for k, v in sorted(eff.provenance.items())
                            if v != "dataclass_default"},
             "not_applied": dict(eff.not_applied),
+            "base_profile": dict(eff.base_profile),
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)

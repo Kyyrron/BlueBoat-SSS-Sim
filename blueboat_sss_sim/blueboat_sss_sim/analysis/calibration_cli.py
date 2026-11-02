@@ -178,7 +178,8 @@ def _simulate_with(bundle: Path, cfg: SonarConfig, n_pings: int, seed: int,
                                           specular=ping.specular,
                                           texture=ping.texture,
                                           unoccluded=ping.unoccluded,
-                                          ambient=ping.ambient)
+                                          ambient=ping.ambient,
+                                          speckle_fill=ping.speckle_fill)
             e = enc.encode(ping)
             out.append(ProfileRecord(
                 side=side, ping_number=e.ping_number,
@@ -218,6 +219,9 @@ def main() -> None:
                          "residual per tilt (constrains the unpublished "
                          "BlueBoat bracket tilt from the corpus; slower)")
     args = ap.parse_args()
+    from ..calibration.io_guard import refuse_inside
+    # CM-7 / NC #10: neither the recording's tree nor the bundle is written to.
+    refuse_inside(args.out, [args.svlog], roots=[args.bundle])
 
     real_profiles = read_profiles(args.svlog, with_power=True)
     sim_profiles = simulate_profiles(Path(args.bundle), args.sim_pings,

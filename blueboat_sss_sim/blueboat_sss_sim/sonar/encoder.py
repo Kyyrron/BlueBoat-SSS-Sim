@@ -98,6 +98,51 @@ class EncodedPing:
     raw_frame: bytes                 # framed Ping-Protocol bytes
 
 
+def ceiling_at(pulse_s: float, cfg: SonarModelConfig) -> float:
+    """The device's reported-level ceiling [dB] for a transmit pulse:
+    ``receiver_ceiling_db + 10 k log10(pulse / pulse_level_reference_s)``.
+
+    MEASURED (2026-10-23): ``max_pwr_db`` piles up at one value per
+    acquisition -- 67.9 dB on the beach at gains 4-7 -- and over 26 piled
+    acquisition groups of the corpus (both sites, both recorders, 600 and
+    1200 bins) that value follows 67.81 + 0.91*10log10(tau / 66.5 us),
+    residual sd 0.18 dB. It does not depend on the gain index."""
+    ratio = max(float(pulse_s), 1e-9) / float(cfg.pulse_level_reference_s)
+    return float(cfg.receiver_ceiling_db
+                 + 10.0 * float(cfg.receiver_ceiling_pulse_exponent)
+                 * np.log10(ratio))
+
+
+#: Slope left above the ceiling. A pure asymptote squeezes every overloaded
+#: bin to within a fraction of a count of full scale, and ties at 65535 break
+#: the device's one-full-scale-bin invariant; at 0.02 two bins 1 dB apart stay
+#: ~19 counts apart (70 dB span) and a 10 dB overload reads +0.2 dB -- the
+#: corpus has gain-4 pings up to 69.4 dB against the 67.9 dB pile-up.
+CEILING_RESIDUAL_SLOPE = 0.02
+
+
+def soft_ceiling_db(db: np.ndarray, ceiling_db: float,
+                    knee_db: float) -> np.ndarray:
+    """A C1 soft ceiling on reported dB: identity up to ``ceiling - knee``;
+    above it, with ``u = x - (ceiling - knee)``,
+    ``(ceiling - knee) + (1 - s) * knee * (1 - exp(-u / knee)) + s * u``
+    (``s`` = :data:`CEILING_RESIDUAL_SLOPE`): strictly increasing, so the
+    per-ping maximum stays a single bin, and every bin below the knee keeps
+    its value bit for bit. Near the top it compresses, as the corpus's
+    piled-up pings show (more bins within 1 dB of the maximum)."""
+    k = max(float(knee_db), 1e-6)
+    s = CEILING_RESIDUAL_SLOPE
+    x = np.asarray(db, dtype=np.float64)
+    start = float(ceiling_db) - k
+    over = x > start
+    if not over.any():
+        return x
+    out = x.copy()
+    u = x[over] - start
+    out[over] = start + (1.0 - s) * k * (1.0 - np.exp(-u / k)) + s * u
+    return out
+
+
 class PingEncoder:
     """Stateful per-side encoder (ping counter + device uptime clock)."""
 
@@ -131,6 +176,13 @@ class PingEncoder:
     @property
     def ping_number(self) -> int:
         return self._ping_number
+
+    @property
+    def _ceiling_db(self) -> float:
+        """The reported-level ceiling at this acquisition's pulse (receiver
+        ceiling on, see :func:`ceiling_at`)."""
+        return ceiling_at(self._acq.pulse_duration_s(self._cfg.max_ping_rate_hz),
+                          self._cfg)
 
     # ------------------------------------------------------------------
     def encode(self, ping: Ping, gain_multiplier: float = 1.0) -> EncodedPing:
@@ -170,6 +222,8 @@ class PingEncoder:
         # exactly as it does on the device.
         power = np.maximum(ping.power * gain_multiplier, 1e-30)
         db = 10.0 * np.log10(power) + cfg.calibration_db_offset + gain_db
+        if cfg.receiver_ceiling:
+            db = soft_ceiling_db(db, self._ceiling_db, cfg.receiver_ceiling_knee_db)
 
         max_db = float(db.max())
         min_db = max(float(db.min()), max_db - cfg.max_span_db)
@@ -177,6 +231,16 @@ class PingEncoder:
         counts = np.rint(
             np.clip((db - min_db) / span, 0.0, 1.0) * 65535.0
         ).astype(np.uint16)
+        # Exactly ONE full-scale bin, as on the device (68948/68948 field
+        # pings, piled-up ones included): a bin that rounds up to 65535
+        # beside the true maximum is reported one count below it. Ties were
+        # vanishingly rare until the receiver ceiling's soft knee compressed
+        # the top (2026-10-30: 0.1 % of Gazebo profiles carried two); a ping
+        # without a tie is unchanged.
+        full = counts == 65535
+        if np.count_nonzero(full) > 1:
+            counts[full] = 65534
+            counts[int(np.argmax(db))] = 65535
         # Both endpoints travel as float32 (the frame's `f` fields, the
         # profile's float32). Rounded independently, a clamped pair could
         # read up to ~4e-6 dB WIDER than max_span_db -- which the device's

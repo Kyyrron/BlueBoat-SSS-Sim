@@ -86,6 +86,7 @@ Not yet registered, but worth adding when they become identifiable:
 | Name | Value | Unit | Class | Status | Tunable | Identified by | Confounders |
 |---|---|---|---|---|---|---|---|
 | `acquisition.gain_index` | -1 | index | acquisition | run_setting | no | run setting | -- |
+| `acquisition.msec_per_ping` | 50 | ms | acquisition | run_setting | no | run setting (SonarView's, 2026-10-27) | -- |
 | `acquisition.num_results` | 1200 | bins | acquisition | run_setting | no | run setting | -- |
 | `acquisition.pulse_len_percent` | 0.00125 | fraction | acquisition | run_setting | no | run setting | -- |
 | `acquisition.range_length_mm` | 20000 | mm | acquisition | run_setting | no | run setting | -- |
@@ -100,19 +101,25 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.beam_sidelobe_floor` | 0.004 | fraction | device | judged | yes | judgement (spec-like sidelobe level) | `model.beam_tilt_deg`, `model.vertical_aperture_deg` |
 | `model.calibration_db_offset` | 81.1 | dB | device | joint | yes | two-altitude fit (bath3 1.40 m + reflectionEvidenceFullharbour 7.33 m), seabed tail past 1.4 x altitude | `model.tvg_compensation`, `model.lambert_exponent`, `model.spreading_exponent` |
 | `model.filter_duration_percent` | 0.0015 | fraction | device | spec | no | real driver setting (Cerulean typical) | `acquisition.pulse_len_percent` |
-| `model.max_ping_rate_hz` | 20.0 | Hz | device | measured | no | ping period on seven corpus recordings | -- |
+| `model.max_ping_rate_hz` | 0.0 | Hz | device | measured | no | ping period on seven SonarView corpus recordings + our driver's free-running 2026-10-27 recordings | `acquisition.msec_per_ping` |
 | `model.max_span_db` | 90.0 | dB | device | measured | no | direct reading of min/max_pwr_db | -- |
 | `model.noise_floor` | 3.39e-09 | linear power (renderer units) | device | measured | yes | far-decile reported dB, re-expressed at the current offset | `model.calibration_db_offset` |
+| `model.ping_level_jitter_db` | 0.0 | dB | device | undetermined | yes | per-ping level anomaly std beyond speckle averaging (corpus: port/starboard uncorrelated) | `model.texture_k_inv_shape` |
+| `model.pulse_level_exponent` | 0.0 | 1 | device | undetermined | yes | within-file pulse changes at matched side and altitude band: +0.93 dB/dB [0.66, 1.17] (validation-role files; calibration sessions hold one pulse each) | `model.calibration_db_offset`, `model.tvg_compensation`, `model.specular_pulse_exponent` |
+| `model.receiver_ceiling_db` | 67.9 | dB | device | measured | yes | max_pwr_db pile-up on bath1-3 (66.5 us): 67.9 dB at gains 4-7 (calibration session) | `model.receiver_ceiling_pulse_exponent` |
+| `model.receiver_ceiling_pulse_exponent` | 1.0 | 1 | device | undetermined | yes | 26 piled acquisition groups, both sites: 0.91, residual sd 0.18 dB (needs files beyond the calibration sessions) | `model.receiver_ceiling_db` |
 | `model.reverberation_db` | 18.0 | dB | device | measured | yes | corpus quay deep shadow 6-12 m behind the face (17-25 dB under the seabed) | environment.wall geometry, `model.noise_floor` |
 | `model.ringing_decay_db_per_m` | 22.0 | dB/m | device | measured | yes | diffDepthCompensation.svlog (55 -> 33 dB over 1 m) | `model.watercolumn_noise` |
 | `model.ringing_level_db` | 55.0 | dB | device | measured | yes | diffDepthCompensation.svlog (one recording); real 54.4 dB at bin 0 vs simulated 51.8 | `model.watercolumn_noise` |
-| `model.specular_looks` | 25 | 1 | device | undetermined | yes | not determined; held at the NC | vehicle heave/roll statistics |
+| `model.specular_looks` | 25 | 1 | device | undetermined | yes | not determined; held at the NC #4-gated value | vehicle heave/roll statistics |
+| `model.specular_pulse_exponent` | 0.0 | 1 | device | undetermined | yes | within-file FBR crest vs pulse: +1.07 dB/dB [0.70, 1.38], 49 groups (validation-role files) | `model.specular_strength`, `model.pulse_level_exponent` |
 | `model.specular_spreading_exponent` | 2.0 | 1 | device | joint | yes | reported-peak altitude law over 19 gain-4 recordings (device 66.60 - 11.28 log10 alt) | `model.specular_strength`, `model.specular_width_deg`, `model.beam_tilt_deg` |
-| `model.specular_strength` | 12.0 | 1 | device | joint | yes | reported-peak slope with specular_spreading_exponent | `model.specular_width_deg`, `model.specular_spreading_exponent`, `model.beam_sidelobe_floor` |
+| `model.specular_strength` | 1.75 | 1 | device | estimated | yes | detector-located FBR crest of the harbour calibration anchor (1.36, pass 2, 2026-10-30), raised to the NC #4 FBR-envelope bound over seagrass (1.75); was 12, fitted to max_pwr_db | `model.specular_width_deg`, `model.specular_spreading_exponent`, `model.beam_sidelobe_floor` |
 | `model.tvg_compensation` | 0.3 | fraction | device | joint | yes | same two-altitude fit; only spreading_exponent*(1-tvg) enters the diffuse curve | `model.lambert_exponent`, `model.spreading_exponent`, `model.calibration_db_offset` |
 | `model.watercolumn_noise` | 4.68e-06 | linear power (renderer units) | device | measured | yes | corpus water-column band, re-expressed at the current offset | `model.ringing_level_db`, `model.calibration_db_offset` |
 | `material.gravel.reflectivity` | 0.7 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
 | `material.mud.reflectivity` | 0.3 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
+| `material.pe_cement.wall_m` | 0.006 | m | environment | judged | no | inferred from the maker's mass (6.0 kg) and size (228 x 94 mm) with cement 2.0-2.3 g/cm3; not published | `material.pe_cement.roughness_m` |
 | `material.pp_shell.roughness_m` | 0.0001 | m | environment | judged | yes | judged from manufacture | `model.smooth_lobe_width_deg` |
 | `material.pp_shell.transmission` | 0.11 | fraction (two-way) | environment | measured | yes | field box shadow, re-measured through the facet renderer within 0.25 dB | `model.reverberation_db` |
 | `material.rocks.reflectivity` | 0.85 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
@@ -122,7 +129,9 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.lambert_exponent` | 1.0 | 1 | environment | joint | yes | two-altitude fit; 0.75 and 1.25 scored worse (RMS 1.29, 0.94 vs 0.92) | `model.tvg_compensation`, `model.calibration_db_offset`, `model.beam_tilt_deg` |
 | `model.sand_lambert_mu_db` | -12.0 | dB | environment | literature | yes | literature; site spread +-5 dB | material reflection coefficients |
 | `model.smooth_lobe_width_deg` | 0.0 | deg | environment | undetermined | yes | undetermined (field box pair carries unknown yaw and burial) | material roughness table |
-| `model.specular_width_deg` | 8.0 | deg | environment | undetermined | yes | not determined by the corpus; held at the NC | `model.specular_strength`, `model.beam_tilt_deg` |
+| `model.specular_width_deg` | 8.0 | deg | environment | undetermined | yes | not determined by the corpus; held at the NC #4-gated value | `model.specular_strength`, `model.beam_tilt_deg` |
+| `model.texture_k_cell_m` | 0.5 | m | environment | undetermined | yes | track and range correlation beyond the speckle cell | `model.texture_k_inv_shape` |
+| `model.texture_k_inv_shape` | 0.0 | 1 | environment | undetermined | yes | seabed fluctuation statistics (power-minus-dB, per-bin and high-pass std) vs the corpus | `model.ping_level_jitter_db`, `model.texture_k_cell_m` |
 | `model.volume_scattering_coeff` | 0.0 | 1 | environment | undetermined | no | undetermined | `model.lambert_exponent`, `model.calibration_db_offset` |
 | `model.wall_diffuse_fraction` | 0.04 | fraction | environment | estimated | yes | set against the corpus far-ghost level | `wall.roughness_m`, `wall.reflectivity` |
 | `model.wall_echo_strength` | 30.0 | 1 | environment | estimated | yes | fullHarbourCleanExample quay (face +22.8/+18.9 dB vs model +21.8) | `model.wall_face_diffuse`, `wall.reflectivity` |
@@ -135,13 +144,16 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.spreading_exponent` | 4.0 | 1 | hardware_fixed | physical | no | physics (not separable from tvg_compensation) | `model.tvg_compensation` |
 | `model.vertical_aperture_deg` | 50.0 | deg | hardware_fixed | spec | no | specification; widening did not improve the fit | `model.beam_tilt_deg` |
 | `model.beam_tilt_deg` | 20.0 | deg | installation | estimated | yes | sss_calibration_report --fit-tilt over one recording (diffDepthCompensation), 5.88 dB RMS minimum of 11 scored tilts | `model.vertical_aperture_deg`, `model.beam_sidelobe_floor`, `model.specular_strength` |
-| `model.mount_x_m` | 0.0 | m | installation | judged | yes | tape measure; along-track position of a surveyed point target on reciprocal headings | `installation.timing_latency_s` |
+| `model.mount_x_m` | -0.345 | m | installation | judged | yes | operator (2026-11-01): brackets on the rear-most hull mounting holes; BlueBoat.dae puts them 0.345 m aft of the hull centre. Data tension: the pool walls under fast yaw give -0.60 m relative to the reported navigation position (FIT, -0.75..-0.45; VALIDATION -0.71), i.e. -0.10..-0.21 m from the centre if the GPS sat 0.10 m behind the bow as stated -- the acoustic centre may sit forward of the bolts, or the EKF reference is not the antenna (unresolved) | `installation.timing_latency_s` |
 | `model.mount_y_abs_m` | 0.285 | m | installation | spec | yes | drawing (570 mm / 2); confirm with a tape measure | -- |
-| `model.sensor_depth_m` | 0.15 | m | installation | judged | yes | tape measure at the dock (face to waterline), cross-checked by FBR slant at nadir against an independent depth | `node.base_link_rest_z_m`, `bathymetry.datum_offset_m` |
+| `model.sensor_depth_m` | 0.22 | m | installation | measured | yes | pass 3 (2026-11-01): rear-most hull holes 0.030 m above the keel (BlueBoat.dae), waterline 0.216-0.241 m above the keel at 16-22 kg (BlueBoat.stl buoyancy) -> 0.20-0.23 m; the pool (floor 0.90 m, operator) reproduces every run's FBR altitude with 0.22 m, sim - real median 0.000, p10/p90 -0.017/+0.027 m over 36 run-sides (~/calib/pass3/phase2/transducer_mount.json); operator: same holes for every corpus | `node.base_link_rest_z_m`, `bathymetry.datum_offset_m` |
 | `node.base_link_rest_z_m` | -0.11078 | m | installation | derived | no | HullBoxes.gazebo_box().equilibrium_z() from the BlueBoat xacro buoyancy box | `model.sensor_depth_m` |
 | `model.alongtrack_beam_lines` | 5 | lines | model_structure | structural | no | structural | -- |
 | `model.image_formation` | energy | enum | model_structure | derived | no | derived, verified to leave the calibration within 0.67 dB | -- |
 | `model.layover_gain_max_db` | 20.0 | dB | model_structure | judged | no | judged (device dynamic range) | -- |
+| `model.pulse_level_reference_s` | 6.65e-05 | s | model_structure | structural | no | structural | -- |
+| `model.receiver_ceiling` | True | 1 | model_structure | structural | no | structural | -- |
+| `model.receiver_ceiling_knee_db` | 1.0 | dB | model_structure | judged | no | judged (pile-up pings show more bins within 1 dB of the maximum) | -- |
 | `model.reverberation_reference` | ambient | enum | model_structure | structural | no | structural | -- |
 | `model.scatterer_cell_m` | 0.01 | m | model_structure | structural | no | structural | -- |
 | `model.speckle_looks` | 1 | 1 | model_structure | structural | no | corpus single-look contrast 5.5-6.7 dB (gate [2g]) | -- |

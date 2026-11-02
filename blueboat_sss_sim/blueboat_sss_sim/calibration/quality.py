@@ -10,7 +10,8 @@ must look at before using the recording:
   device's per-ping normalisation invariants fail; no pings);
 * ``warn``   -- usable only with care (gain walk, mixed acquisitions,
   counter restarts, a frozen autopilot clock, a ping period off the
-  device law, a weak bottom return, one side only, no navigation);
+  device law for one of its settings, missing ping numbers (> 1 %) or
+  duplicated ones, a weak bottom return, one side only, no navigation);
 * ``info``   -- worth knowing (``channel_number`` 255 present, the first
   pings' counter offset between the two devices).
 
@@ -24,6 +25,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 QUALITY_FORMAT = "blueboat_svlog_quality/1"
 #: Ping period off the device law by more than this is flagged [ms].
 PERIOD_TOLERANCE_MS = 5.0
@@ -35,8 +38,76 @@ MIN_FBR_FOUND = 0.9
 INVARIANT_ERROR_BELOW = 0.99
 
 
+#: Minimum consecutive same-setting intervals before a setting's period is judged.
+MIN_PERIOD_INTERVALS = 20
+#: Missing ping numbers above this share of a side's pings is a warning
+#: (any is reported as info).
+GAP_WARN_FRACTION = 0.01
+
+
 def _flag(flags: list, level: str, code: str, msg: str) -> None:
     flags.append({"level": level, "code": code, "message": msg})
+
+
+def acquisition_periods(profiles) -> dict[str, list[dict]]:
+    """Per side and per acquisition setting, the median interval between
+    consecutive pings *of that setting* against the device law.
+
+    The digest's single ``period_ms`` is the median over every interval of
+    the side, judged against the law of the most common setting. On a file
+    that switches range often, the two describe different settings:
+    ``toOptimize-harbourScan`` (8 settings, the most common at 39 m) read
+    50.0 ms against a 55.0 ms law, which is no defect of the device
+    (2026-10-23).
+    """
+    from ..analysis.svlog_compare import device_period_ms
+    out: dict[str, list[dict]] = {}
+    for side in ("port", "starboard"):
+        # File order, which is each device's time order; a timestamp sort
+        # would interleave concatenated files whose device clocks restart.
+        recs = [p for p in profiles if p.side.value == side]
+        by: dict[tuple, list[float]] = {}
+        for a, b in zip(recs, recs[1:]):
+            key = (int(b.length_mm), int(b.start_mm))
+            if (int(a.length_mm), int(a.start_mm)) != key:
+                continue
+            dt = float(b.timestamp_ms - a.timestamp_ms)
+            if 0.0 < dt < 2000.0:
+                by.setdefault(key, []).append(dt)
+        rows = []
+        for (length, start), dts in sorted(by.items()):
+            rows.append({"range_m": round((start + length) / 1000.0, 3),
+                         "intervals": len(dts),
+                         "period_ms": round(float(np.median(dts)), 2),
+                         "law_ms": round(device_period_ms(length, start), 2)})
+        if rows:
+            out[side] = rows
+    return out
+
+
+def counter_census(profiles) -> dict[str, dict]:
+    """Per side, in file order: ping-counter gaps (missing numbers between
+    consecutive pings), exact duplicates, small reorders and restarts.
+
+    A jump back of more than 100 is a restart (the digest's rule) and a
+    jump forward of more than 100 is not counted as missing pings; both
+    sides keep their own counter (CM-6), so nothing here pairs them."""
+    out: dict[str, dict] = {}
+    for side in ("port", "starboard"):
+        pn = np.array([p.ping_number for p in profiles if p.side.value == side],
+                      dtype=np.int64)
+        if pn.size < 2:
+            continue
+        d = np.diff(pn)
+        gaps = d[(d > 1) & (d <= 100)] - 1
+        out[side] = {"pings": int(pn.size),
+                     "missing": int(gaps.sum()),
+                     "gap_events": int(gaps.size),
+                     "max_gap": int(gaps.max()) if gaps.size else 0,
+                     "duplicates": int(np.count_nonzero(d == 0)),
+                     "reordered": int(np.count_nonzero((d < 0) & (d >= -100))),
+                     "restarts": int(np.count_nonzero(d < -100))}
+    return out
 
 
 def svlog_quality(path: str | Path, *, with_hash: bool = False) -> dict[str, Any]:
@@ -52,6 +123,8 @@ def svlog_quality(path: str | Path, *, with_hash: bool = False) -> dict[str, Any
     g.pop("path", None)
     st = read_svlog(p, with_power=True)
     inv = normalisation_invariants(st.profiles)
+    periods = acquisition_periods(st.profiles)
+    census = counter_census(st.profiles)
     flags: list[dict] = []
     sides = g.get("sides") or {}
     if not sides:
@@ -86,12 +159,27 @@ def svlog_quality(path: str | Path, *, with_hash: bool = False) -> dict[str, Any
         if s.get("counter_restarts", 0):
             _flag(flags, "warn", f"{name}_counter_restart",
                   f"{name}: {s['counter_restarts']} ping-counter restart(s)")
-        per, law = s.get("period_ms"), s.get("period_law_ms")
-        if per == per and law == law and abs(per - law) > PERIOD_TOLERANCE_MS:
+        off = [r for r in periods.get(name, ())
+               if r["intervals"] >= MIN_PERIOD_INTERVALS
+               and abs(r["period_ms"] - r["law_ms"]) > PERIOD_TOLERANCE_MS]
+        if off:
             _flag(flags, "warn", f"{name}_period",
-                  f"{name}: ping period {per:.1f} ms vs device law "
-                  f"{law:.1f} ms (mode setting; dropped pings or a "
-                  "simulated clock)")
+                  f"{name}: ping period off the device law for "
+                  + ", ".join(f"{r['range_m']:g} m ({r['period_ms']:.1f} vs "
+                              f"{r['law_ms']:.1f} ms)" for r in off)
+                  + " (dropped pings, a forced interval or a simulated clock)")
+        cc = census.get(name)
+        if cc and cc["missing"]:
+            share = cc["missing"] / max(cc["pings"] + cc["missing"], 1)
+            _flag(flags, "warn" if share > GAP_WARN_FRACTION else "info",
+                  f"{name}_ping_gaps",
+                  f"{name}: {cc['missing']} ping number(s) missing in "
+                  f"{cc['gap_events']} gap(s), largest {cc['max_gap']} "
+                  f"({100 * share:.2f} % of the side's pings)")
+        if cc and cc["duplicates"]:
+            _flag(flags, "warn", f"{name}_duplicate_pings",
+                  f"{name}: {cc['duplicates']} ping(s) repeat the previous "
+                  "ping number (duplicated packets?)")
         if s.get("fbr_found", 1.0) < MIN_FBR_FOUND:
             _flag(flags, "warn", f"{name}_weak_fbr",
                   f"{name}: bottom return found on "
@@ -115,6 +203,7 @@ def svlog_quality(path: str | Path, *, with_hash: bool = False) -> dict[str, Any
     out = {"format": QUALITY_FORMAT, "file": p.name,
            "size_bytes": p.stat().st_size, "digest": g,
            "normalisation_invariants": inv, "flags": flags,
+           "acquisition_periods": periods, "counter_census": census,
            "usable": not any(f["level"] == "error" for f in flags)}
     if with_hash:
         out["sha256"] = sha256_file(p)

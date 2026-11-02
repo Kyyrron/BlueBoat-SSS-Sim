@@ -61,7 +61,7 @@ to the real node; re-read at every enable):
 |---|---|---|
 | `range_start_mm` | 0 | first bin slant range |
 | `range_length_mm` | 20000 | swath slant extent (bin = length/n) |
-| `msec_per_ping` | 0 | 0 = free run: max(50 ms, 2R/c + 3 ms) |
+| `msec_per_ping` | 50 (SonarView's interval, since 2026-10-27) | period = max(this, 2R/c + 3 ms); 0 = free run (34.5 Hz at 20 m on the device) |
 | `gain_index` | -1 (auto; the simulator resolves it to 4) | gain ladder index |
 | `num_results` | 1200 (the device maximum) | bins per ping |
 | `pulse_len_percent` | 0.00125 | pulse = max(44.3 µs, this × 2R/c) |

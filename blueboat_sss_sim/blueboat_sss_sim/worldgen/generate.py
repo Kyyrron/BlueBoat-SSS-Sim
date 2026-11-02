@@ -25,11 +25,16 @@ def generate_world(config_path: str | Path, out_dir: str | Path,
     if seed is not None:
         cfg.seed = int(seed)
         raw.setdefault("world", {})["seed"] = int(seed)
-    scene = generate_scene(cfg, raw_config=raw)
+    # The Gazebo visuals stand on the pre-stamp terrain, not on the objects'
+    # own stamps (2026-11-02); the scene itself is unchanged.
+    terrain_out: list = []
+    scene = generate_scene(cfg, raw_config=raw, terrain_out=terrain_out)
+    terrain = terrain_out[0]
     scene.save(out_dir)
     write_world_sdf(scene, out_dir, plugin_prefix=plugin_prefix,
                     material_overrides=cfg.material_overrides or None,
-                    limits_collision=cfg.limits_collision)
+                    limits_collision=cfg.limits_collision,
+                    terrain_height=terrain)
     return scene
 
 

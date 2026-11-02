@@ -172,6 +172,8 @@ class _Acc:
                                       # with a layover cap only): cov/den is
                                       # how many flat-ground bins folded into
                                       # this one
+    k_num: np.ndarray | None = None   # sum of Gamma-texture x squared cell
+                                      # amplitude per bin (texture_k_inv_shape)
     num_u: np.ndarray | None = None   # the diffuse field WITHOUT the horizon
                                       # cull: what the seabed at this range
                                       # would return if nothing hid it. The
@@ -185,6 +187,21 @@ _K1 = np.uint64(0x9E3779B97F4A7C15)
 _K2 = np.uint64(0xC2B2AE3D27D4EB4F)
 _K3 = np.uint64(0xBF58476D1CE4E5B9)
 _K4 = np.uint64(0x94D049BB133111EB)
+#: Extra salt of the K-texture field (texture_k_inv_shape): a different
+#: stream from the scatterer phases even when the two cell sizes coincide.
+_K_TEXTURE = np.uint64(0xD6E8FEB86659FD93)
+
+
+def _gamma_quantiles(shape: float, n: int = 4096) -> np.ndarray:
+    """``n`` quantiles of Gamma(shape, 1/shape), renormalised to mean 1.
+
+    Built once per renderer from a fixed-seed sample (numpy only: the
+    renderer imports no scipy); sorted mid-quantiles of 2^18 draws, so the
+    lookup is deterministic and identical on numpy 1.26 and 2.x."""
+    draws = np.sort(np.random.default_rng(0x5EED_6A33).gamma(
+        shape, 1.0 / shape, size=1 << 18))
+    q = draws[((np.arange(n) + 0.5) * draws.size / n).astype(np.int64)]
+    return q / q.mean()
 
 
 def _deposit(lo: np.ndarray, hi: np.ndarray, weight: np.ndarray,
@@ -228,6 +245,12 @@ class GeometricRenderer(SonarRenderer):
         self._scene = scene
         self._direct_sensor: Pose3D | None = None
         self._acq = acquisition
+        # The transmit pulse, for the pulse-level terms (acoustics.
+        # pulse_level_factors); both factors are exactly 1.0 by default.
+        self._pulse_s = float(acquisition.pulse_duration_s(
+            model.max_ping_rate_hz))
+        self._pulse_f_d, self._pulse_f_c = acoustics.pulse_level_factors(
+            self._pulse_s, model)
         self._cfg = model
 
         # Ground-line sample step, coupled to the slant-bin size so that
@@ -275,6 +298,14 @@ class GeometricRenderer(SonarRenderer):
             salt = salt * _K4
         self._salt = salt[0]
         self._cell_inv = 1.0 / max(float(model.scatterer_cell_m), 1e-3)
+        # Ground-fixed Gamma intensity texture (K-distributed seabed), off by
+        # default: unit-mean, so it moves no mean level, only the statistics.
+        self._k_lut = None
+        if self._coherent and float(model.texture_k_inv_shape) > 0.0:
+            self._k_lut = _gamma_quantiles(1.0 / float(model.texture_k_inv_shape))
+            self._k_cell_inv = 1.0 / max(float(model.texture_k_cell_m), 1e-2)
+            with np.errstate(over="ignore"):
+                self._k_salt = self._salt ^ _K_TEXTURE
 
         # Along-track (azimuth) beam integration: the 0.5 deg Omniscan beam
         # has a footprint ~ R * theta that a single infinitesimal ground
@@ -354,14 +385,34 @@ class GeometricRenderer(SonarRenderer):
         filt = float(cfg.filter_duration_percent) * n
         return max(int(round(pulse_bins + filt + 1.0)), 1)
 
-    def _line_offsets_for(self, sensor: Pose3D, fwd: float) -> np.ndarray:
-        """Along-track offsets of the azimuth lines for this ping."""
+    def _line_offsets_for(self, sensor: Pose3D, fwd: float,
+                          centre: float = 0.0) -> np.ndarray:
+        """Along-track offsets of the azimuth lines for this ping, snapped
+        to the ground lattice about the beam centre ``centre`` (the pitch
+        shift of the footprint, :meth:`_pitch_centre`; 0 for a level fan)."""
         if not self._coherent or self._n_lines <= 1 or self._line_pitch <= 0:
             return self._line_offsets
         s0 = sensor.x * np.cos(fwd) + sensor.y * np.sin(fwd)
-        base = np.floor(s0 / self._line_pitch) * self._line_pitch - s0
+        base = (np.floor((s0 + centre) / self._line_pitch) * self._line_pitch
+                - s0)
         j = np.arange(self._n_lines) - (self._n_lines - 1) // 2
         return base + j * self._line_pitch
+
+    def _k_gamma(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
+        """Ground-fixed Gamma texture value per sample (hash of its
+        ``texture_k_cell_m`` cell, own salt, quantile lookup)."""
+        ix = np.floor(px * self._k_cell_inv).astype(np.int64)
+        iy = np.floor(py * self._k_cell_inv).astype(np.int64)
+        with np.errstate(over="ignore"):
+            h = ((ix.astype(np.uint64) * _K2) ^ (iy.astype(np.uint64) * _K1)
+                 ^ self._k_salt)
+            h ^= h >> np.uint64(31)
+            h *= _K3
+            h ^= h >> np.uint64(29)
+            h *= _K4
+            h ^= h >> np.uint64(32)
+        idx = (h >> np.uint64(52)).astype(np.int64) % self._k_lut.size
+        return self._k_lut[idx]
 
     def _scatter_phase(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
         """Ground-fixed random phase per sample (hash of its ground cell)."""
@@ -436,7 +487,7 @@ class GeometricRenderer(SonarRenderer):
         grazing = np.arcsin(np.clip(sin_g, 0.0, 1.0))
         rho = np.full_like(r, self._median_rho)
         sr = acoustics.surface_response(rho, sin_g, grazing, r, cfg,
-                                        roll_toward)
+                                        roll_toward, pulse_s=self._pulse_s)
         amb = sr.diffuse * sr.beam * sr.range_diffuse
         if self._energy:
             # The same r/y resolution-cell term the energy formation applies.
@@ -455,10 +506,11 @@ class GeometricRenderer(SonarRenderer):
         # and cannot be recovered from a yaw plus a side sign.
         look = sensor.yaw + side.sign * np.pi / 2.0
         roll_toward = -side.sign * sensor.roll
+        centre = self._pitch_centre(sensor)
         acc, center_geom = self._integrate(
             sensor, look, sensor.yaw, roll_toward, 1.0,
-            self._line_offsets_for(sensor, sensor.yaw), self._n_lines, None,
-            direct=True)
+            self._line_offsets_for(sensor, sensor.yaw, centre), self._n_lines,
+            None, direct=True, centre=centre)
         den = acc.den
         safe = np.maximum(den, 1e-12)
         lit = den > 1e-12
@@ -483,14 +535,17 @@ class GeometricRenderer(SonarRenderer):
             # Wall-face echo: its own mean per bin (a separate denominator,
             # so the face never dilutes the ground mean in the same bins),
             # joined to the coherent channel like the FBR.
-            specular = specular + np.where(
-                acc.den_w > 0.0, acc.num_w / np.maximum(acc.den_w, 1e-12), 0.0)
+            face = np.where(acc.den_w > 0.0,
+                            acc.num_w / np.maximum(acc.den_w, 1e-12), 0.0)
+            if self._pulse_f_c != 1.0:          # a coherent return (pulse term)
+                face = face * self._pulse_f_c
+            specular = specular + face
         if self._ringing is not None:
             specular = specular + self._ringing
 
-        texture = None
+        texture = filled = None
         if acc.re is not None:
-            texture = self._texture(acc)
+            texture, filled = self._texture(acc)
 
         power = self._pulse_smear(power)
         specular = self._pulse_smear(specular)
@@ -513,6 +568,12 @@ class GeometricRenderer(SonarRenderer):
             fac_d, fac_s, _ = self._facets.render(
                 sensor, look, sensor.yaw, roll_toward, center_geom.horizon,
                 center_geom.ground_m, occluded=occluded)
+            if self._pulse_f_d != 1.0 or self._pulse_f_c != 1.0:
+                # Same pulse terms as the raster seabed: the incoherent
+                # residual is area scattering, the Kirchhoff glint a coherent
+                # return (acoustics.pulse_level_factors).
+                fac_d = fac_d * self._pulse_f_d
+                fac_s = fac_s * self._pulse_f_c
             power = power + fac_d
             specular = specular + fac_s
         # The second-bottom-echo ghost images the *direct* response only, so
@@ -526,8 +587,14 @@ class GeometricRenderer(SonarRenderer):
         contacts += self._wall_contacts(side, sensor, center_geom)
         ghost_power, ghost_contacts = self._render_ghosts(
             side, sensor, center_geom.altitude)
+        speckle_fill = None
         if ghost_power is not None:
             power = power + ghost_power
+            if filled is not None:
+                # Ghost / single-bounce energy where the texture holds its
+                # 1.0 fallback (behind a quay): the noise stage speckles it.
+                fill = filled & (ghost_power > 0.0)
+                speckle_fill = fill if fill.any() else None
         contacts += ghost_contacts
 
         ping = Ping(
@@ -543,6 +610,7 @@ class GeometricRenderer(SonarRenderer):
             length_mm=acq.range_length_mm,
             texture=texture,
             out_of_map_from_m=center_geom.out_of_map_m,
+            speckle_fill=speckle_fill,
         )
         return RenderedPing(ping=ping, contacts=contacts)
 
@@ -550,7 +618,7 @@ class GeometricRenderer(SonarRenderer):
     def _integrate(self, origin: Pose3D, look: float, fwd: float,
                    roll_toward: float, depression_sign: float,
                    line_offsets: np.ndarray, n_lines: int,
-                   wall, *, direct: bool = False
+                   wall, *, direct: bool = False, centre: float = 0.0
                    ) -> tuple[_Acc, _PingGeometry]:
         """Integrate the azimuth beam for one source (direct or mirrored).
 
@@ -558,7 +626,10 @@ class GeometricRenderer(SonarRenderer):
         range-dependent azimuth pattern. The centre line (smallest offset)
         provides altitude and ground-truth geometry. ``direct`` selects the
         real transducer's pass: only it carries the coherent scatterer field
-        and the wall face echo / occlusion.
+        and the wall face echo / occlusion. ``centre`` is the along-track
+        position of the beam centre (the pitch shift, :meth:`_pitch_centre`):
+        the lines stay on the ground lattice and their azimuth weights are
+        taken about it.
         """
         n = self._acq.num_results
         z = lambda: np.zeros(n, dtype=np.float64)   # noqa: E731
@@ -570,17 +641,19 @@ class GeometricRenderer(SonarRenderer):
                    num_w=z(), den_w=z(), num_b=z(),
                    den_s=z() if self._energy else None,
                    cov=z() if np.isfinite(self._layover_cap) else None,
+                   k_num=z() if coherent and self._k_lut is not None else None,
                    num_u=z() if direct else None)
         center_geom: _PingGeometry | None = None
         best = np.inf
         for u in line_offsets:
             geom = self._ping_geometry(origin, look, fwd,
                                        along_offset=float(u), direct=direct,
-                                       mirror_wall=None if direct else wall)
-            if abs(float(u)) < best:
-                best, center_geom = abs(float(u)), geom
+                                       mirror_wall=None if direct else wall,
+                                       pitch_centre=centre)
+            if abs(float(u) - centre) < best:
+                best, center_geom = abs(float(u) - centre), geom
             self._shade_into(geom, origin, roll_toward, depression_sign,
-                             float(u), n_lines, wall, acc, direct)
+                             float(u) - centre, n_lines, wall, acc, direct)
         assert center_geom is not None
         return acc, center_geom
 
@@ -616,6 +689,18 @@ class GeometricRenderer(SonarRenderer):
                       z=p.z + float(d[2]),
                       roll=p.roll, pitch=p.pitch, yaw=p.yaw)
 
+    def _pitch_centre(self, sensor: Pose3D) -> float:
+        """Along-track displacement of the beam centre by pitch: the fan
+        plane rotates about the body y axis, so it meets the seabed under
+        the transducer ``h tan(pitch)`` ahead of a level fan (``h`` the
+        transducer's height over the seabed at nadir). Coherent mode only
+        (the lattice it keeps the lines on); 0 for a level fan."""
+        if not self._coherent or sensor.pitch == 0.0:
+            return 0.0
+        z0 = float(self._scene.sample_height(np.array([sensor.x]),
+                                             np.array([sensor.y]))[0])
+        return float((sensor.z - z0) * np.tan(sensor.pitch))
+
     def sensor_pose(self, side: Side, p: Pose3D) -> Pose3D:
         """Public view of the transducer pose a ping at vehicle pose ``p``
         is rendered from (tools and the ground-truth sensor topic)."""
@@ -625,7 +710,8 @@ class GeometricRenderer(SonarRenderer):
     def _ping_geometry(self, sensor: Pose3D, look: float, fwd: float,
                        along_offset: float = 0.0,
                        direct: bool = False,
-                       mirror_wall: Wall | None = None) -> _PingGeometry:
+                       mirror_wall: Wall | None = None,
+                       pitch_centre: float = 0.0) -> _PingGeometry:
         acq = self._acq
         r_max = acq.range_max_m
 
@@ -673,7 +759,15 @@ class GeometricRenderer(SonarRenderer):
             # platform (Cobra, Oppenheim & Jaffe 1992). One refinement pass
             # re-samples the height at the shifted footprint. Zero pitch is
             # bit-identical (tan 0 = 0 adds exactly nothing).
-            shift = (sensor.z - z_k) * np.tan(sensor.pitch)
+            # The part of the shift common to the whole line (the beam
+            # centre's, `pitch_centre`) is carried by the azimuth weights,
+            # not by the samples: the coherent scatterer field is a ground
+            # lattice, and moving every sample off it re-drew the speckle on
+            # each ping -- a 0.4 deg/ping pitch walk took the along-track
+            # lag-1 correlation from 0.76 to 0.24, where the same footprint
+            # displacement made by moving the boat keeps 0.76 (2026-10-30,
+            # smoke [10]). Only the relief residual moves samples now.
+            shift = (sensor.z - z_k) * np.tan(sensor.pitch) - pitch_centre
             px = px + fx * shift
             py = py + fy * shift
             hx, hy = _occ_xy(px, py)
@@ -881,7 +975,8 @@ class GeometricRenderer(SonarRenderer):
         # tracking downstream locks onto.
         sr = acoustics.surface_response(
             g.reflectivity, g.cos_incidence, depression_sign * g.depression,
-            g.slant, cfg, roll_toward_side, roughness_m=g.roughness)
+            g.slant, cfg, roll_toward_side, roughness_m=g.roughness,
+            pulse_s=self._pulse_s)
         bs, spec, w = sr.diffuse, sr.coherent, sr.beam
         rng_resp, rng_resp_c = sr.range_diffuse, sr.range_coherent
 
@@ -1029,6 +1124,10 @@ class GeometricRenderer(SonarRenderer):
                                   minlength=n)
             acc.energy += np.bincount(b_cell, weights=a_cell ** 2,
                                       minlength=n)
+            if acc.k_num is not None:
+                gam = self._k_gamma(g.px[ok][first], g.py[ok][first])
+                acc.k_num += np.bincount(b_cell, weights=gam * a_cell ** 2,
+                                         minlength=n)
             straddle = (g_cell[1:] == g_cell[:-1]) & (b_cell[1:] == b_cell[:-1] + 1)
             if straddle.any():
                 acc.cross += np.bincount(
@@ -1040,8 +1139,10 @@ class GeometricRenderer(SonarRenderer):
                                  along_offset, n_lines, acc)
 
     # ------------------------------------------------------- speckle texture
-    def _texture(self, acc: _Acc) -> np.ndarray:
-        """Unit-mean multiplicative texture from the coherent field.
+    def _texture(self, acc: _Acc) -> tuple[np.ndarray, np.ndarray]:
+        """Unit-mean multiplicative texture from the coherent field, and the
+        mask of bins where it fell back to 1.0 (no lit seabed under the
+        pulse: water column, shadow, the zone behind a quay).
 
         ``g_b = F_b / sqrt(E_b)`` has unit mean square in every lit bin; the
         pulse/receive envelope is convolved on ``g`` with the amplitude
@@ -1063,9 +1164,20 @@ class GeometricRenderer(SonarRenderer):
                       + 2.0 * np.convolve(c, np.ones(w - 1), mode="same")) / w
         else:
             expect = lit.astype(np.float64)
-        return np.where(expect > 1e-9,
-                        (g.real ** 2 + g.imag ** 2) / np.maximum(expect, 1e-9),
-                        1.0)
+        filled = expect <= 1e-9
+        tex = np.where(filled, 1.0,
+                       (g.real ** 2 + g.imag ** 2) / np.maximum(expect, 1e-9))
+        if acc.k_num is not None:
+            # The Gamma texture, energy-weighted over the cells under each
+            # bin and over the pulse envelope (unit mean -> levels unchanged).
+            kn, ke = acc.k_num, e
+            if w > 1:
+                kern = np.ones(w)
+                kn = np.convolve(kn, kern, mode="same")
+                ke = np.convolve(ke, kern, mode="same")
+            tex = np.where(~filled & (ke > 1e-30),
+                           tex * kn / np.maximum(ke, 1e-30), tex)
+        return tex, filled
 
     # ------------------------------------------------------- wall face echo
     def _face_echo_into(self, g: _PingGeometry, origin: Pose3D,
@@ -1257,7 +1369,17 @@ class GeometricRenderer(SonarRenderer):
                 self._n_ghost_lines, src.wall)
             den = acc.den
             safe = np.maximum(den, 1e-12)
-            ghost = np.where(den > 1e-12, (acc.num_d + acc.num_s) / safe, 0.0)
+            # The coherent lobe keeps the per-sample MEAN normalisation, exactly
+            # as on the direct path (`den_s`, §3.1): an image source's aperture
+            # is a Fresnel zone, not a resolution cell. Dividing it by the
+            # analytic diffuse denominator made a ghost's lobe ~x1000 too hot
+            # (pass 4, 2026-11-02: the surface image of a pool ping peaked
+            # 5.45 vs 0.0043 at the image's own nadir). Latent while the
+            # surface mirror is off; a wall ghost rarely holds lobe samples.
+            den_s = acc.den_s if acc.den_s is not None else den
+            ghost = (np.where(den > 1e-12, acc.num_d / safe, 0.0)
+                     + np.where(den_s > 1e-12,
+                                acc.num_s / np.maximum(den_s, 1e-12), 0.0))
             total += src.gain * self._pulse_smear(ghost)
             if src.wall is not None and acc.num_b.any():
                 total += src.gain_single * self._pulse_smear(acc.num_b)

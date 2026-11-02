@@ -29,6 +29,9 @@ _REQUIRED = ("name", "unit", "class", "status", "default", "tunable",
              "confounders", "experiment", "owner")
 _OPTIONAL = ("bounds", "choices", "doc_label", "source", "tolerance")
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+#: A ``key: value`` line whose plain (unquoted) value contains " #".
+_UNQUOTED_HASH = re.compile(r"^\s*-?\s*([A-Za-z_][A-Za-z0-9_]*):[ \t]+"
+                            r"(?![\"'|>\[{])[^#\n]*\S[ \t]+#")
 
 
 def find_registry_yaml() -> Path:
@@ -143,8 +146,18 @@ def load_registry(path: str | Path | None = None) -> Registry:
     naming every problem found (not only the first)."""
     path = Path(path) if path is not None else find_registry_yaml()
     with open(path, "r", encoding="utf-8") as f:
-        doc = yaml.safe_load(f) or {}
+        text = f.read()
+    doc = yaml.safe_load(text) or {}
     errors: list[str] = []
+    # An unquoted " #" inside a plain value starts a YAML comment: the rest of
+    # the line silently vanishes ("held at the NC #4-gated value" was read as
+    # "held at the NC" for five entries until 2026-10-23). Quote such values.
+    for n, line in enumerate(text.splitlines(), 1):
+        m = _UNQUOTED_HASH.match(line)
+        if m:
+            errors.append(f"line {n}: {m.group(1)!r} has an unquoted ' #' -- "
+                          "YAML drops the rest of the line as a comment; "
+                          "quote the value")
     if doc.get("format") != REGISTRY_FORMAT:
         errors.append(f"format must be {REGISTRY_FORMAT!r}, got "
                       f"{doc.get('format')!r}")

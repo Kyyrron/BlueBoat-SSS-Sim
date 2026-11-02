@@ -36,6 +36,18 @@ _SESSION_KEYS = {"id", "role", "site", "date", "group", "regime", "platform",
                  "clock", "recordings", "notes", "quality_flags"}
 _RECORDING_KEYS = {"path", "kind", "sha256", "size_bytes", "purpose",
                    "quality_flags", "exclude", "notes"}
+#: How a session's recordings are rendered for scoring (``regime.forward_model``).
+#: ``flat_sand`` (the default when absent) is the pass-1/2 seabed engine's flat sand
+#: at the stratum altitude; ``scene`` is a session scored against its own world
+#: (pass 3, the pool), which the flat-sand engine must never pick up.
+FORWARD_MODELS = ("flat_sand", "scene")
+
+
+def forward_model(session: Mapping[str, Any]) -> str:
+    """The session's forward model, ``flat_sand`` when the regime does not say."""
+    reg = session.get("regime") or {}
+    fm = reg.get("forward_model") if isinstance(reg, Mapping) else None
+    return str(fm) if fm else "flat_sand"
 
 
 @dataclass
@@ -126,6 +138,9 @@ def validate_manifest(doc: Mapping[str, Any], *, root: str | Path | None = None,
         if not s.get("regime"):
             w.append(f"{where}: no regime labels (altitude band, bottom, "
                      "gain mode, sea state) -- results cannot be stratified")
+        elif forward_model(s) not in FORWARD_MODELS:
+            e.append(f"{where}: regime.forward_model must be one of "
+                     f"{FORWARD_MODELS}")
         recs = s.get("recordings") or []
         if not recs:
             w.append(f"{where}: no recordings")

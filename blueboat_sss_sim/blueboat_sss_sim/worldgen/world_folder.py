@@ -553,7 +553,7 @@ def build_world_folder(state: "BuilderState",
     scene.config_snapshot = _repoint(scene.config_snapshot, str(out), str(final))
     scene.save(out)
     write_world_sdf(scene, out, material_overrides=None,
-                    limits_collision=True)
+                    limits_collision=True, terrain_height=pre_stamp)
     g = scene.grid
     np.savez_compressed(out / "depth.npz", height=pre_stamp,
                         origin_x=g.origin_x, origin_y=g.origin_y,

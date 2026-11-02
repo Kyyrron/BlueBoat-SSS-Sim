@@ -112,10 +112,13 @@ def speckle_db_bias(looks: int | None) -> float:
 # ---------------------------------------------------------------- model
 def flat_floor_model_db(slant_m: np.ndarray, altitude_m: float,
                         cfg: SonarModelConfig, roll_toward_side: float = 0.0,
-                        include_specular: bool = False) -> np.ndarray:
+                        include_specular: bool = False,
+                        pulse_s: float | None = None) -> np.ndarray:
     """Reported dB (calibration gain) of the renderer's per-bin mean for a
     flat floor of reflectivity 1 at ``altitude_m`` -- diffuse only unless
-    ``include_specular``. NaN inside the water column (``slant <= a``)."""
+    ``include_specular``. NaN inside the water column (``slant <= a``).
+    ``pulse_s`` is the recording's transmit pulse, so the pulse-level terms
+    (``acoustics.pulse_level_factors``) invert as they render."""
     r = np.asarray(slant_m, dtype=np.float64)
     a = float(altitude_m)
     with np.errstate(invalid="ignore", divide="ignore"):
@@ -125,7 +128,7 @@ def flat_floor_model_db(slant_m: np.ndarray, altitude_m: float,
         # Same composition the renderer uses (acoustics.surface_response), so
         # the inversion cannot drift from the forward model it inverts.
         sr = acoustics.surface_response(np.ones_like(r), cos_inc, grazing, r,
-                                        cfg, roll_toward_side)
+                                        cfg, roll_toward_side, pulse_s=pulse_s)
         power = sr.diffuse * sr.beam * sr.range_diffuse
         if include_specular:
             # The coherent lobe carries its own spreading law, exactly as the
@@ -151,7 +154,8 @@ def invert_bins(pwr_results: np.ndarray, min_pwr_db: float, max_pwr_db: float,
                 gain_index: int, altitude_m: float, cfg: SonarModelConfig,
                 inv: InversionConfig = InversionConfig(), *,
                 floor_db: float | None = None,
-                roll_toward_side: float = 0.0) -> dict[str, np.ndarray]:
+                roll_toward_side: float = 0.0,
+                pulse_s: float | None = None) -> dict[str, np.ndarray]:
     """One profile -> per-bin arrays: ``i_lin`` (rho-hat, NaN where the bin
     carries nothing), ``weight``, ``grazing_deg``, ``ground_m`` (horizontal
     distance from the transducer), ``db_g4`` (reported dB brought to the
@@ -171,7 +175,7 @@ def invert_bins(pwr_results: np.ndarray, min_pwr_db: float, max_pwr_db: float,
     # S*(0.5+0.5) -- not proportional to rho, hence the exclusion cone
     # below): what leaks past the cone is then a second-order bias.
     model = flat_floor_model_db(r, a, cfg, roll_toward_side,
-                                include_specular=True)
+                                include_specular=True, pulse_s=pulse_s)
     with np.errstate(invalid="ignore", divide="ignore"):
         sin_g = np.where(r > a, a / np.maximum(r, 1e-9), np.nan)
         grazing = np.degrees(np.arcsin(np.clip(sin_g, 0.0, 1.0)))
@@ -224,7 +228,7 @@ def _iter_placed_profiles(path: str | Path, anchor: GeoAnchor,
     """Yield ``(profile, east, north, look_enu, bins)`` for every profile
     that has a GPS position and a fused altitude."""
     from .bathymetry import load_track
-    from .svlog_reader import gps_track
+    from .svlog_reader import gps_track, profile_heading_deg
     s = read_svlog(path, with_power=True)
     track, _ = load_track(path)
     alt_by_ping = {int(k): float(a) for k, a in zip(track.ping_number,
@@ -235,6 +239,9 @@ def _iter_placed_profiles(path: str | Path, anchor: GeoAnchor,
         return
     e_all, n_all = anchor.to_en(lat, lon)
     rolls = _profile_roll(s, s.profiles, idx)
+    # the autopilot's heading, never the ping's own vehicle_heading_deg
+    # (an unreferenced device heading on real recordings, 2026-11-01)
+    heads = profile_heading_deg(s, idx)
     off = track.counter_offset
     for j, i in enumerate(idx):
         p = s.profiles[i]
@@ -242,11 +249,13 @@ def _iter_placed_profiles(path: str | Path, anchor: GeoAnchor,
         alt = alt_by_ping.get(key)
         if alt is None or int(p.gain_index) not in ANALOG_GAIN_TABLE:
             continue
-        look = compass_deg_to_enu_yaw(p.vehicle_heading_deg) + p.side.sign * np.pi / 2.0
+        look = compass_deg_to_enu_yaw(float(heads[j])) + p.side.sign * np.pi / 2.0
         bins = invert_bins(p.pwr_results, p.min_pwr_db, p.max_pwr_db,
                            p.start_mm, p.length_mm, p.num_results,
                            p.gain_index, alt, cfg, inv, floor_db=floor_db,
-                           roll_toward_side=-p.side.sign * float(rolls[j]))
+                           roll_toward_side=-p.side.sign * float(rolls[j]),
+                           pulse_s=(float(p.pulse_duration_sec)
+                                    if p.pulse_duration_sec > 0 else None))
         yield p, float(e_all[j]), float(n_all[j]), float(look), bins
 
 

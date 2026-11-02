@@ -492,9 +492,17 @@ def calibrate_gain(samples: ReliefSamples, soundings: dict | None, *,
     ``trend_length_m``, so the integration's slow drift plays no part):
     least squares through the origin over sounding / sample pairs within
     ``radius_m`` and more than ``gap_ms`` apart, clipped to [lo, hi]. 1.0
-    with a note when fewer than ``min_pairs`` pairs exist."""
+    with a note when fewer than ``min_pairs`` pairs exist.
+
+    ``info["gain_raw"]`` is the unclipped least-squares slope and
+    ``info["clipped"]`` says whether (``"low"``/``"high"``) the returned gain
+    is a bound rather than a fit (2026-10-23: on the beach corpus the raw
+    slope is <= 0 -- the shading relief does not track the tie soundings --
+    and the clip had silently returned 0.1 as if calibrated). The returned
+    value and ``gain_mode`` are unchanged."""
     info: dict[str, Any] = {"gain_pairs": 0, "gain_residual_m": None,
-                            "gain_mode": "default"}
+                            "gain_mode": "default", "gain_raw": None,
+                            "clipped": None}
     if not soundings or len(samples) == 0:
         return 1.0, info
     try:
@@ -530,8 +538,10 @@ def calibrate_gain(samples: ReliefSamples, soundings: dict | None, *,
     if p.size < min_pairs or den < 1e-6:
         info["gain_mode"] = "default (too few tie soundings)"
         return 1.0, info
-    gain = float(np.sum(w * p * m) / den)
-    gain = float(np.clip(gain, lo, hi))
+    raw = float(np.sum(w * p * m) / den)
+    info["gain_raw"] = raw
+    info["clipped"] = "low" if raw < lo else ("high" if raw > hi else None)
+    gain = float(np.clip(raw, lo, hi))
     resid = m - gain * p
     info["gain_residual_m"] = float(np.sqrt(np.sum(w * resid * resid) / np.sum(w)))
     info["gain_mode"] = "calibrated on tie soundings"

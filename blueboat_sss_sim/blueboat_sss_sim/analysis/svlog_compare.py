@@ -405,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-subsets", type=int, default=3,
                     help="columns per file in the markdown table")
     a = ap.parse_args(argv)
+    from ..calibration.io_guard import refuse_inside
+    refuse_inside(a.out, a.svlog)              # CM-7: never write into the field data
     stats = [reduce_file(p, stride=a.stride, min_pings=a.min_pings)
              for p in a.svlog]
     js, md = write_compare(stats, a.out, max_subsets=a.max_subsets)

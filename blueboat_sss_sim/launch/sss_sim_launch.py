@@ -86,13 +86,23 @@ if sl is not None:
 def resolve_sonar_config(world_dir, sonar_config=None) -> str:
     """The sonar profile in force: explicit > the folder's own frozen
     ``sonar.yaml`` (legacy bundles) > the package default. Module scope,
-    launch-free, so the smoke test exercises the same resolution."""
+    launch-free, so the smoke test exercises the same resolution.
+
+    An explicit bare file name that is not a file in the working directory
+    (``sonar_config:=field_candidate_v1_sonar.yaml``) resolves against the
+    package's ``config/`` (2026-10-23; before, it was passed on unresolved
+    and the node failed to open it)."""
     from pathlib import Path
 
     from blueboat_sss_sim.sonar.config import find_default_sonar_yaml
 
     if sonar_config:
-        return str(sonar_config)
+        given = Path(str(sonar_config)).expanduser()
+        if not given.exists() and given.name == str(sonar_config):
+            packaged = Path(find_default_sonar_yaml()).parent / given.name
+            if packaged.exists():
+                return str(packaged)
+        return str(given) if given.exists() else str(sonar_config)
     frozen = Path(world_dir) / "sonar.yaml"
     if frozen.exists():
         return str(frozen)

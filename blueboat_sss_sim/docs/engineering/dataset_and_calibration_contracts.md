@@ -57,6 +57,12 @@ sessions:
 - Paths are relative to the manifest root: no absolute paths, no `..`.
 - A missing file is reported as `unavailable`. It is never invented, and
   it is an error only when `--verify-hashes` needs it.
+- `regime.forward_model` says how a session is rendered for scoring:
+  `flat_sand` (the default when absent: the seabed engine's flat sand at the
+  stratum altitude) or `scene` (scored against the session's own world, as
+  the pool of pass 3 is). Any other value is refused. The flat-sand engine
+  (`calibration.seabed.manifest_recordings`) never selects a `scene`
+  session, so adding one leaves every flat-sand score unchanged (smoke `[16]`).
 
 ## 3. Clock domains
 
