@@ -314,3 +314,58 @@ measure the acoustic centre. The coming environment runs can add a quay or ponto
 depths (the waveguide-tail prediction), a dock measurement of the transducers' depth with the GPS
 antenna position noted, a same-session SonarView recording, and the bottom type at each target.
 
+
+# Part III — pass 4: shallow-water multipath, the painted floor, appearance (2026-11-02)
+
+Private record: `~/calib/pass4/`. It holds:
+- `PLAN.md` with amendments A1–A11;
+- `gates.yaml`, written before every fit, with results and added bundles appended;
+- `RUNBOOK.md`;
+- `report_2026-11-02.md`;
+- per-step reports.
+
+Data roles are pass 3's. FIT is the 10-28 early runs, VAL the 10-27 pair and the line runs. The spent TEST
+runs were **never loaded** (the scorer refuses them). frag_8 (VAL) was inspected in diagnosis, because the
+owner's simulated session is its replay. All new terms are **off by default**: every field score and every
+pool score with the shipped default is bit-identical to pass 3.
+
+## III.1 What changed in the package
+
+| change | kind | default |
+|---|---|---|
+| a wall/surface ghost's coherent lobe normalised per sample (`num_s/den_s`), as on the direct path | defect: the lobe was ×1000 hot; latent while the surface mirror is off | applied; pool and field scores unchanged |
+| `sonar/waveguide.py`: image method, Rayleigh floor, Eckart boundaries | new physics, cited | — |
+| wall image comb `waveguide_comb_enabled` | new physics | off |
+| object image comb `waveguide_facet_comb` (bistatic Kirchhoff) | new physics | off |
+| seabed image comb `seabed_comb_enabled` | new physics | off |
+| non-sand seabed law `seabed_level_db`, `seabed_lambert_exponent`; `seabed_material`, `surface_rms_height_m`, `floor_rms_height_m` | environment | neutral (sand) |
+| receive-window level `receive_window_level` | device hypothesis | off (refuted on the field) |
+| ghost coherent/incoherent split `ghost_share_split` | B1 hypothesis | off (failed its gate) |
+| `config/pool_environment_pass4_sonar.yaml` | generated provisional profile | — |
+
+## III.2 Results by bundle (gates written before each fit)
+
+| bundle | outcome |
+|---|---|
+| **W**: wall comb, zero free parameters | Closed forms pass (`[17]`). FIT beyond 0.5–2 m: −33.9 → +7.3 dB, the tail decaying too slowly. **Fail** |
+| **W2**: + surface/floor RMS from the FIT tail profile | Surface 3e-4 m, floor 1e-5 m; tail rms 1.5 dB. VAL beyond +3.85 [+2.45, +7.87], 3/18 sides > 5 dB. **Fail (strict)**; within 2.4 dB at every offset for 6–14 m faces |
+| **S**: the seabed's own image comb | The level-vs-range shape error shrinks on **every** one of 30 FIT/VAL run-sides (−10…−21 → within ±7 dB). But the pool tracker lock falls ≤ 0.33 under the device on 4 FIT sides: **NC #4 condition fails** |
+| **C**: painted-concrete floor | With S on, the floor is **sand's law at −16.4 dB** (p = 1). The fast-floor perturbation law was rejected by shape, and p = 2 was an artefact of an additive level fit through the receiver ceiling. LEVEL FIT +0.65 [+0.08, +2.71], VAL +0.18 [−0.85, +0.67] (start +10.49 / +10.07); bands within ±1 dB median. **Fail (strict)**: the 10 m run (+2.4, the K step), two FIT sides > 0.8, and the far bands of a few sides |
+| **K**: 10 m vs 20 m receive window | Zero parameters; predicts −2.16 dB; pool FIT 2–8 m within 0.42 dB. **Refuted on the field**: at a fixed pulse, SonarView files show no step (−0.01 dB median over 29 within-file switches vs +0.81 predicted). Discrepancy |
+| **O / point 4 + B2** | Pool candidate: box excess bias −2.0 / −0.4 dB (start −11.7 / −12.5), echo extent 0.50 / 0.86 m (real 0.99 / 0.82), shadow-found 3 % / 7 % (real 6 / 2; start 25 / 19). Primary shadow-zone profile 3.3 / 4.6 dB off (gate 3): **fail narrowly**. B2 (sim only): box vs bare excess −1.1 → −0.6 dB, shadow-found 37 / 59 % → 0 / 10 % |
+| **B1** | Attributed: the wall ghost's first leg (F2, 2026-10-21) multiplies the whole ghost by the object's transmission. The real pool rows also darken beyond the face (VAL median −2.85 dB, 18 % < −6 dB). The coherent/incoherent split moved the sim away from that (−1.94 → −0.79): **fail**, off |
+| **R**: replay | (a) The live node in a Gazebo bag replay renders the same pings as `scene_replay`: 2098 / 2713 exact, the rest explained by the ground-truth pose's 1e-5 rounding (reproduced offline). (b) The "3–4 Hz" is the autopilot's own on-water stream: 30 Hz for ~9 s every 30 s, otherwise 4 Hz. Proposed items for BlueBoat-SSS |
+| **B3** | Stage table on raw dB. The simulator lacks a large-scale component (per-ping level std 0.57 vs 0.9–1.5 dB; 1 m block variance 0.001–0.002 vs 0.004–0.013). Range lags 2–3 are too correlated (5-bin boxcar). The marginal is Rayleigh vs heavier real. Not changed in pass 4; target table recorded |
+
+## III.3 Reading
+
+One mechanism, the shallow-water image comb, explains four pool failures. They are the wall tail, the
+seabed's range shape, the boxed weight's missing echo extent and deficit, and the surplus shadows. It does so
+with physical boundary terms only. The painted floor is then a level offset of the same angular law. None of
+it is promoted: each bundle missed at least one strict condition. The pool values are a **site** property
+(calm water, a hard smooth floor) and ship as `config/pool_environment_pass4_sonar.yaml`, not as defaults. At
+sea, a ruffled surface makes the comb vanish.
+
+**Owner decision needed.** Should a non-sand floor with its own level (painted concrete) be part of v1? Or is
+the v1 level criterion restated for sand sites, with the pool an out-of-scope bottom type? The pool now scores
+LEVEL +0.65 / +0.18 dB with the overlay.

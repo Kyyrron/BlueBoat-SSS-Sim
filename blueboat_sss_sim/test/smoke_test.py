@@ -6837,6 +6837,186 @@ def _section_model_terms() -> None:
           err_p < 0.02 and err_s < 0.02,
           f"max group error {100 * err_p:.2f} % (rendered ping), "
           f"{100 * err_s:.2f} % (floors, b/a 0.1..10)")
+    _waveguide_checks()
+
+
+def _waveguide_checks() -> None:
+    """[17] the shallow-water image comb (pass 4, 2026-11-02): the image
+    method proved against its closed form before any pool comparison."""
+    from blueboat_sss_sim.sonar import waveguide as wg
+    from blueboat_sss_sim.core.types import Wall as _Wq
+    # (1) the incoherent ideal-waveguide image sum (|R| = 1, omni beam)
+    # against its closed form, pi/(2Dr)[coth(pi r/2D) + sinh(pi r/D)/
+    # (cosh(pi r/D) - cos(2 pi z_t/D))]; the partial sums converge as 1/M.
+    errs = [abs(10 * np.log10(wg.ideal_image_sum(r, 0.9, 0.22, 4000)
+                              / wg.ideal_image_sum_closed(r, 0.9, 0.22)))
+            for r in (4.0, 10.0, 20.0)]
+    check("image comb: the incoherent ideal-waveguide image sum equals its "
+          "closed form (coth / sinh-cosh series) within 0.1 dB at r = 4, 10, "
+          "20 m", max(errs) < 0.1,
+          " / ".join(f"{e:.4f}" for e in errs) + " dB at |m| <= 4000")
+    # (2) bounce counts: images 2mD + z_t bounce |m| times off each boundary;
+    # 2mD - z_t once more off the floor (m > 0) or the surface (m <= 0).
+    im = wg.image_set(0.22, 0.9, 6)
+    ok_b = True
+    for d, nf, ns, o in zip(im.depth, im.n_floor, im.n_surface, im.order):
+        m = int(round((d - 0.22) / 1.8)) if np.isclose((d - 0.22) / 1.8 % 1, 0) \
+            or np.isclose((d - 0.22) / 1.8 % 1, 1) else None
+        if m is not None and np.isclose(d, 2 * m * 0.9 + 0.22):
+            ok_b &= (nf, ns) == (abs(m), abs(m))
+        else:
+            m = int(round((d + 0.22) / 1.8))
+            ok_b &= (nf, ns) == ((m, m - 1) if m > 0 else (abs(m), abs(m) + 1))
+    check("image comb: exact bounce counts for both image families "
+          "((|m|, |m|); (m, m-1) / (|m|, |m|+1))", ok_b and
+          im.depth[im.direct] == 0.22, f"{im.depth.size} images")
+    # (3) a fast floor reflects totally below its critical grazing angle
+    # (painted concrete, 66.4 deg) and a sand floor at normal incidence gives
+    # (m n - 1)/(m n + 1) with n the speed ratio.
+    rc = wg.rayleigh_r(np.radians([10.0, 60.0, 90.0]), 2.4, 3700.0 / 1480.0)
+    rs = float(wg.rayleigh_r(np.array([np.pi / 2]), 2.0, 1.15)[0])
+    check("image comb: Rayleigh floor coefficient -- total reflection below "
+          "the critical angle, the impedance ratio at normal incidence",
+          np.allclose(rc[:2], 1.0) and abs(rc[2] - (2.4 * 2.5 - 1) / (2.4 * 2.5 + 1)) < 1e-3
+          and abs(rs - (2.3 - 1) / (2.3 + 1)) < 1e-12,
+          f"concrete |R| {rc.round(3).tolist()}, sand at 90 deg {rs:.4f}")
+    # (4) off = bit-identical; on = a tail behind a quay in shallow water,
+    # nothing in front of the face, and the face line itself untouched.
+    cfg = _cal_config()
+    g = GridSpec(-30.0, -30.0, 0.1, 601, 601)
+    q = _Wq(name="quay", x0=-30.0, y0=8.0, x1=30.0, y1=8.0, top_z=0.2,
+            reflectivity=0.5)
+    sc = SceneModel(grid=g, height=np.full((g.ny, g.nx), -0.9),
+                    reflectivity=np.full((g.ny, g.nx), 0.5),
+                    material_id=np.zeros((g.ny, g.nx), np.uint8),
+                    material_names=["sand"], objects=[], walls=[q], seed=1)
+    pose = Pose3D(0.0, 0.0, cfg.model.sensor_depth_m - 0.22, yaw=0.0)
+
+    def _r(**kw):
+        c = _cal_config()
+        for k_, v_ in kw.items():
+            setattr(c.model, k_, v_)
+        return GeometricRenderer(sc, c.acquisition, c.model).render(
+            Side.PORT, pose, 0.0).ping
+    p_ref = _r()
+    p_off = _r(waveguide_comb_enabled=False, surface_rms_height_m=1e-4,
+               seabed_material="painted_concrete")
+    same = all(np.array_equal(getattr(p_ref, a), getattr(p_off, a))
+               for a in ("power", "specular", "unoccluded"))
+    p_on = _r(waveguide_comb_enabled=True, surface_rms_height_m=1e-4,
+              seabed_material="painted_concrete")
+    bm = cfg.acquisition.bin_size_m
+    rb = (np.arange(cfg.acquisition.num_results) + 0.5) * bm
+    s_face = 8.0 - (cfg.model.mount_y_abs_m)          # port faces +y
+    beyond = (rb > s_face + 0.5) & (rb < s_face + 2.0)
+    front = rb < s_face - 0.2
+    gain_beyond = 10 * np.log10(p_on.power[beyond].mean()
+                                / max(p_off.power[beyond].mean(), 1e-30))
+    check("image comb: off is bit-identical whatever the environment; on, the "
+          "quay gains a tail beyond its face, nothing changes in front of it "
+          "and the steady face line is untouched",
+          same and gain_beyond > 10.0
+          and np.array_equal(p_on.power[front], p_off.power[front])
+          and np.array_equal(p_on.specular, p_off.specular),
+          f"0.5-2 m beyond the face +{gain_beyond:.1f} dB")
+    # (5) the tail lengthens with the water depth's image density: the same
+    # quay in 4 m of water (floor images 8 m apart) keeps much less of it.
+    sc_deep = SceneModel(grid=g, height=np.full((g.ny, g.nx), -4.0),
+                         reflectivity=np.full((g.ny, g.nx), 0.5),
+                         material_id=np.zeros((g.ny, g.nx), np.uint8),
+                         material_names=["sand"], objects=[], walls=[q], seed=1)
+    c = _cal_config()
+    c.model.waveguide_comb_enabled = True
+    c.model.surface_rms_height_m = 1e-4
+    c.model.seabed_material = "painted_concrete"
+    p_deep = GeometricRenderer(sc_deep, c.acquisition, c.model).render(
+        Side.PORT, pose, 0.0).ping
+    c.model.waveguide_comb_enabled = False
+    p_deep0 = GeometricRenderer(sc_deep, c.acquisition, c.model).render(
+        Side.PORT, pose, 0.0).ping
+    t_shallow = 10 * np.log10(p_on.power[beyond].sum() / p_off.power[beyond].sum())
+    t_deep = 10 * np.log10(max(p_deep.power[beyond].sum(), 1e-30)
+                           / max(p_deep0.power[beyond].sum(), 1e-30))
+    check("image comb: deeper water, fewer images in the beam -- the tail "
+          "behind the same quay shrinks", t_deep < t_shallow - 3.0,
+          f"0.5-2 m beyond: +{t_shallow:.1f} dB at 0.9 m depth, "
+          f"+{t_deep:.1f} dB at 4 m")
+    # (6) bistatic Kirchhoff reduces to the monostatic one exactly when the
+    # receiver is the source (the facet comb's direct pair).
+    from blueboat_sss_sim.sonar.facets import po_amplitude, po_bistatic
+    from blueboat_sss_sim.worldgen.solids import Patches as _P
+    rng6 = np.random.default_rng(6)
+    m6 = 40
+    nrm = rng6.normal(size=(m6, 3))
+    nrm /= np.linalg.norm(nrm, axis=1)[:, None]
+    u6 = np.cross(nrm, [0.0, 0.0, 1.0])
+    u6 /= np.maximum(np.linalg.norm(u6, axis=1)[:, None], 1e-9)
+    v6 = np.cross(nrm, u6)
+    pt = _P(centre=rng6.uniform(-1, 1, (m6, 3)) + [8.0, 0.0, -2.0], normal=nrm,
+            u=u6, v=v6, a=np.full(m6, 0.01), b=np.full(m6, 0.012))
+    sen = np.array([0.0, 0.0, -0.22])
+    k6 = 2 * np.pi * 450e3 / 1500.0
+    a_m, r_m, _ = po_amplitude(pt, sen, k6)
+    dvec = pt.centre - sen
+    g6 = dvec / np.linalg.norm(dvec, axis=1)[:, None]
+    a_b, _ = po_bistatic(pt, g6, -g6, 2.0 * r_m, k6)
+    check("image comb: bistatic Kirchhoff with receiver = source is the "
+          "monostatic Kirchhoff amplitude exactly",
+          np.allclose(a_b, a_m, rtol=1e-12, atol=1e-18),
+          f"max |diff| {np.max(np.abs(a_b - a_m)):.2e} over {m6} random patches")
+    # (7) the receive-window gain (bundle K): its two closed forms meet at
+    # T = tau, and it is exactly 1 at the reference acquisition / when off.
+    from blueboat_sss_sim.sonar import acoustics as _ac
+    G = _ac.receive_window_gain
+    tau = 44.3e-6
+    cont = abs(G(tau * (1 - 1e-9), tau) - G(tau * (1 + 1e-9), tau)) < 1e-12
+    c7 = _cal_config()
+    f_off = _ac.receive_window_factor(c7.acquisition, c7.model, tau)
+    c7.model.receive_window_level = True
+    c7.acquisition.range_length_mm = 20000
+    f_ref = _ac.receive_window_factor(c7.acquisition, c7.model, tau)
+    c7.acquisition.range_length_mm = 10000
+    f_10 = _ac.receive_window_factor(c7.acquisition, c7.model, tau)
+    check("receive window: continuous at T = tau, 1 when off and at the "
+          "20 m reference, -2.16 dB at 10 m (the pre-registered prediction)",
+          cont and f_off == 1.0 and abs(f_ref - 1.0) < 1e-12
+          and abs(10 * np.log10(f_10) + 2.16) < 0.01,
+          f"10 m: {10 * np.log10(f_10):+.3f} dB")
+    # (8) the seabed's own image comb (bundle S): off is bit-identical; in
+    # calm 0.9 m water the far seabed gains more than the near (the incident
+    # field spreads ~cylindrically past r ~ D), and under a rough surface
+    # (coherent fraction ~0) it adds next to nothing.
+    flat = SceneModel(grid=g, height=np.full((g.ny, g.nx), -0.9),
+                      reflectivity=np.full((g.ny, g.nx), 0.5),
+                      material_id=np.zeros((g.ny, g.nx), np.uint8),
+                      material_names=["sand"], objects=[], walls=[], seed=1)
+
+    def _rs(**kw):
+        c = _cal_config()
+        for k_, v_ in kw.items():
+            setattr(c.model, k_, v_)
+        return GeometricRenderer(flat, c.acquisition, c.model).render(
+            Side.PORT, pose, 0.0).ping
+    s_ref = _rs()
+    s_off = _rs(seabed_comb_enabled=False, surface_rms_height_m=3e-4,
+                seabed_material="painted_concrete", ghost_share_split=True)
+    s_on = _rs(seabed_comb_enabled=True, surface_rms_height_m=3e-4,
+               seabed_material="painted_concrete")
+    s_rough = _rs(seabed_comb_enabled=True, surface_rms_height_m=0.02)
+    rb8 = (np.arange(cfg.acquisition.num_results) + 0.5) * bm
+    g_near = 10 * np.log10(s_on.power[(rb8 > 1.5) & (rb8 < 3)].sum()
+                           / s_ref.power[(rb8 > 1.5) & (rb8 < 3)].sum())
+    g_far = 10 * np.log10(s_on.power[(rb8 > 10) & (rb8 < 14)].sum()
+                          / s_ref.power[(rb8 > 10) & (rb8 < 14)].sum())
+    g_rough = 10 * np.log10(s_rough.power[(rb8 > 10) & (rb8 < 14)].sum()
+                            / s_ref.power[(rb8 > 10) & (rb8 < 14)].sum())
+    check("seabed comb: off is bit-identical; calm shallow water lifts the "
+          "far seabed more than the near one; a rough surface leaves it",
+          all(np.array_equal(getattr(s_ref, a), getattr(s_off, a))
+              for a in ("power", "specular"))
+          and g_far > g_near + 3.0 and g_rough < 1.0,
+          f"calm: +{g_near:.1f} dB at 1.5-3 m, +{g_far:.1f} dB at 10-14 m; "
+          f"rough surface +{g_rough:.2f} dB at 10-14 m")
 
 
 def _section_object_physics() -> None:

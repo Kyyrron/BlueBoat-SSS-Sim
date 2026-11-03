@@ -1054,3 +1054,90 @@ candidate of the pass (specular 2.5 with the refitted ringing) failed it on
 harbour validation strata at 7–21 m (detection down to 0.00), which is how
 the rule came to exist.
 
+
+## 14. Shallow-water multipath of the echo itself: the image comb (pass 4, 2026-11-02)
+
+Pass 3 measured, on the pool corpus, a wall echo followed by a ~1 m plateau a few dB under its peak,
+growing with the face range and present at normal plan incidence. The simulator was 30–40 dB dark
+there. It also measured a seabed level whose range trend was ~15 dB flatter than the sand law. Pass 4
+traces both to one mechanism. In shallow water with a calm surface and a hard floor, every echo also
+travels the paths that bounce off the surface and the floor (`sonar/waveguide.py`). Every term below
+is **off by default** (bit-identical); smoke `[17]` proves them against closed forms.
+
+**Image method.** Unfolding the water layer of depth `D` across the surface (z = 0) and the floor turns
+every bouncing path into a straight line from an image of the transducer at depth
+`d = 2 m D ± z_t` (Jensen, Kuperman, Porter & Schmidt, *Computational Ocean Acoustics*, 2nd ed.,
+2011, §2.4, doi:10.1007/978-1-4419-8678-8; Allen & Berkley 1979, doi:10.1121/1.382599). Crossing
+`z = kD` is a floor bounce for odd `k`, a surface bounce for even `k`. A scatterer at depth `z_w` and
+horizontal distance `f` is reached from image `i` along `l_i = hypot(f, z_w − d_i)`; the out/back
+pair `(i, j)` arrives at slant `(l_i + l_j)/2`. Proof: the incoherent ideal-waveguide sum
+`Σ 1/(r² + Δ²)` equals its closed form `π/(2Dr)[coth(πr/2D) + sinh(πr/D)/(cosh(πr/D) −
+cos(2πz_t/D))]` (0.0015–0.0077 dB at r = 4–20 m; it converges as 1/M), and the bounce counts are exact.
+
+**Boundaries.** Each bounce keeps its coherent energy:
+- floor: `|R(ψ)|²·C(ψ)`, with `R` the fluid half-space Rayleigh coefficient (Brekhovskikh & Lysanov
+  2003, ch. 2, doi:10.1007/b97388; J&R 2007 ch. 2, doi:10.1007/978-0-387-36945-7). It is total below
+  the critical grazing angle of a fast floor: sand 29.6° (ρ 2.0, c 1.15, J&R Table 5.1), painted
+  concrete 66.4° (2400 kg/m³, 3700 m/s).
+- surface: `|R| = 1`.
+- both: `C = exp(−(2kσ sin ψ)²)`, Eckart 1953 (doi:10.1121/1.1907123), with the boundaries' RMS
+  heights `surface_rms_height_m` and `floor_rms_height_m` (or the floor material's own).
+
+**Beam per path.** `beam_weight` is the two-way pattern, so a leg weighs `√B(dep)`. The departure angle
+is the unfolded line's elevation, flipped once per bounce. (The pass-3 offline comb multiplied two
+two-way patterns, which double-counts the pattern.)
+
+**Walls** (`waveguide_comb_enabled`, `renderer._face_comb_into`). The face's own law, specular lobe
+plus `wall_face_diffuse`, is evaluated bistatically for every image pair except the direct one, which
+`_face_echo_into` keeps:
+- the lobe is taken on the facet tilt `(e_i + e_j)/2` that mirrors one leg into the other;
+- the diffuse part on `(cos_i cos_j)^(p/2)`.
+
+The pairs are put on the direct echo's per-bin-mean scale by the direct sample count of the peak bin,
+so the tail-to-face ratio is the energy ratio. Many independent paths share a bin, so the pairs join
+the speckled diffuse channel. Cost: +10 ms per ping-side with a wall in view.
+
+**Smooth objects** (`waveguide_facet_comb`, `facets._comb_pairs`, `po_bistatic`). There is one
+bistatic Kirchhoff glint per pair: the phase gradient is `k(î − ŝ)` and the obliquity `n̂·(ŝ − î)/2`.
+It reduces to the monostatic amplitude exactly (smoke `[17]`, 2e-18). The patch integral is coherent;
+pairs add in power (the relative phases of the paths fluctuate ping to ping). Cost ~360 ms per
+ping-side with the pool box in view: offline only.
+
+**Seabed** (`seabed_comb_enabled`, `renderer._seabed_comb`). Every seabed sample at ground range `y`
+is lit and heard through the images whose unfolded line reaches it from above. A Lambert-type law is
+separable (`ρ (sin ψ_i sin ψ_j)^(p/2)`), so the pair carries, relative to the direct echo of the same
+ground interval:
+
+`√(B_i B_j)/B_0 · F_i F_j · (sin ψ_i sin ψ_j / sin² ψ_0)^(p/2) · r⁴/(l_i² l_j²) · absorption · TVG(s)/TVG(r)`
+
+and its energy moves to `s = (l_i + l_j)/2`. Past `r ~ D` the incident field in a calm, hard-floored
+layer spreads nearly cylindrically, ~1/(D r), so the far seabed gains far more than the near one
+(smoke: +19.7 dB at 10–14 m, +3 dB at 1.5–3 m in 0.9 m of water). Under a wind-ruffled surface it
+adds nothing (+0.00 dB). Limits: flat-floor geometry about nadir; image paths share the direct
+visibility; diffuse channel only (the FBR is not imaged).
+
+**Non-sand seabed law** (`seabed_level_db`, `seabed_lambert_exponent`; bundle C). These are global,
+per-run overrides of the diffuse law `ρ cos^p θ` for a seabed that is not the calibrated sand. The
+neutral defaults reproduce sand exactly. The small-roughness perturbation law of a fast fluid floor
+(J&R ch. 13, eqs. 13.9/13.21, power-law spectrum 6.8) was tested first and **rejected by shape**: it
+steepens the far-range fall where the pool needs it flattened (residual 11 dB rms).
+
+**Receive window** (`receive_window_level`, `acoustics.receive_window_factor`; bundle K).
+`G(T, τ) = T(1 − T/3τ)` for `T ≤ τ`, `τ − τ²/3T` beyond, with `T = filter_duration_percent·2R/c`:
+the unit-energy window on an echo correlated over the pulse. Zero parameters. It predicts the pool's
+10 m vs 20 m step (−2.16 vs −1.7…−2.4 dB measured, our driver). It is **refuted on the field**: at a
+fixed pulse, SonarView recordings show no step (−0.01 dB median vs +0.81 predicted). Off; a
+discrepancy.
+
+**Ghost shares** (`ghost_share_split`; B1). The coherent C² share keeps the first leg's ray occlusion;
+the incoherent share takes the face's lit fraction instead. It **failed its gate**: real pool rows
+with the box on the boat→wall line darken beyond the face (VAL median −2.85 dB; 18 % of passes below
+−6 dB), and the split moved the simulator away from that. Off.
+
+**What the pool says** (FIT-identified, VAL-checked; a pool environment overlay, never a default):
+- surface RMS 3.0e-4 m and floor RMS 1e-5 m: the wall tail at 1.5 dB rms;
+- the seabed comb on;
+- painted concrete with `p = 2.0` (Lambert proper) at −11.5 dB re sand.
+
+Numbers, gates and verdicts: `docs/engineering/calibration_results.md` Part III. The terms and
+assumptions this does not cover are in `docs/engineering/raycast_handoff_from_pass4.md`.

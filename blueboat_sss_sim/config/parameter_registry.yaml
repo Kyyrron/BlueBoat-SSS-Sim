@@ -1170,3 +1170,300 @@ parameters:
     confounders: [model.texture_k_inv_shape]
     experiment: straight lines with logged attitude
     owner: sonar/noise.py (apply_ping_noise)
+  # ------------------------------------------------- pass 4 (2026-11-02): shallow-water image comb
+  - name: model.waveguide_comb_enabled
+    unit: bool
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "Wall echo's shallow-water image comb: the face law for every out/back pair of the transducer's surface/floor images (Jensen et al. 2011 sec. 2.4, doi:10.1007/978-1-4419-8678-8); off = bit-identical"
+    identified_by: "pass 4 W/W2: closed form of the incoherent ideal-waveguide image sum (smoke [17]); pool wall tail FIT+VAL (~/calib/pass4/step4)"
+    metric: wall beyond 0.5-2 m / 2-5 m contrast and the face-normalised tail profile
+    uncertainty: "pool VAL beyond 0.5-2 m bias +3.9 [+2.5, +7.9] dB with the pool environment (from -30.5); gate (<= 5 dB on every side) failed on 3/18"
+    confounders: [model.surface_rms_height_m, model.floor_rms_height_m, model.wall_face_diffuse]
+    experiment: a quay at two water depths (fewer images in deeper water)
+    owner: sonar/renderer.py (_face_comb_into), sonar/waveguide.py
+  - name: model.waveguide_max_order
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: 30
+    bounds: [0, 200]
+    tunable: false
+    meaning: "|m| cap of the images 2mD +- z_t (the beam and the boundaries' coherent fractions limit the order before it)"
+    identified_by: numerical setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/waveguide.py
+  - name: model.waveguide_rel_cut
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: 1.0e-4
+    bounds: [0.0, 0.1]
+    tunable: false
+    meaning: images whose best leg weight (one-way beam x bounces / l^2) is under this fraction of the strongest are dropped
+    identified_by: numerical setting (cost)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py (_face_comb_into)
+  - name: model.waveguide_face_step_m
+    unit: m
+    class: model_structure
+    status: structural
+    default: 0.01
+    bounds: [0.001, 0.1]
+    tunable: false
+    meaning: face sampling of the comb's image pairs
+    identified_by: numerical setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py (_face_comb_into)
+  - name: model.waveguide_facet_comb
+    unit: bool
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: the same comb for smooth (facet) objects -- a bistatic Kirchhoff glint per image pair, pairs added in power (costly)
+    identified_by: "pass 4: pool box echo extent 0.10 -> 0.77 m (real 1.11), excess 16.8 -> 28.4 dB (real 22.3) on 12 FIT passes"
+    metric: object echo excess / extent / shadow zone
+    uncertainty: "~360 ms per ping-side with the box in view: over the 25 ms live budget"
+    confounders: [model.surface_rms_height_m, model.floor_rms_height_m]
+    experiment: the weights on a sand bottom (roadmap 1.2)
+    owner: sonar/facets.py (_comb_pairs, po_bistatic)
+  - name: model.waveguide_facet_max_order
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: 2
+    bounds: [0, 20]
+    tunable: false
+    meaning: "|m| cap of the image pairs for smooth objects"
+    identified_by: numerical setting (cost)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/facets.py
+  - name: model.surface_rms_height_m
+    unit: m
+    class: environment
+    status: judged
+    default: 0.02
+    bounds: [0.0, 0.1]
+    tunable: true
+    meaning: "RMS height of the water surface; each surface bounce of an image path keeps exp(-(2 k sigma sin psi)^2) (Eckart 1953, doi:10.1121/1.1907123)"
+    identified_by: "default: judged wind-ruffled open water (coherent fraction ~0 at comb angles: the comb is ~a no-op at sea). Pool environment overlay: 3.0e-4 m, FIT-identified on the wall tail profile (pass 4 W2 grid, rms 1.5 dB); 1e-3 m already removes the tail"
+    metric: wall tail decay with offset beyond the face
+    uncertainty: "pool 3e-4 between grid points 1e-4 (too long a tail) and 1e-3 (none); boat wake not modelled per ping"
+    confounders: [model.floor_rms_height_m]
+    experiment: a quay at two water depths; a wave-gauge / still-water observation during the run
+    owner: sonar/waveguide.py (eckart_c); sonar/renderer.py; sonar/facets.py
+  - name: model.seabed_material
+    unit: enum
+    class: environment
+    status: structural
+    default: sand
+    choices: [sand, painted_concrete]
+    tunable: false
+    meaning: "the run's seabed material for the comb's floor bounce (Rayleigh fluid half-space + Eckart): sand (J&R 2007 Table 5.1 medium sand, rho 2.0, c 1.15) or painted concrete ([K] 2400 kg/m3, 3700 m/s); global per run"
+    identified_by: structural (the pool overlay sets painted_concrete)
+    metric: n/a
+    uncertainty: "fluid model for an elastic concrete floor (shear ignored)"
+    confounders: []
+    experiment: n/a
+    owner: sonar/waveguide.py (SEABED_BOUNDARY)
+  - name: model.floor_rms_height_m
+    unit: m
+    class: environment
+    status: estimated
+    default: -1.0
+    bounds: [-1.0, 0.05]
+    tunable: true
+    meaning: "the floor's RMS height for the comb's Eckart fraction, overriding the material's own (-1 = the material's: sand 0.01, painted concrete 1e-4)"
+    identified_by: "pool overlay 1.0e-5 m (FIT W2 grid, at the lower literature bound: smooth at lambda)"
+    metric: wall tail decay
+    uncertainty: "weakly identified: 1e-4 gives tail rms 2.0 vs 1.5 dB"
+    confounders: [model.surface_rms_height_m]
+    experiment: a profilometer trace of the pool floor
+    owner: sonar/waveguide.py (floor_boundary)
+  - name: model.seabed_comb_enabled
+    unit: bool
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "the seabed's own image comb (bundle S): every seabed sample also lit and heard through the surface/floor images, Lambert-separable bistatic law, pairs at their mean path"
+    identified_by: "pass 4: turns the pool's 15 dB range-shape error into a near-flat level offset (FIT, expected mode)"
+    metric: level by slant band
+    uncertainty: "flat-floor geometry about nadir; image paths share the direct visibility; diffuse channel only (no FBR images)"
+    confounders: [model.surface_rms_height_m, model.seabed_level_db]
+    experiment: the sand altitude sweep under a calm surface vs a ruffled one
+    owner: sonar/renderer.py (_seabed_comb)
+  - name: model.seabed_comb_max_order
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: 30
+    bounds: [0, 200]
+    tunable: false
+    meaning: "|m| cap of the seabed comb's images"
+    identified_by: numerical setting
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/renderer.py (_seabed_comb)
+  - name: model.seabed_level_db
+    unit: dB
+    class: environment
+    status: estimated
+    default: 0.0
+    bounds: [-30.0, 10.0]
+    tunable: true
+    meaning: "a non-sand seabed's diffuse level relative to the calibrated sand (0 = sand); global per run (bundle C)"
+    identified_by: "pool painted concrete: a site nuisance estimated on FIT (pass 4 step 7); confounded with calibration_db_offset by construction"
+    metric: seabed LEVEL and level by slant band
+    uncertainty: see ~/calib/pass4/step7
+    confounders: [model.calibration_db_offset, model.seabed_lambert_exponent]
+    experiment: a sand and a concrete floor at one altitude in one session
+    owner: sonar/acoustics.py (surface_response)
+  - name: model.seabed_lambert_exponent
+    unit: "1"
+    class: environment
+    status: estimated
+    default: -1.0
+    bounds: [-1.0, 2.0]
+    tunable: true
+    meaning: "a non-sand seabed's exponent p in rho cos^p(theta) (-1 = lambert_exponent); Lambert family 1 (Lommel-Seeliger-like) .. 2 (Lambert), J&R 2007 sec. 12.1, Mackenzie 1961"
+    identified_by: "pool painted concrete on FIT (pass 4 step 7)"
+    metric: level by slant band
+    uncertainty: see ~/calib/pass4/step7
+    confounders: [model.seabed_level_db, model.seabed_comb_enabled]
+    experiment: a concrete floor at two altitudes
+    owner: sonar/acoustics.py (seabed_exponent)
+  - name: model.ghost_share_split
+    unit: bool
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "B1 (pass 4): a wall ghost = its coherent mirror share C^2 (first leg ray-occluded) + its incoherent share (first-leg facet objects not ray-occluding, weighted by the face's lit share); only when the scene has facet objects"
+    identified_by: "DB1: the ghost's first-leg occlusion painted object shadows beyond the quay face at the full shell transmission (-9.6 dB) although C ~ 0 at a 3 mm wall"
+    metric: beyond-face delta in object rows vs range-matched references (pool VAL)
+    uncertainty: raster (rough) objects still ray-occlude the first leg (no object-free terrain raster)
+    confounders: []
+    experiment: an opaque object in front of a quay, passed parallel
+    owner: sonar/renderer.py (_render_ghosts, _ping_geometry)
+  - name: model.receive_window_level
+    unit: bool
+    class: device
+    status: undetermined
+    doc_label: Shipped off; pool 10 m vs 20 m -2.1 dB, refuted on the field (pass 4)
+    default: false
+    tunable: false
+    meaning: "level x G(T, tau)/G(T_ref, tau_ref), T = filter_duration_percent 2R/c, G the unit-energy window on a triangle-correlated echo (zero parameters)"
+    identified_by: "pool FIT (our driver): predicts -2.16 vs measured -1.7..-2.4 dB in 2-8 m; field VAL (SonarView files): measured step -0.01 dB median vs +0.81 predicted -> refuted there"
+    metric: within-file level step at a fixed pulse
+    uncertainty: "recorder-dependent? filter_duration_percent is not on the wire"
+    confounders: [model.pulse_level_exponent, model.calibration_db_offset]
+    experiment: one session, 10 m and 20 m, our driver AND SonarView, one bottom
+    owner: sonar/acoustics.py (receive_window_factor)
+  - name: model.receive_window_reference_s
+    unit: s
+    class: device
+    status: derived
+    default: 4.0e-5
+    tolerance: 1.0e-12
+    bounds: [1.0e-6, 1.0e-3]
+    tunable: false
+    meaning: "receive window of the reference acquisition: 0.0015 x 2 x 20 m / 1500 m/s"
+    identified_by: the comparison acquisition (20 m / 1200)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/acoustics.py
+  - name: model.receive_window_reference_pulse_s
+    unit: s
+    class: device
+    status: derived
+    default: 4.43e-5
+    tolerance: 1.0e-12
+    bounds: [1.0e-6, 1.0e-3]
+    tunable: false
+    meaning: the reference acquisition's pulse (the 44.3 us floor)
+    identified_by: measured pulse law (sonar_model.md section 5)
+    metric: n/a
+    uncertainty: n/a
+    confounders: []
+    experiment: n/a
+    owner: sonar/acoustics.py
+  - name: waveguide.sand_density_ratio
+    unit: "1"
+    class: environment
+    status: literature
+    default: 2.0
+    bounds: [1.5, 2.3]
+    tunable: false
+    meaning: sand / water density ratio for the comb's floor reflection
+    identified_by: "J&R 2007 Table 5.1 medium sand (SAX99 rho 2.066 g/cm3 vs 1.024), doi:10.1007/978-0-387-36945-7"
+    metric: n/a
+    uncertainty: "medium sands 1.98-2.11"
+    confounders: [waveguide.sand_speed_ratio]
+    experiment: n/a
+    owner: sonar/waveguide.py
+    source: {python: "blueboat_sss_sim.sonar.waveguide:SAND_DENSITY_RATIO"}
+  - name: waveguide.sand_speed_ratio
+    unit: "1"
+    class: environment
+    status: literature
+    default: 1.15
+    bounds: [1.05, 1.25]
+    tunable: false
+    meaning: sand / water sound-speed ratio (critical grazing 29.6 deg)
+    identified_by: "J&R 2007 Table 5.1 medium sand (Vp ratio 1.13-1.16)"
+    metric: n/a
+    uncertainty: "1.13-1.16 medium sand"
+    confounders: [waveguide.sand_density_ratio]
+    experiment: n/a
+    owner: sonar/waveguide.py
+    source: {python: "blueboat_sss_sim.sonar.waveguide:SAND_SPEED_RATIO"}
+  - name: waveguide.sand_rms_height_m
+    unit: m
+    class: environment
+    status: judged
+    default: 0.01
+    bounds: [0.002, 0.03]
+    tunable: false
+    meaning: sand RMS height at the cm scale, Eckart fraction of a floor bounce
+    identified_by: "J&R 2007 ch. 4 roughness spectra (cm-scale relief of sand); not measured here"
+    metric: n/a
+    uncertainty: site-dependent
+    confounders: []
+    experiment: a stereo-photo / laser profile of the survey floor
+    owner: sonar/waveguide.py
+    source: {python: "blueboat_sss_sim.sonar.waveguide:SAND_RMS_HEIGHT_M"}
+  - name: waveguide.painted_concrete_rms_height_m
+    unit: m
+    class: environment
+    status: judged
+    default: 1.0e-4
+    bounds: [1.0e-5, 5.0e-4]
+    tunable: false
+    meaning: painted/trowelled concrete RMS height at lambda = 3.3 mm
+    identified_by: "micro-texture Ra 1-5 um by stylus (Courard, Garbacz & Gorka, ICPIC 2004); trowel waviness sub-mm; pool W2 FIT prefers the lower bound"
+    metric: wall tail decay (pool)
+    uncertainty: "1e-5 .. 5e-4"
+    confounders: [model.surface_rms_height_m]
+    experiment: a profilometer trace of the pool floor
+    owner: sonar/waveguide.py
+    source: {python: "blueboat_sss_sim.sonar.waveguide:PAINTED_CONCRETE_RMS_HEIGHT_M"}

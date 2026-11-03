@@ -89,6 +89,20 @@ every fitted change must pass. Results and the promotion record:
 `docs/engineering/calibration_results.md`; second-pass runbook:
 `validation_and_experiment_plan.md` §6.
 
+**Shallow-water multipath (pass 4, 2026-11-02):** `sonar/waveguide.py` adds the image comb. It
+images the transducer in the surface and the floor and evaluates the echo for every out/back image
+pair, with Rayleigh floor and Eckart boundary coherence. There are three terms:
+- the wall echo, `waveguide_comb_enabled`;
+- smooth objects, `waveguide_facet_comb`;
+- the seabed itself, `seabed_comb_enabled`.
+
+Each term, and the non-sand seabed law (`seabed_level_db`), is **off / neutral by default**, which is
+bit-identical. They are proved against closed forms in smoke `[17]`; `docs/sonar_model.md` §14 has the
+physics. The pool's values (a calm surface 3e-4 m, a painted floor −16.4 dB re sand) are a **site**
+overlay, `config/pool_environment_pass4_sonar.yaml`. It is generated, never hand-edited, never a
+field profile: it fails the NC #4 envelope on 11 of 82 field cases. Pass-4 record:
+`docs/engineering/calibration_results.md` Part III, `~/calib/pass4/`.
+
 **Extension seams:** `SonarRenderer` (ABC, `sonar/renderer.py`; everything
 downstream is renderer-agnostic); `DEPTH_PRESETS`
 (`worldgen/depth/presets.py`), `CATALOG` (`worldgen/objects.py`),
@@ -577,13 +591,16 @@ of `controller_type`.
 python3 -m test.smoke_test        # from the package source root
 ```
 
-The only automated gate of the Stop hook (no lint, no type-check). **484
-checks** on the system python, **481 + one visible `SKIP`** on the venv (the
+The only automated gate of the Stop hook (no lint, no type-check). **493
+checks** on the system python, **490 + one visible `SKIP`** on the venv (the
 two bridge checks and the `ApplyLinkWrench` detection need ROS; one more
 SKIP when the `BlueBoat-SSS` checkout beside it is missing), ~220-250 s
 (2026-11-02, +1: the Gazebo visuals stand on the terrain; 481 on 2026-11-01; 478 on 2026-10-30; 439 and ~205 s on 2026-10-20). The venv
 interpreter is `~/ros2_ws/.venv/bin/python3` (`env.sh` activates it only
 when sourced from `~/ros2_ws`);
+2026-11-02 (pass 4) added `[4d]`'s ghost-lobe normalisation check and eight `[17]` image-comb
+checks (closed-form image sum, bounce counts, Rayleigh floor, wall comb off/on and depth, bistatic =
+monostatic Kirchhoff, receive window, seabed comb); the fixtures did not move;
 2026-11-02 (pass 3 phase 4) added `[4c]`'s real-like heading check (ping headers 80 deg off
 ATTITUDE: the pose heading stays exact) and `[14]`'s nested-transmission check; the
 installation moved (0.22 m deep, 0.345 m aft), so **object checks place the transducers, not

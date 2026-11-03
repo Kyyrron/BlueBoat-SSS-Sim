@@ -397,6 +397,51 @@ class SonarModelConfig:
                                            # (rough concrete returns over its
                                            # whole height, not only where the
                                            # specular lobe points)
+    # Shallow-water image comb of the wall echo (pass 4, 2026-11-02,
+    # sonar/waveguide.py): the face's own law evaluated for every out/back
+    # pair of the transducer's surface/floor images; the pairs other than
+    # the direct one join the diffuse (speckled) channel. Off = bit-identical.
+    waveguide_comb_enabled: bool = False
+    waveguide_max_order: int = 30          # |m| cap of the images 2mD +- z_t
+    waveguide_rel_cut: float = 1.0e-4      # drop images whose best leg weight
+                                           # (beam x bounces / l^2) is under
+                                           # this fraction of the strongest
+    waveguide_face_step_m: float = 0.01    # face sampling of the pairs (m)
+    waveguide_facet_comb: bool = False     # the same comb for smooth (facet)
+                                           # objects: bistatic Kirchhoff per
+                                           # image pair (costly: off by default)
+    waveguide_facet_max_order: int = 2     # |m| cap for smooth objects
+    #: RMS height of the water surface, the Eckart coherent fraction of each
+    #: surface bounce of an image path. JUDGED open-water default (wind
+    #: ripple, ~cm: coherent fraction ~0 at every comb angle); a calm indoor
+    #: pool is ~1e-4 (an environment overlay, never a fit).
+    surface_rms_height_m: float = 0.02
+    #: The seabed material the comb's floor bounce reflects off (and, with a
+    #: law of its own, the backscatter of `seabed_law`): "sand" (the
+    #: calibrated stand-in) or "painted_concrete". Global, per run.
+    seabed_material: str = "sand"
+    #: The seabed's own image comb (pass 4, bundle S): every seabed sample is
+    #: also lit and heard through the transducer's surface/floor images (the
+    #: same waveguide as the wall comb), Lambert-separable bistatic law, each
+    #: pair arriving at its mean path. Near a no-op under a rough surface
+    #: (coherent fraction ~0), strong in calm shallow water. OFF = identical.
+    #: The run's seabed law when its material is not the calibrated sand
+    #: (pass 4, bundle C): the diffuse backscatter's level relative to sand
+    #: [dB] and its exponent in rho cos^p(theta) (-1 = the global
+    #: `lambert_exponent`). Neutral defaults = sand, bit-identical. A global,
+    #: per-run override (the pool's painted concrete); per-cell use is TODO.
+    seabed_level_db: float = 0.0
+    seabed_lambert_exponent: float = -1.0
+    seabed_comb_enabled: bool = False
+    seabed_comb_max_order: int = 30
+    #: The floor's RMS height for the comb's Eckart fraction, overriding the
+    #: material's own (sonar/waveguide.py) -- an environment overlay; -1 =
+    #: the material's value.
+    floor_rms_height_m: float = -1.0
+    #: B1 (pass 4): render a wall ghost as its coherent mirror share (first
+    #: leg ray-occluded) plus its incoherent share (weighted by the lit share
+    #: of the face) when the scene has facet objects. False = pre-pass-4.
+    ghost_share_split: bool = False
     wall_pontoon_specular: float = 0.15    # specular-lobe fraction on a
                                            # pontoon's rounded, fendered floats
     wall_corner_gain: float = 1.0          # scale of the single-bounce band
@@ -689,6 +734,14 @@ class SonarModelConfig:
                                            # the FBR crest measures +1.07 dB/dB
                                            # [0.70, 1.38]; the ringing +0.30
                                            # (not scaled)
+    #: Receive-window level term (pass 4, point 3; acoustics.
+    #: receive_window_factor): the reported level follows the output power
+    #: of a unit-energy receive window T = filter_duration_percent * 2R/c on
+    #: the echo, relative to the reference acquisition (20 m: T 40 us, pulse
+    #: 44.3 us). Zero free parameters. OFF = bit-identical.
+    receive_window_level: bool = False
+    receive_window_reference_s: float = 4.0e-5
+    receive_window_reference_pulse_s: float = 4.43e-5
     pulse_level_reference_s: float = 66.5e-6
                                            # the pulse the level constants were
                                            # fitted at (bath3: 20 m / 600 bins,

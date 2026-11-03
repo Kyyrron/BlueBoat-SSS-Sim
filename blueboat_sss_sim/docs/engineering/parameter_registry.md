@@ -106,6 +106,9 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.noise_floor` | 3.39e-09 | linear power (renderer units) | device | measured | yes | far-decile reported dB, re-expressed at the current offset | `model.calibration_db_offset` |
 | `model.ping_level_jitter_db` | 0.0 | dB | device | undetermined | yes | per-ping level anomaly std beyond speckle averaging (corpus: port/starboard uncorrelated) | `model.texture_k_inv_shape` |
 | `model.pulse_level_exponent` | 0.0 | 1 | device | undetermined | yes | within-file pulse changes at matched side and altitude band: +0.93 dB/dB [0.66, 1.17] (validation-role files; calibration sessions hold one pulse each) | `model.calibration_db_offset`, `model.tvg_compensation`, `model.specular_pulse_exponent` |
+| `model.receive_window_level` | False | bool | device | undetermined | no | pool FIT (our driver): predicts -2.16 vs measured -1.7..-2.4 dB in 2-8 m; field VAL (SonarView files): measured step -0.01 dB median vs +0.81 predicted -> refuted there | `model.pulse_level_exponent`, `model.calibration_db_offset` |
+| `model.receive_window_reference_pulse_s` | 4.43e-05 | s | device | derived | no | measured pulse law (sonar_model.md section 5) | -- |
+| `model.receive_window_reference_s` | 4e-05 | s | device | derived | no | the comparison acquisition (20 m / 1200) | -- |
 | `model.receiver_ceiling_db` | 67.9 | dB | device | measured | yes | max_pwr_db pile-up on bath1-3 (66.5 us): 67.9 dB at gains 4-7 (calibration session) | `model.receiver_ceiling_pulse_exponent` |
 | `model.receiver_ceiling_pulse_exponent` | 1.0 | 1 | device | undetermined | yes | 26 piled acquisition groups, both sites: 0.91, residual sd 0.18 dB (needs files beyond the calibration sessions) | `model.receiver_ceiling_db` |
 | `model.reverberation_db` | 18.0 | dB | device | measured | yes | corpus quay deep shadow 6-12 m behind the face (17-25 dB under the seabed) | environment.wall geometry, `model.noise_floor` |
@@ -126,10 +129,15 @@ Not yet registered, but worth adding when they become identifiable:
 | `material.sand.reflectivity` | 0.55 | 1 | environment | judged | yes | judged nominal; level absorbed by calibration_db_offset | `model.calibration_db_offset` |
 | `material.seagrass.reflectivity` | 0.22 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
 | `model.absorption_db_per_m` | 0.1 | dB/m | environment | physical | no | nominal physical value; check against a temperature/salinity model for the site | `model.tvg_compensation` |
+| `model.floor_rms_height_m` | -1.0 | m | environment | estimated | yes | pool overlay 1.0e-5 m (FIT W2 grid, at the lower literature bound: smooth at lambda) | `model.surface_rms_height_m` |
 | `model.lambert_exponent` | 1.0 | 1 | environment | joint | yes | two-altitude fit; 0.75 and 1.25 scored worse (RMS 1.29, 0.94 vs 0.92) | `model.tvg_compensation`, `model.calibration_db_offset`, `model.beam_tilt_deg` |
 | `model.sand_lambert_mu_db` | -12.0 | dB | environment | literature | yes | literature; site spread +-5 dB | material reflection coefficients |
+| `model.seabed_lambert_exponent` | -1.0 | 1 | environment | estimated | yes | pool painted concrete on FIT (pass 4 step 7) | `model.seabed_level_db`, `model.seabed_comb_enabled` |
+| `model.seabed_level_db` | 0.0 | dB | environment | estimated | yes | pool painted concrete: a site nuisance estimated on FIT (pass 4 step 7); confounded with calibration_db_offset by construction | `model.calibration_db_offset`, `model.seabed_lambert_exponent` |
+| `model.seabed_material` | sand | enum | environment | structural | no | structural (the pool overlay sets painted_concrete) | -- |
 | `model.smooth_lobe_width_deg` | 0.0 | deg | environment | undetermined | yes | undetermined (field box pair carries unknown yaw and burial) | material roughness table |
 | `model.specular_width_deg` | 8.0 | deg | environment | undetermined | yes | not determined by the corpus; held at the NC #4-gated value | `model.specular_strength`, `model.beam_tilt_deg` |
+| `model.surface_rms_height_m` | 0.02 | m | environment | judged | yes | default: judged wind-ruffled open water (coherent fraction ~0 at comb angles: the comb is ~a no-op at sea). Pool environment overlay: 3.0e-4 m, FIT-identified on the wall tail profile (pass 4 W2 grid, rms 1.5 dB); 1e-3 m already removes the tail | `model.floor_rms_height_m` |
 | `model.texture_k_cell_m` | 0.5 | m | environment | undetermined | yes | track and range correlation beyond the speckle cell | `model.texture_k_inv_shape` |
 | `model.texture_k_inv_shape` | 0.0 | 1 | environment | undetermined | yes | seabed fluctuation statistics (power-minus-dB, per-bin and high-pass std) vs the corpus | `model.ping_level_jitter_db`, `model.texture_k_cell_m` |
 | `model.volume_scattering_coeff` | 0.0 | 1 | environment | undetermined | no | undetermined | `model.lambert_exponent`, `model.calibration_db_offset` |
@@ -138,6 +146,10 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.wall_face_diffuse` | 0.5 | 1 | environment | judged | yes | judged | `model.wall_echo_strength` |
 | `model.wall_pontoon_specular` | 0.15 | 1 | environment | judged | yes | judged | `model.wall_echo_strength` |
 | `wall.roughness_m` | 0.003 | m | environment | judged | yes | judged; fitted only through the far-ghost level | `model.wall_diffuse_fraction` |
+| `waveguide.painted_concrete_rms_height_m` | 0.0001 | m | environment | judged | no | micro-texture Ra 1-5 um by stylus (Courard, Garbacz & Gorka, ICPIC 2004); trowel waviness sub-mm; pool W2 FIT prefers the lower bound | `model.surface_rms_height_m` |
+| `waveguide.sand_density_ratio` | 2.0 | 1 | environment | literature | no | J&R 2007 Table 5.1 medium sand (SAX99 rho 2.066 g/cm3 vs 1.024), doi:10.1007/978-0-387-36945-7 | `waveguide.sand_speed_ratio` |
+| `waveguide.sand_rms_height_m` | 0.01 | m | environment | judged | no | J&R 2007 ch. 4 roughness spectra (cm-scale relief of sand); not measured here | -- |
+| `waveguide.sand_speed_ratio` | 1.15 | 1 | environment | literature | no | J&R 2007 Table 5.1 medium sand (Vp ratio 1.13-1.16) | `waveguide.sand_density_ratio` |
 | `device.speed_of_sound_mps` | 1500.0 | m/s | hardware_fixed | physical | no | nominal; the device reports 1500 m/s too | -- |
 | `model.horizontal_aperture_deg` | 0.5 | deg | hardware_fixed | spec | no | specification | `model.array_length_m` |
 | `model.sonar_frequency_hz` | 450000.0 | Hz | hardware_fixed | spec | no | nominal 450 kHz (the wire reports 451 127 Hz, never used in physics) | -- |
@@ -149,6 +161,7 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.sensor_depth_m` | 0.22 | m | installation | measured | yes | pass 3 (2026-11-01): rear-most hull holes 0.030 m above the keel (BlueBoat.dae), waterline 0.216-0.241 m above the keel at 16-22 kg (BlueBoat.stl buoyancy) -> 0.20-0.23 m; the pool (floor 0.90 m, operator) reproduces every run's FBR altitude with 0.22 m, sim - real median 0.000, p10/p90 -0.017/+0.027 m over 36 run-sides (~/calib/pass3/phase2/transducer_mount.json); operator: same holes for every corpus | `node.base_link_rest_z_m`, `bathymetry.datum_offset_m` |
 | `node.base_link_rest_z_m` | -0.11078 | m | installation | derived | no | HullBoxes.gazebo_box().equilibrium_z() from the BlueBoat xacro buoyancy box | `model.sensor_depth_m` |
 | `model.alongtrack_beam_lines` | 5 | lines | model_structure | structural | no | structural | -- |
+| `model.ghost_share_split` | False | bool | model_structure | structural | no | DB1: the ghost's first-leg occlusion painted object shadows beyond the quay face at the full shell transmission (-9.6 dB) although C ~ 0 at a 3 mm wall | -- |
 | `model.image_formation` | energy | enum | model_structure | derived | no | derived, verified to leave the calibration within 0.67 dB | -- |
 | `model.layover_gain_max_db` | 20.0 | dB | model_structure | judged | no | judged (device dynamic range) | -- |
 | `model.pulse_level_reference_s` | 6.65e-05 | s | model_structure | structural | no | structural | -- |
@@ -156,7 +169,15 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.receiver_ceiling_knee_db` | 1.0 | dB | model_structure | judged | no | judged (pile-up pings show more bins within 1 dB of the maximum) | -- |
 | `model.reverberation_reference` | ambient | enum | model_structure | structural | no | structural | -- |
 | `model.scatterer_cell_m` | 0.01 | m | model_structure | structural | no | structural | -- |
+| `model.seabed_comb_enabled` | False | bool | model_structure | structural | no | pass 4: turns the pool's 15 dB range-shape error into a near-flat level offset (FIT, expected mode) | `model.surface_rms_height_m`, `model.seabed_level_db` |
+| `model.seabed_comb_max_order` | 30 | 1 | model_structure | structural | no | numerical setting | -- |
 | `model.speckle_looks` | 1 | 1 | model_structure | structural | no | corpus single-look contrast 5.5-6.7 dB (gate [2g]) | -- |
+| `model.waveguide_comb_enabled` | False | bool | model_structure | structural | no | pass 4 W/W2: closed form of the incoherent ideal-waveguide image sum (smoke [17]); pool wall tail FIT+VAL (~/calib/pass4/step4) | `model.surface_rms_height_m`, `model.floor_rms_height_m`, `model.wall_face_diffuse` |
+| `model.waveguide_face_step_m` | 0.01 | m | model_structure | structural | no | numerical setting | -- |
+| `model.waveguide_facet_comb` | False | bool | model_structure | structural | no | pass 4: pool box echo extent 0.10 -> 0.77 m (real 1.11), excess 16.8 -> 28.4 dB (real 22.3) on 12 FIT passes | `model.surface_rms_height_m`, `model.floor_rms_height_m` |
+| `model.waveguide_facet_max_order` | 2 | 1 | model_structure | structural | no | numerical setting (cost) | -- |
+| `model.waveguide_max_order` | 30 | 1 | model_structure | structural | no | numerical setting | -- |
+| `model.waveguide_rel_cut` | 0.0001 | 1 | model_structure | structural | no | numerical setting (cost) | -- |
 | `sea.hull.damping.heave_ns_per_m` | 245.0 | N s/m | vehicle_control | judged | yes | judged | `sea.hull.mass_kg` |
 | `sea.hull.damping.pitch_nms_per_rad` | 13.0 | N m s/rad | vehicle_control | judged | yes | judged | -- |
 | `sea.hull.damping.roll_nms_per_rad` | 20.0 | N m s/rad | vehicle_control | judged | yes | judged | -- |

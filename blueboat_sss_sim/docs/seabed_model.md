@@ -380,6 +380,18 @@ the shading relief against the relief the FBR of the other lines measured
 where they cross the swath (on the beach corpus that gain is 0.1–0.3: at
 3–5° grazing the shading over-reads, and the tie lines say so).
 
+### 7.2 A non-sand floor in a run (pass 4, 2026-11-02)
+
+The pool corpus (painted concrete) is the first site whose floor is not sand. Its level-vs-range shape is
+**not** a floor law. It is the seabed's own shallow-water multipath (`docs/sonar_model.md` §14, the seabed
+image comb). Once that is in, the painted floor is sand's angular law, −16.4 dB lower, fitted on the pool's
+FIT runs.
+
+The renderer carries this as a global, per-run override of the diffuse law (`seabed_level_db`,
+`seabed_lambert_exponent`) and of the floor's reflection for the combs (`seabed_material: painted_concrete`).
+It does not use a per-cell material law: the material raster is still collapsed to reflectivity. A world
+mixing sand and concrete cells would need per-cell law plumbing (`.claude/TODO.md`).
+
 ## 8. References
 
 Peer-reviewed and book sources (DOIs resolved through Crossref, 2026-09-09):

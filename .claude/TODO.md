@@ -285,6 +285,55 @@ Stop-and-hop pings: a 10°/s yaw over a 20 m ping's 27 ms turns the fan
 0.27° (~9 cm at the far edge, about half a footprint). If a corpus waterfall
 ever shows within-ping smear at the swath edge, this is where it belongs.
 
+## Ray-cast sensor (`renderer: raycast`) — in progress since 2026-11-02
+
+A second `SonarRenderer`: 3-D ray casting with coherent summation and full 6-DoF motion,
+beside the unchanged geometric renderer. Plan, gates and the Phase-7 data split:
+`blueboat_sss_sim/docs/engineering/raycast_plan.md` (status log at its end). Design:
+`raycast_design.md`. Literature: `docs/literature/raycast_sonar/`.
+
+### [P1] Phases 2–8 of the ray-cast plan
+Phase 0 (literature, design) and Phase 1 (mesh export, CPU oracle; gate met, `raycast_phase1.md`)
+are done. Phase 2 (CPU reference renderer) is in progress: the direct path and the J&R small-slope
+seabed law pass their gates (`raycast_phase2.md`). Next:
+- the NC #4 first-bottom-return question (nadir sits near the vertical aperture's first null);
+- then the bounce paths, diffraction, transmission, labels. It would also close "Intra-ping motion is not modelled (S12)"
+above, for that renderer only.
+
+### [P2] Re-stamping a saved rested object is not idempotent (found 2026-11-02)
+`objects._rasterize_solid` writes the settled pose back into the object, including the bank tilt.
+A second stamp of a saved object on a slope therefore tilts it twice: up to 0.89 m height
+difference, measured on a synthetic 4 % slope. No saved world is affected, and nothing re-stamps
+today. A tool that ever needs to recover rasters from saved objects must not re-stamp them (the
+ray-cast mesh reads the stored raster). `raycast_phase1.md`.
+
+### [P2] Facet layer: small cylinders ~0.2 dB under k a L^2 (found 2026-11-02)
+The facet tessellation's curvature criterion (0.05 rad sagitta phase, `solids._curved`) tiles a
+cylinder (a = 5 cm) with planar patches that act as a grating. Measured: the PO sum is 0.20 dB under
+the closed form even at 500 m, and converges to the exact integral with 4x finer circumferential
+patches. Smoke `[14]` tests at 0.5 dB, so it passes. This affects the geometric renderer's smooth
+objects (not changed; the ray-cast sensor uses a 16x stricter criterion). `raycast_phase2.md`.
+
+### [P2] Ray-cast: full texts wanted
+Ten items are listed at the end of `docs/literature/raycast_sonar/INDEX.md`. None blocks Phases 1–6.
+
+### [P2] Ray-cast: measurements wanted
+Updated 2026-11-03 with the owner's answers (`raycast_design.md` §12):
+- every site is seawater; salinity and temperature are unknown, so per-site NOAA OISST estimates are
+  used, ±3 °C; S 35 ± 3 ppt. A thermometer at the next field session would replace them;
+- a temperature profile (refraction);
+- the transducer CAD housing is 318 mm (aperture bounded [22.4, 31.0] cm);
+- two-unit interference and the transmit waveform are being inferred from the recordings.
+
+### [P1] Real images are range-compressed 2.5–3 % (sound speed), the geometric renderer is not (found 2026-11-03)
+Every corpus file reports `sos_dmps` = 15000: the device maps time to range at 1500 m/s. The corpus
+water is warm seawater, ~1537–1545 m/s (per-site OISST temperatures, ±10 m/s), so real images show
+objects and walls 2.5–3.0 % closer than they are (25–30 cm at 10 m). The geometric renderer uses 1500
+m/s for both the travel time and the bins, so it has no such compression. Any comparison that matched
+simulated and real ranges, e.g. wall positions in the pool, absorbs this scale somewhere. Not changed
+in the geometric renderer. The ray-cast sensor reproduces it (true c for delays, 1500 for bins).
+Note 07 of `docs/literature/raycast_sonar/`.
+
 ## Cross-module correctness
 
 ### [x] `transducer_heading_deg` carried an absolute bearing — closed 2026-09-15
@@ -698,6 +747,41 @@ TEST: seabed level +9.5 dB (painted floor vs a sand stand-in), FBR crest +1.7 dB
 under-detected (5/15 passes vs 14/15) and over-shadowed. Public summary:
 `docs/engineering/calibration_results.md` Part II; private: `~/calib/pass3/report_2026-11-02.md`,
 `RUNBOOK.md`, `GCS_PLAN.md` (the BlueBoat-SSS half, plan only). Open items it raised are below.
+
+### [x] Pass 4 (2026-11-02): shallow-water image comb, the painted floor, appearance -- nothing promoted
+Record: `~/calib/pass4/report_2026-11-02.md`, `docs/engineering/calibration_results.md` Part III,
+`docs/engineering/raycast_handoff_from_pass4.md`.
+- The default changed only by the P0 fix (a ghost's coherent lobe was ×1000 hot): pool and field
+  scores bit-identical, envelope 82 / 0.
+- Every new term ships off. The pool overlay is `config/pool_environment_pass4_sonar.yaml`.
+
+Open items it leaves:
+- **[P1] Owner decision**: is a non-sand (painted-concrete) floor part of v1, or is the v1 level
+  criterion restated for sand sites? With the overlay the pool scores LEVEL +0.65 / +0.18 dB.
+- **[P1] Seabed comb vs tracker lock (S, NC #4).** With S on, the pool tracker lock falls up to 0.33
+  under the device (FBR detection stays ≥ 0.995). The comb is diffuse-only, and the real pool FBR ramps
+  0.6 → 0.9 m: the direct/surface mixed path. Image the coherent FBR lobe too, then re-gate.
+- **[P2] Wall comb (W2) strict gate.** VAL beyond 0.5–2 m is +2.4 dB median, but 3/18 sides exceed
+  5 dB (pool_mapping1 port 5.4 with the floor fixed). Faces at 3–6 m: the tail is 4–5 dB too strong.
+  Check against a quay at two depths (V1 roadmap 1.4).
+- **[P2] Object comb cost** ~360 ms per ping-side (live budget 25 ms). Prune pairs by the specular
+  condition, or precompute per object.
+- **[P2] Shadow zone (O primary)** 3.3 / 4.6 dB darker than real after the echo end, with the comb
+  (gate 3).
+- **[P2] 10 m vs 20 m step (K) is recorder-dependent?** Pool (our driver) −2.1 dB vs SonarView field
+  0 dB at a fixed pulse. Record 10 m and 20 m with both recorders in one session.
+  `receive_window_level` is kept (off) for it.
+- **[P2] B1 premise refuted by data.** Real pool box rows darken beyond the wall face (VAL median
+  −2.85 dB). `ghost_share_split` failed its gate (off). Comb paths need visibility (ray-cast hand-off).
+- **[P2] Texture (B3)**: range kernel shape (lags 2–3 too correlated: boxcar vs pulse ⊗ filter); a
+  per-ping level fluctuation is missing (0.57 vs 0.9–1.5 dB); scene patchiness. Target table:
+  `~/calib/pass4/step1/DB3/REPORT.md`.
+- **BlueBoat-SSS (proposed items, not ours to edit; `~/calib/pass4/step1/D5b/REPORT.md`):**
+  - autopilot rates hold ~9 s per 30 s re-assert on the water (4 Hz otherwise);
+  - the watchdog window starts before logging;
+  - the zero-stamp warning repeats on every message;
+  - the odom buffer is never pruned after a zero-stamped first sample;
+  - superproject §4.4's "~13 Hz until reboot" is contradicted.
 
 ### [P1] Texture: the pool's extra fluctuation is not ground-fixed (pass-2 C refuted here)
 Pool floor: per-bin std 6.29 dB real vs 4.99 default (power-minus-dB 3.47 vs 2.17), but range

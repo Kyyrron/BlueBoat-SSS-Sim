@@ -69,6 +69,7 @@ from ..core.types import (GroundTruthContact, Ping, Pose3D, RenderedPing,
 from ..worldgen.objects import CATALOG
 from ..worldgen.scene import SceneModel
 from . import acoustics
+from . import waveguide as _wg
 from .config import (SPEED_OF_SOUND_MPS, AcquisitionParams,
                      SonarModelConfig)
 from .facets import FacetLayer
@@ -174,6 +175,14 @@ class _Acc:
                                       # this one
     k_num: np.ndarray | None = None   # sum of Gamma-texture x squared cell
                                       # amplitude per bin (texture_k_inv_shape)
+    num_c: np.ndarray | None = None   # waveguide image comb of the wall echo
+                                      # (pass 4): azimuth-line-weighted sum of
+                                      # every non-direct out/back image pair
+    den_c: float = 0.0                # ... and its line weights
+    face_lit: dict | None = None      # wall name -> beam-weighted lit share
+    face_best: float = float("inf")   # of its wet face (centre line), B1
+    comb_best: float = float("inf")   # |offset| of the line the comb jobs
+    comb_jobs: list | None = None     # come from (the centre line's hits)
     num_u: np.ndarray | None = None   # the diffuse field WITHOUT the horizon
                                       # cull: what the seabed at this range
                                       # would return if nothing hid it. The
@@ -251,6 +260,14 @@ class GeometricRenderer(SonarRenderer):
             model.max_ping_rate_hz))
         self._pulse_f_d, self._pulse_f_c = acoustics.pulse_level_factors(
             self._pulse_s, model)
+        # B1 (pass 4): wall ghosts in two shares when facet objects exist.
+        self._ghost_share: str | None = None
+        self._split_ghosts = bool(getattr(model, "ghost_share_split", True))
+        self._face_lit: dict | None = None
+        # Receive-window level term (pass 4): one scalar per acquisition,
+        # exactly 1.0 when off.
+        self._rx_f = acoustics.receive_window_factor(acquisition, model,
+                                                     self._pulse_s)
         self._cfg = model
 
         # Ground-line sample step, coupled to the slant-bin size so that
@@ -547,6 +564,25 @@ class GeometricRenderer(SonarRenderer):
         if acc.re is not None:
             texture, filled = self._texture(acc)
 
+        if self._cfg.seabed_comb_enabled:
+            # The seabed's own waveguide (pass 4, bundle S): added to the
+            # direct diffuse field before the pulse smear, speckled with it.
+            power = power + self._seabed_comb(power, center_geom.altitude,
+                                              sensor, roll_toward)
+        comb = None
+        for job in acc.comb_jobs or ():
+            self._face_comb_into(job["h"], job["origin"], job["roll"],
+                                 job["dsign"], job["altitude"], job["n_peak"],
+                                 job["ds_direct"], job["spec_frac"],
+                                 job["obliq"], 1.0, acc)
+        if acc.num_c is not None and acc.den_c > 0.0:
+            # The wall echo's image comb (pass 4): many independent paths per
+            # bin, so it speckles like the seabed (Exp(1)), not like the
+            # steady face line.
+            comb = acc.num_c / acc.den_c
+            if self._pulse_f_c != 1.0:
+                comb = comb * self._pulse_f_c
+            power = power + comb
         power = self._pulse_smear(power)
         specular = self._pulse_smear(specular)
         if unoccluded is not None:
@@ -585,24 +621,42 @@ class GeometricRenderer(SonarRenderer):
             side, sensor, look, sensor.yaw, center_geom,
             center_geom.altitude)
         contacts += self._wall_contacts(side, sensor, center_geom)
+        self._face_lit = acc.face_lit
         ghost_power, ghost_contacts = self._render_ghosts(
             side, sensor, center_geom.altitude)
         speckle_fill = None
+        extra = None
         if ghost_power is not None:
             power = power + ghost_power
-            if filled is not None:
-                # Ghost / single-bounce energy where the texture holds its
-                # 1.0 fallback (behind a quay): the noise stage speckles it.
-                fill = filled & (ghost_power > 0.0)
-                speckle_fill = fill if fill.any() else None
+            extra = ghost_power > 0.0
+        if comb is not None:
+            sm = self._pulse_smear(comb) > 0.0
+            extra = sm if extra is None else (extra | sm)
+        if extra is not None and filled is not None:
+            # Ghost / single-bounce / comb energy where the texture holds its
+            # 1.0 fallback (behind a quay): the noise stage speckles it.
+            fill = filled & extra
+            speckle_fill = fill if fill.any() else None
         contacts += ghost_contacts
 
+        ambient = self._ambient_curve(center_geom.altitude, roll_toward)
+        if self._rx_f != 1.0:
+            # Everything the receive window sees scales with it -- except the
+            # transmit ringing, a leakage of the transmit itself (measured: it
+            # does not fall at 10 m, it rises; recorded as unexplained).
+            ring_s = (self._pulse_smear(self._ringing)
+                      if self._ringing is not None else 0.0)
+            power = power * self._rx_f
+            specular = (specular - ring_s) * self._rx_f + ring_s
+            if unoccluded is not None:
+                unoccluded = unoccluded * self._rx_f
+            ambient = ambient * self._rx_f if ambient is not None else None
         ping = Ping(
             side=side,
             power=power,
             specular=specular,
             unoccluded=unoccluded,
-            ambient=self._ambient_curve(center_geom.altitude, roll_toward),
+            ambient=ambient,
             pose=sensor,
             altitude_m=center_geom.altitude,
             t_sim=t_sim,
@@ -751,6 +805,11 @@ class GeometricRenderer(SonarRenderer):
 
         hx, hy = _occ_xy(px, py)
         z_k = self._scene.sample_height(hx, hy)
+        # B1 (pass 4): the incoherent share of a wall ghost is not a single
+        # mirror ray, so no object on the first leg cuts it ray by ray; it is
+        # weighted by the lit share of the face instead (_render_ghosts).
+        free_leg = (mirror_wall is not None
+                    and self._ghost_share == "incoherent")
         if sensor.pitch != 0.0:
             # Pitch rotates the fan plane about the body y axis, so a ground
             # sample `dz` below the transducer is imaged `dz·tan(pitch)`
@@ -785,6 +844,14 @@ class GeometricRenderer(SonarRenderer):
             if float(np.max(fb)) > 0.0:
                 z_occ = z_k
                 z_k = z_k - fb
+                if free_leg:
+                    nx_, ny_ = mirror_wall.normal
+                    d_o = ((sensor.x - mirror_wall.x0) * nx_
+                           + (sensor.y - mirror_wall.y0) * ny_)
+                    d_s = ((px - mirror_wall.x0) * nx_
+                           + (py - mirror_wall.y0) * ny_)
+                    first = (d_s * d_o) > 0.0
+                    z_occ = np.where(first, z_k, z_occ)
         rho = self._scene.sample_reflectivity(px, py)
 
         dz = sensor.z - z_k                      # positive: seabed below sensor
@@ -814,6 +881,8 @@ class GeometricRenderer(SonarRenderer):
         sample_trans = getattr(self._scene, "sample_transmission", None)
         trans = (sample_trans(hx, hy) if sample_trans is not None
                  else np.zeros_like(px))
+        if free_leg and z_occ is not None:
+            trans = np.where(first, 1.0, trans)
         shade = None
         if float(np.max(trans)) > 0.0 and not visible.all():
             crest = np.maximum.accumulate(
@@ -1004,8 +1073,19 @@ class GeometricRenderer(SonarRenderer):
                     | segment_blocked(walls_all, cx, cy, cz, g.px, g.py,
                                       g.seabed_z, skip=wall))
                 cross = cross & ~shadowed
-            # The folded (image) path meets the face twice.
-            env = env * cross * bw * bw
+            # The folded (image) path meets the face twice. B1 (pass 4): a
+            # ghost rendered in two shares keeps C^2 (both bounces mirror)
+            # apart from the rest.
+            if self._ghost_share is not None:
+                c_ = bounce_weight(wall, origin, g.px, g.py, g.seabed_z, 0.0,
+                                   acoustics.wavenumber(cfg))
+                bw2 = c_ * c_ if self._ghost_share == "coherent" \
+                    else np.maximum(bw * bw - c_ * c_, 0.0)
+                bw1 = c_ if self._ghost_share == "coherent" \
+                    else np.maximum(bw - c_, 0.0)
+            else:
+                bw2, bw1 = bw * bw, bw
+            env = env * cross * bw2
             if self._direct_sensor is not None and cfg.wall_corner_gain > 0.0:
                 # Single-bounce band: the transducer insonifies a ground
                 # point directly and the echo returns off the face (or the
@@ -1024,7 +1104,7 @@ class GeometricRenderer(SonarRenderer):
                 if len(walls_all) > 1:
                     direct_ok = ~segment_blocked(walls_all, s_.x, s_.y, s_.z,
                                                  g.px, g.py, g.seabed_z)
-                bounce_env = (bs * w * g.visible * cross * bw * direct_ok
+                bounce_env = (bs * w * g.visible * cross * bw1 * direct_ok
                               * acoustics.net_range_response(mid, cfg)
                               * cfg.wall_corner_gain * (self._ds / acq.bin_size_m),
                               mid)
@@ -1193,6 +1273,14 @@ class GeometricRenderer(SonarRenderer):
         rather than across) dims it as cos^2 with a small floor.
         """
         acq, cfg = self._acq, self._cfg
+        lit_line = abs(along_offset) < acc.face_best
+        if lit_line:
+            acc.face_best, acc.face_lit = abs(along_offset), {}
+        comb_line = False
+        if cfg.waveguide_comb_enabled and abs(along_offset) < acc.comb_best:
+            # The comb is computed once, on the centre line's wall hits (it
+            # is a smooth tail; the azimuth mean is the centre's to << 1 dB).
+            acc.comb_best, acc.comb_jobs, comb_line = abs(along_offset), [], True
         for k, h in enumerate(g.wall_hits):
             if h.z_top <= h.z_bottom:
                 continue
@@ -1218,11 +1306,21 @@ class GeometricRenderer(SonarRenderer):
                 if i_near > 0:
                     lit &= -dep >= float(g.horizon[i_near - 1]) - 1e-9
             if not lit.any():
+                if lit_line and h.wall.name not in acc.face_lit:
+                    acc.face_lit[h.wall.name] = 0.0
                 if h.z_top >= -1e-9 and h.z_bottom <= h.z_foot + 1e-6:
                     break
                 continue
             w = acoustics.beam_weight(depression_sign * dep, cfg,
                                       roll_toward_side) * lit
+            if lit_line and h.wall.name not in acc.face_lit:
+                # What the transducer can see of this face (B1, pass 4): the
+                # incoherent share of a ghost reaches the face over its lit
+                # height, whatever stands on the first leg.
+                w_all = acoustics.beam_weight(depression_sign * dep, cfg,
+                                              roll_toward_side)
+                acc.face_lit[h.wall.name] = float(w.sum() / max(w_all.sum(),
+                                                                1e-30))
             sigma = np.radians(max(cfg.specular_width_deg, 1e-3))
             lobe = np.exp(-0.5 * (dep / sigma) ** 2)
             obliq = max(h.cos_az ** 2, cfg.wall_echo_obliquity_floor)
@@ -1258,6 +1356,15 @@ class GeometricRenderer(SonarRenderer):
                                      minlength=acq.num_results)
             acc.den_w += np.bincount(idx[ok], weights=az_w[ok],
                                      minlength=acq.num_results)
+            if comb_line:
+                okl = ok & lit
+                if okl.any():
+                    acc.comb_jobs.append(dict(
+                        h=h, origin=origin, roll=roll_toward_side,
+                        dsign=depression_sign, altitude=g.altitude,
+                        n_peak=float(np.bincount(idx[okl]).max()),
+                        ds_direct=(h.z_top - h.z_bottom) / (n_pts - 1),
+                        spec_frac=spec_frac, obliq=obliq))
             # A face that runs from the seabed to the waterline hides every
             # wall behind it; a pontoon, a submerged sill or a face cut short
             # by the terrain does not, so the loop goes on (2026-09-18: it
@@ -1265,6 +1372,162 @@ class GeometricRenderer(SonarRenderer):
             # standing behind a pontoon the ray passes under).
             if h.z_top >= -1e-9 and h.z_bottom <= h.z_foot + 1e-6:
                 break
+
+    def _face_comb_into(self, h, origin: Pose3D, roll_toward_side: float,
+                        depression_sign: float, altitude: float,
+                        n_peak: float, ds_direct: float, spec_frac: float,
+                        obliq: float, az_line: float, acc: _Acc) -> None:
+        """The wall echo's shallow-water image comb (pass 4, NC #17).
+
+        The face's own law -- the specular lobe on the facet tilt that
+        mirrors the incoming leg into the outgoing one, ``(e_i + e_j)/2``,
+        plus ``wall_face_diffuse`` on ``(cos_i cos_j)^(p/2)`` -- evaluated
+        for every out/back pair of the transducer's surface/floor images
+        (``sonar/waveguide.py``) except the direct one, which
+        ``_face_echo_into`` already holds. Each leg carries the one-way beam
+        ``sqrt(B(dep))`` and its bounces' coherent ``|R|^2 C``; the pair the
+        range law at its mean path. The sum is put on the direct echo's
+        per-bin MEAN scale by the direct sample count of the peak bin, so the
+        tail-to-face ratio is the energy ratio of the two. No fitted
+        constant: the face law, the floor's Rayleigh coefficient and both
+        boundaries' Eckart fractions are physical.
+        """
+        acq, cfg = self._acq, self._cfg
+        n = acq.num_results
+        depth = -float(h.z_foot)          # local water depth at the face foot
+        z_t = -float(origin.z)
+        if not (0.0 < z_t < depth) or h.z_top <= h.z_bottom:
+            return
+        step = max(float(cfg.waveguide_face_step_m), 1e-3)
+        n_pts = max(int(np.ceil((h.z_top - h.z_bottom) / step)), 2)
+        zf = np.linspace(h.z_bottom, h.z_top, n_pts)
+        zf = zf[zf <= 0.0]
+        if zf.size < 2:
+            return
+        dz_pair = (h.z_top - h.z_bottom) / (n_pts - 1)
+        depth_pt = -zf
+        k = acoustics.wavenumber(cfg)
+        im = _wg.image_set(z_t, depth, int(cfg.waveguide_max_order))
+        L, E, fac = _wg.leg_factors(
+            im, h.d, depth_pt,
+            floor=_wg.floor_boundary(cfg),
+            surface_rms_m=float(cfg.surface_rms_height_m), k=k)
+        dep = _wg.departure(im, E)
+        a = np.sqrt(acoustics.beam_weight(depression_sign * dep, cfg,
+                                          roll_toward_side)) * fac
+        strength = np.max(a / L ** 2, axis=1)
+        keep = strength >= float(cfg.waveguide_rel_cut) * strength.max()
+        keep[im.direct] = True
+        idx_i = np.flatnonzero(keep)
+        A, L, E = a[idx_i], L[idx_i], E[idx_i]
+        d0 = int(np.flatnonzero(idx_i == im.direct)[0])
+        sigma = np.radians(max(cfg.specular_width_deg, 1e-3))
+        cf = np.clip(np.cos(E) * h.cos_az, 0.0, 1.0)
+        p_l = float(cfg.lambert_exponent)
+        Ai, Aj = A[:, None, :], A[None, :, :]
+        Ei, Ej = E[:, None, :], E[None, :, :]
+        lobe = np.exp(-0.5 * (0.5 * (Ei + Ej) / sigma) ** 2)
+        law = (spec_frac * obliq * lobe
+               + cfg.wall_face_diffuse * (cf[:, None, :] * cf[None, :, :])
+               ** (0.5 * p_l))
+        lm = 0.5 * (L[:, None, :] + L[None, :, :])
+        amp = (h.wall.reflectivity * cfg.wall_echo_strength * Ai * Aj * law
+               * acoustics.net_range_response(np.maximum(lm, altitude), cfg))
+        amp[d0, d0, :] = 0.0                      # the direct echo is held
+        b = np.floor((lm - acq.range_start_mm / 1000.0)
+                     / acq.bin_size_m).astype(np.int64)
+        ok = (b >= 0) & (b < n) & (amp > 0.0)
+        if not ok.any():
+            return
+        comb = np.bincount(b[ok], weights=amp[ok], minlength=n)
+        comb *= (dz_pair / max(ds_direct, 1e-9)) / max(n_peak, 1.0)
+        if acc.num_c is None:
+            acc.num_c = np.zeros(n)
+        acc.num_c += az_line * comb
+        acc.den_c += az_line
+
+    def _seabed_comb(self, direct: np.ndarray, altitude: float,
+                     sensor: Pose3D, roll_toward: float) -> np.ndarray:
+        """The seabed's image comb (pass 4, bundle S, NC #17).
+
+        A seabed sample at ground range ``y`` is lit and heard not only
+        directly but through every image of the transducer in the
+        surface/floor waveguide whose unfolded line reaches it from above
+        (``sonar/waveguide.py``: depths ``d < D``). With a Lambert-type,
+        separable bistatic law ``rho (sin psi_i sin psi_j)^(p/2)`` the pair
+        ``(i, j)`` carries, relative to the direct ``(0, 0)`` echo of the
+        same ground interval,
+
+            sqrt(B_i B_j / B_0^2) * F_i F_j * (sin psi_i sin psi_j / sin^2 psi_0)^(p/2)
+            * r^4 / (l_i^2 l_j^2) * 10^(-alpha (l_i + l_j - 2 r)/10) * TVG(s) / TVG(r)
+
+        (``B`` the two-way beam, applied one-way per leg; ``F`` the legs'
+        bounce factors |R|^2 C; ``TVG`` the device's partial compensation at
+        the arrival slant ``s = (l_i + l_j)/2``) and its energy is moved to
+        ``s``. The direct field already carries the seabed's law, beam,
+        shadows and the energy formation, so only these ratios are new.
+        Flat-floor geometry about nadir (local depth = altitude + transducer
+        depth); image paths share the direct visibility (stated).
+        """
+        acq, cfg = self._acq, self._cfg
+        n = acq.num_results
+        z_t = -float(sensor.z)
+        alt = float(altitude)
+        depth = alt + z_t
+        if not (z_t > 0.0 and alt > 0.05):
+            return np.zeros(n)
+        bm = acq.bin_size_m
+        r = acq.range_start_mm / 1000.0 + (np.arange(n) + 0.5) * bm
+        sel = (r > alt * 1.0005) & (direct > 0.0)
+        if not sel.any():
+            return np.zeros(n)
+        rb = r[sel]
+        y = np.sqrt(rb * rb - alt * alt)
+        im = _wg.image_set(z_t, depth, int(cfg.seabed_comb_max_order))
+        up = im.depth < depth - 1e-9                 # reach the floor from above
+        dsel = np.flatnonzero(up)
+        k = acoustics.wavenumber(cfg)
+        dz = depth - im.depth[dsel][:, None]          # > 0
+        L = np.hypot(y[None, :], dz)
+        psi = np.arctan2(dz, y[None, :])
+        floor = _wg.floor_boundary(cfg)
+        fac = ((_wg.rayleigh_r(psi, floor[0], floor[1]) ** 2
+                * _wg.eckart_c(psi, floor[2], k)) ** im.n_floor[dsel][:, None]
+               * _wg.eckart_c(psi, cfg.surface_rms_height_m, k)
+               ** im.n_surface[dsel][:, None])
+        sign = np.where(im.n_bounce[dsel] % 2 == 0, 1.0, -1.0)[:, None]
+        bw = acoustics.beam_weight(psi * sign, cfg, roll_toward)
+        p_l = acoustics.seabed_exponent(cfg)
+        a = np.sqrt(bw) * fac * np.sin(psi) ** (0.5 * p_l) / L ** 2
+        i0 = int(np.flatnonzero(dsel == im.direct)[0])
+        a0 = a[i0]
+        strength = np.max(a / np.maximum(a0, 1e-30), axis=1)
+        keep = strength >= 1e-3
+        keep[i0] = True
+        a, L = a[keep], L[keep]
+        i0 = int(np.flatnonzero(np.flatnonzero(keep) == i0)[0])
+        alpha = float(cfg.absorption_db_per_m)
+        c_tvg = float(cfg.tvg_compensation)
+        kexp = float(cfg.spreading_exponent)
+
+        def tvg(s):
+            return (10.0 ** (-alpha * 2.0 * s / 10.0) * s ** (-kexp)) ** (-c_tvg)
+        base = direct[sel] / np.maximum(a0 * a0, 1e-300)
+        out = np.zeros(n)
+        tv_r = tvg(rb)
+        for i in range(a.shape[0]):
+            for j in range(a.shape[0]):
+                if i == i0 and j == i0:
+                    continue
+                s_ij = 0.5 * (L[i] + L[j])
+                w = (a[i] * a[j] * base
+                     * 10.0 ** (-alpha * (L[i] + L[j] - 2.0 * rb) / 10.0)
+                     * tvg(s_ij) / tv_r)
+                b = np.floor((s_ij - acq.range_start_mm / 1000.0) / bm
+                             ).astype(np.int64)
+                ok = (b >= 0) & (b < n)
+                out += np.bincount(b[ok], weights=w[ok], minlength=n)
+        return out
 
     def _wall_contacts(self, side: Side, sensor: Pose3D,
                        g: _PingGeometry) -> list[GroundTruthContact]:
@@ -1362,7 +1625,38 @@ class GeometricRenderer(SonarRenderer):
 
         total = np.zeros(self._acq.num_results, dtype=np.float64)
         contacts: list[GroundTruthContact] = []
+        split = self._facets is not None and self._split_ghosts
         for src in sources:
+            if split and src.wall is not None:
+                # B1 (pass 4): the coherent mirror share keeps the first
+                # leg's ray occlusion; the incoherent share sees the face's
+                # lit fraction instead (objects on the first leg).
+                lit_f = (self._face_lit or {}).get(src.wall.name, 1.0)
+                part = np.zeros_like(total)
+                for share, scale in (("coherent", 1.0), ("incoherent", lit_f)):
+                    self._ghost_share = share
+                    try:
+                        acc, geom = self._integrate(
+                            src.origin, src.look, src.fwd,
+                            src.roll_toward_side, src.depression_sign,
+                            self._ghost_offsets, self._n_ghost_lines, src.wall)
+                    finally:
+                        self._ghost_share = None
+                    den = acc.den
+                    safe = np.maximum(den, 1e-12)
+                    den_s = acc.den_s if acc.den_s is not None else den
+                    gh = (np.where(den > 1e-12, acc.num_d / safe, 0.0)
+                          + np.where(den_s > 1e-12,
+                                     acc.num_s / np.maximum(den_s, 1e-12), 0.0))
+                    part += scale * src.gain * self._pulse_smear(gh)
+                    if acc.num_b.any():
+                        part += scale * src.gain_single * self._pulse_smear(acc.num_b)
+                total += part
+                geom.altitude = altitude
+                contacts += self._ground_truth_contacts(
+                    side, src.origin, src.look, src.fwd, geom, altitude,
+                    via=src.name, wall=src.wall)
+                continue
             acc, geom = self._integrate(
                 src.origin, src.look, src.fwd, src.roll_toward_side,
                 src.depression_sign, self._ghost_offsets,

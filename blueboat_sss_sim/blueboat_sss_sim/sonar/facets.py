@@ -55,6 +55,7 @@ from ..worldgen.materials import (SAND_REFLECTION, MaterialLibrary,
 from ..worldgen.objects import CATALOG, is_facet_object, object_roughness_m
 from ..worldgen.solids import Patches, rot_z, rotation_rpy, tessellate
 from . import acoustics
+from . import waveguide as _wg
 from .config import AcquisitionParams, SonarModelConfig
 
 #: Objects whose patches are kept in memory at once (a 200 L drum is ~21 000
@@ -135,6 +136,32 @@ def object_reflection(o: PlacedObject, lib: MaterialLibrary,
     return acoustic_reflection(
         mat, wall_m=float(wall) * 1e-3 if wall is not None else None,
         backing=backing, frequency_hz=frequency_hz)
+
+
+def po_bistatic(p: Patches, inc: np.ndarray, out: np.ndarray,
+                path: np.ndarray, k: float
+                ) -> tuple[np.ndarray, np.ndarray]:
+    """Bistatic Kirchhoff amplitude of each patch (pass 4, the image comb).
+
+    ``inc`` (n, 3): unit propagation direction arriving at each patch;
+    ``out`` (n, 3): unit direction from the patch toward the receiver;
+    ``path``: total path length source -> patch -> receiver. The tangent-plane
+    integral of ``exp(i k (|x - S| + |x - Rx|))`` over a flat ``a x b``
+    patch with the obliquity ``n.(out - inc)/2`` -- for ``out = -inc`` it is
+    :func:`po_amplitude` exactly (phase gradient ``2 k g``, obliquity
+    ``-n.g``). Returns ``(amplitude, cos_b)``; a patch either leg sees from
+    behind returns 0."""
+    q = k * (inc - out)
+    qu = np.einsum("ij,ij->i", p.u, q)
+    qv = np.einsum("ij,ij->i", p.v, q)
+    cos_b = 0.5 * np.einsum("ij,ij->i", p.normal, out - inc)
+    front = ((-np.einsum("ij,ij->i", p.normal, inc) > 0.0)
+             & (np.einsum("ij,ij->i", p.normal, out) > 0.0))
+    area = (p.a * p.b * np.sinc(qu * p.a / (2.0 * np.pi))
+            * np.sinc(qv * p.b / (2.0 * np.pi)))
+    amp = ((k / (2.0 * np.pi)) * np.where(front, np.clip(cos_b, 0.0, None), 0.0)
+           * area * np.exp(1j * k * path))
+    return amp, np.where(front, np.clip(cos_b, 0.0, 1.0), 0.0)
 
 
 class FacetLayer:
@@ -367,4 +394,81 @@ class FacetLayer:
             out_s += (rng_b * kappa * 4.0 * np.pi * (s_re ** 2 + s_im ** 2)
                       / (norm * w_b))
             out_d += rng_b * i_sum / (norm * w_b)
+            if cfg.waveguide_facet_comb and front.any():
+                c_d = self._comb_pairs(q, front, azi, s, z_ref, roll_toward, i,
+                                       start, bin_m, n)
+                if c_d is not None:
+                    # each image pair is a glint of its own (coherent over the
+                    # patches), the pairs add incoherently: the sum fluctuates
+                    # like the seabed, so it joins the diffuse channel.
+                    c_re, c_im, c_in = c_d
+                    out_d += (rng_b * kappa * 4.0 * np.pi * c_re / (norm * w_b)
+                              + rng_b * c_in / (norm * w_b))
         return out_d, out_s, lit
+
+    def _comb_pairs(self, q: Patches, front: np.ndarray, azi: np.ndarray,
+                    s: np.ndarray, z_ref: float, roll_toward: float, i: int,
+                    start: float, bin_m: float, n: int):
+        """The object's shallow-water image comb (pass 4): every out/back
+        pair of the transducer's surface/floor images up to
+        ``waveguide_facet_max_order`` except the direct one, each a bistatic
+        Kirchhoff glint (:func:`po_bistatic`) with its legs' one-way beam and
+        bounce factors (``sonar/waveguide.py``). Returns the summed
+        ``(|coherent|^2, 0, incoherent)`` per bin, pairs added in power."""
+        cfg = self._cfg
+        k = self._k
+        depth = max(-float(z_ref), 0.05)
+        z_t = -float(s[2])
+        if not (0.0 < z_t < depth):
+            return None
+        qq = q.select(front)
+        az = azi[front]
+        im = _wg.image_set(z_t, depth, int(cfg.waveguide_facet_max_order))
+        P = qq.centre
+        n_img = im.depth.size
+        imgs = np.repeat(s[None, :], n_img, axis=0)
+        imgs[:, 2] = -im.depth
+        floor = _wg.floor_boundary(cfg)
+        legs = []
+        for kk in range(n_img):
+            v = P - imgs[kk]
+            l = np.sqrt(np.einsum("ij,ij->i", v, v))
+            u = v / np.maximum(l, 1e-9)[:, None]
+            horiz = np.hypot(v[:, 0], v[:, 1])
+            e = np.arctan2(-v[:, 2], horiz)           # + = going down at the patch
+            psi = np.abs(e)
+            fac = ((_wg.rayleigh_r(psi, floor[0], floor[1]) ** 2
+                    * _wg.eckart_c(psi, floor[2], k)) ** im.n_floor[kk]
+                   * _wg.eckart_c(psi, cfg.surface_rms_height_m, k)
+                   ** im.n_surface[kk])
+            dep = e * (1.0 if im.n_bounce[kk] % 2 == 0 else -1.0)
+            bw = acoustics.beam_weight(dep, cfg, roll_toward)
+            legs.append((l, u, np.sqrt(np.sqrt(bw) * fac)))   # amplitude/leg
+        top = max(float(np.max(w / l)) for l, _, w in legs)
+        tot_re = np.zeros(n)
+        tot_in = np.zeros(n)
+        sig = self._sigma[i]
+        p_l = float(cfg.lambert_exponent)
+        for a_ in range(n_img):
+            la, ua, wa = legs[a_]
+            if float(np.max(wa / la)) < 1e-3 * top:
+                continue
+            for b_ in range(n_img):
+                if a_ == im.direct and b_ == im.direct:
+                    continue
+                lb, ub, wb = legs[b_]
+                if float(np.max(wb / lb)) < 1e-3 * top:
+                    continue
+                amp, cos_b = po_bistatic(qq, ua, -ub, la + lb, k)
+                if not np.any(amp):
+                    continue
+                ce = np.exp(-np.minimum((2.0 * k * sig * cos_b) ** 2, 700.0))
+                wgt = wa * wb * np.sqrt(az)
+                amp = amp * self._R[i] * np.sqrt(ce) * wgt
+                inc = ((1.0 - ce) * self._rho_inc[i] * cos_b ** p_l * qq.area
+                       * az * (wa * wb) ** 2)
+                s_re, s_im, i_sum = self._range_gate(0.5 * (la + lb), amp, inc,
+                                                     start, bin_m, n)
+                tot_re += s_re ** 2 + s_im ** 2
+                tot_in += i_sum
+        return tot_re, None, tot_in

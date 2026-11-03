@@ -102,6 +102,23 @@ model:
   texture_k_cell_m: 0.5
   ping_level_jitter_db: 0.0
   sample_step_m: 0.05
+  waveguide_comb_enabled: false
+  waveguide_max_order: 30
+  waveguide_rel_cut: 0.0001
+  waveguide_face_step_m: 0.01
+  waveguide_facet_comb: false
+  waveguide_facet_max_order: 2
+  surface_rms_height_m: 0.02
+  seabed_material: sand
+  seabed_level_db: 0.0
+  seabed_lambert_exponent: -1.0
+  seabed_comb_enabled: false
+  seabed_comb_max_order: 30
+  floor_rms_height_m: -1.0
+  ghost_share_split: false
+  receive_window_level: false
+  receive_window_reference_s: 4.0e-05
+  receive_window_reference_pulse_s: 4.43e-05
 provenance:
   format: blueboat_effective_profile/1
   status: 'PROVISIONAL candidate -- not promoted (pass-2 gate: bundle A fails on harbour_A-2026-07-21)'

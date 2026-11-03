@@ -208,6 +208,49 @@ def pulse_level_factors(pulse_s: float | None,
             ratio ** kc if kc != 0.0 else 1.0)
 
 
+def seabed_exponent(cfg: SonarModelConfig) -> float:
+    """The diffuse law's exponent for the run's seabed: the global
+    ``lambert_exponent`` unless ``seabed_lambert_exponent`` (>= 0)
+    overrides it (pass 4, bundle C)."""
+    p = float(getattr(cfg, "seabed_lambert_exponent", -1.0))
+    return float(cfg.lambert_exponent) if p < 0.0 else p
+
+
+def receive_window_gain(window_s: float, pulse_s: float) -> float:
+    """Output power of a unit-ENERGY boxcar receive filter of duration ``T``
+    on a random echo whose envelope autocorrelation is the triangle of the
+    transmit pulse ``tau`` (pass 4, point 3; matched-filter/integrator
+    output, Lurton 2010 ch. 2-3 signal processing):
+
+        G = T (1 - T / (3 tau))        T <= tau
+        G = tau - tau^2 / (3 T)        T >  tau
+
+    i.e. the window integrates the echo coherently over its correlation
+    time and incoherently beyond it. Units of seconds; only ratios matter."""
+    T, tau = float(window_s), float(pulse_s)
+    if T <= 0.0 or tau <= 0.0:
+        return 0.0
+    return T * (1.0 - T / (3.0 * tau)) if T <= tau else tau - tau * tau / (3.0 * T)
+
+
+def receive_window_factor(acquisition, cfg: SonarModelConfig,
+                          pulse_s: float) -> float:
+    """Level factor of the receive window for an acquisition, relative to
+    the reference acquisition the level constants were anchored at:
+    ``G(T, tau) / G(T_ref, tau_ref)`` with ``T = filter_duration_percent *
+    2R / c`` (Ping Protocol os_ping_params: the filter's share of the ping's
+    round trip). Exactly 1.0 when ``receive_window_level`` is off."""
+    if not getattr(cfg, "receive_window_level", False):
+        return 1.0
+    from .config import SPEED_OF_SOUND_MPS
+    T = float(cfg.filter_duration_percent) * 2.0 * float(acquisition.range_max_m) \
+        / SPEED_OF_SOUND_MPS
+    g = receive_window_gain(T, pulse_s)
+    g_ref = receive_window_gain(float(cfg.receive_window_reference_s),
+                                float(cfg.receive_window_reference_pulse_s))
+    return g / g_ref if g_ref > 0.0 else 1.0
+
+
 def surface_response(reflectivity: np.ndarray, cos_incidence: np.ndarray,
                      depression_rad: np.ndarray, slant: np.ndarray,
                      cfg: SonarModelConfig,
@@ -229,8 +272,12 @@ def surface_response(reflectivity: np.ndarray, cos_incidence: np.ndarray,
     both channels bit-identical.
     """
     diffuse = backscatter(reflectivity, cos_incidence,
-                          cfg.lambert_exponent,
+                          seabed_exponent(cfg),
                           cfg.volume_scattering_coeff)
+    lvl = float(getattr(cfg, "seabed_level_db", 0.0))
+    if lvl != 0.0:
+        # A non-sand seabed's own level (pass 4, bundle C), diffuse only.
+        diffuse = diffuse * 10.0 ** (lvl / 10.0)
     f_d, f_c = pulse_level_factors(pulse_s, cfg)
     if f_d != 1.0:
         diffuse = diffuse * f_d
