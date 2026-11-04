@@ -170,3 +170,131 @@ Tolerances: `raycast_design.md` §7 (codes in brackets).
     cause is the missing coherent floor channel (the bottom path), next.
   - Finding: real images are range-compressed 2.5–3 % (`sos_dmps` 1500 vs c ≈ 1540).
 
+* 2026-11-03 — **Session 3: gates written before the bottom path's coherent floor channel.**
+  - Model (design §14): the mean (coherent) field of the seabed sheet near its specular points, as
+    physical-optics patches (the Kirchhoff prefactor `i k/2π`, so a flat floor returns the image
+    source `V/(2h)` in amplitude and phase), times the flat-interface `V(θ)` (J&R 8.49 for
+    sediments) and the Eckart amplitude `√C = exp(−½ Δk_z² σ_h²)`. `σ_h` is the RMS of the same J&R
+    power-law spectrum above `K_low = max(π/r_F, π/Δx)`: the two-way first Fresnel radius
+    `r_F = √(λR/2)` and the mesh Nyquist (the mesh carries the larger scales; never counted twice).
+    No new constant. The patches are weighted by a smooth stationary-phase window in Fresnel zones
+    (a numerical setting, converged in Phase 5).
+  - [S4/S5, monostatic] flat sand at altitude 0.6, 1.4, 5, 10, 20 m, isotropic unit beam: the
+    coherent field vs the image source `V(90°)√C e^{−α·2h}/(2h)` deposited at `τ = 2h/c`, complex,
+    bin by bin over the envelope: ≤ 0.05 dB at the peak bin, ≤ 0.05 rad in phase. Same with the
+    floor RMS forced so that C = 0.1, 0.5, 0.9.
+  - [S4/S5, oblique] the one-way floor-bounce eigenray (`paths.floor`) on a flat floor at five
+    grazing angles: length = the image distance, factor `V(ψ)√C(ψ)`: ≤ 0.05 dB (exact geometry).
+  - Then [NC4] rerun (`tools/nc4_detect.py`), reported against the geometric renderer.
+* 2026-11-03 — **Session 3 results (Phase 2 continues).**
+  - Bottom path built (`specular.py`, `chains.py`): **S4/S5 pass** (monostatic ≤ 0.014 dB / 0.018 rad at
+    0.6–20 m, C 1…0.1; oblique bistatic PO ≤ 0.014 dB at 8–80°; floor eigenray exact to 1e-14).
+    Two bugs found by the oblique gate and the integration: V evaluated at the bisector (−6.8 dB at
+    30°), the near-field pattern of a chain evaluated at 1 m.
+  - **P6 passes** (Fermat ≤ 0.005 mm vs λ/20 on a sloping floor; Newton replaces the oscillating
+    fixed-point iteration). **P2 passes** (chains = image sum to 8e-16; −0.12 dB from the closed form at
+    40 bounces). **P4 passes** (pool ramp arrivals within 0.02 bin; amplitudes within 0.16 dB, isotropic
+    beam). **P3 passes** (0 mismatches). **P5 passes** (a sill removes the comb images it blocks:
+    −7 to −9 dB behind the face).
+  - Multipath renderer (`multipath.py`): grouped pairs, energy cut-off on geometry before visibility;
+    flat sand + rough surface reduces exactly to the direct path; a calm surface adds +0.8…+4.9 dB at
+    4–20 m (Lloyd).
+  - Diffraction (`diffraction.py`): **D1 passes** (0.20 dB, 0.029 rad over v ∈ [−2, 3], 16 directions with
+    edge-aware chord integration). **D2:** the pre-stated metric did not specify the width; the first
+    one (crossing distance |U|² 0.25 → 0.05) gave slope **0.560 (outside 0.5 ± 0.05)** because it spans a
+    finite stretch of the scene's nonlinear v(y) (the routine matches F(v) within 0.13–0.30 dB at 2 and
+    20 m). The local width 0.25/|dI/dy| at the geometric boundary gives **0.486: pass**. Both recorded.
+    Applied to the direct chain only (bounce chains keep boolean visibility).
+  - **NC4 rerun** (`notes/nc4_detect_v3.log`): default spectra **10 regressions** (unchanged: no mean
+    field); w₂ = SAX99/30: 2 (22 m, 40 m/600); **w₂ = SAX99/100 (4.33e-7, inside the J&R sand
+    envelope): 0**. Not a regression by the criterion but worse: 0.6 m at 40 m/600 sand 0.15 vs the
+    geometric 0.73 (both < 0.95). The provisional ray-cast profile will carry w₂ = literature/100
+    (sand and mud), NC4-held, until the Phase-7 fit.
+* 2026-11-03 — **Owner request: compare with the DAVE multibeam (Choi et al. 2021) before more code.**
+  Done: `raycast_dave_comparison.md`. DAVE (`ros2` @ c1c2fba, Jetty) is a direct-path, first-hit,
+  pixel-sampled multibeam model; portable are GPU patterns (deterministic two-stage reduction,
+  persistent buffers) and frequency-domain synthesis for the coherent contributors. **Proposed** (owner
+  decision pending, gates above unchanged): close Phase 2, then a first fit on the calibration sessions
+  with a pre-registered go/no-go on the validation sessions (TEST hold-out stays sealed), before
+  Phases 3–8. No ray-cast code written since the request.
+* 2026-11-03 — **Owner approved the reorder** (close Phase 2 → first fit → go/no-go on the validation
+  sessions; TEST hold-out sealed), with additions to the gates before freezing `gates.yaml`: absolute
+  tolerances against real data per statistic; beach/harbour statistics (full-range mean intensity
+  profile, speckle contrast + distribution fit, along-track correlation, object highlight/shadow
+  contrast); "improves" = better than the bootstrap CI over pings, the others no worse; every fitted
+  parameter reported against its literature range (w₂ flagged); CPU ms per ping-side + projected GPU
+  time; a blind test of 20 mixed real/sim crops for two raters (reported at go/no-go, gated at the
+  final). Done since: dead code removed (`ring_test`, `TriangleScene.areas`); survey of Stonefish and
+  HoloOcean side-scan code/docs (`raycast_dave_comparison.md` §6); DAVE credited (§7, design §9/§10);
+  ray-cast system gain + profile loader (`config.py`); **fit basis** (`fitbasis.py`) exact vs full
+  renders (worst 0.0009 dB over 6 cases; 20 s to build per pose). Full `raycast_test` running
+  (`~/ros2_ws/sim_runs/raycast/notes/s3/rt_full_s3.log`). `gates.yaml` NOT yet written; no corpus
+  render yet.
+* 2026-11-04 — **Gates frozen before any ray-cast corpus render:** `~/calib/raycast/gates.yaml`
+  sha256 `609a806de11d1e2819171345662b9956e536493cfc3a8fe6babdbaf5a428d495` (private file, outside the repo). Contents:
+  - absolute tolerances against real data for every statistic, set from real scales only
+    (`~/calib/raycast/real_stats.json`: real values, no simulation);
+  - "improves" defined by the bootstrap interval over pings;
+  - the go rule; the parameter, compute and blind-test reports.
+  Since the last line:
+  - full suite under the multipath default **112 passed / 0 failed / 4 skipped** (only 6 world folders
+    exist since 2026-11-03 22:20; the harbour and arob2027 worlds and the original pool worlds were
+    removed outside this session);
+  - ray-cast registry entries (21; registry 119, no drift);
+  - `config/raycast_default_sonar.yaml` (generated);
+  - an additive renderer hook in `calibration/seabed.py`;
+  - `analysis/raycast_compare.py`.
+* 2026-11-04 — **Owner: "make the computation GPU compatible"; check that less data would not give the
+  same results; rebuild any out-of-date world that is needed.**
+  - The CPU reference is the limit. Flat sand costs 9–11 s per ping-side; a pool ping-side with the
+    calm-water comb was still unfinished at 44 min when stopped (lower bound, `notes/s4/cpu_timing.log`).
+    The pool validation set would exceed the pre-registered 24 h compute line.
+  - So Phase 4 is pulled forward, in front of the first fit's scoring:
+    - `gpu_warp.py`: the visibility oracle (`WarpBVH`, a drop-in for the CPU BVH) and the near-field
+      aperture integral (`near_pattern`);
+    - `RaycastConfig.backend: cpu | warp`;
+    - gate G1 in `test/raycast_test.py` (`gpu_checks`): the leak probe through the GPU oracle, and
+      GPU = CPU renders, ε_μ ≤ 1e-4.
+    The calibration fit bases (59 of 1512 built on the CPU) are kept.
+  - Density convergence (§6 metric) is checked on the GPU before the fit: `tools/density_sweep.py`.
+  - Worlds: the 6 remaining folders are acoustically current (no stale rasters). The harbour world
+    (needed for the harbour quay statistic and the Phase-8 harbour cases) is the one to rebuild.
+* 2026-11-04 — **GPU leak fixed; harbour world in; gates amendment 1 frozen.**
+  - The GPU oracle leaked 375 of 22 049 edge-midpoint probes. Cause: NVRTC contracts the edge
+    function `a·b − c·d` into an FMA, which is not antisymmetric. Both triangles of a shared edge
+    then read the same sign (+1.7e-18 on a box diagonal), and a ray through the edge passes between
+    them. Fix: `gpu_warp` is compiled with `fuse_fp: False`, so every operation is the IEEE one numpy
+    performs. Hits and tie-breaks now equal the CPU reference on the failing case. A canonical
+    vertex order with two expression sites did NOT fix it: each site fused its own way.
+    A second cause left 56 leaks on a cone's base rim. The float64 test ran on coordinates shifted
+    to the mesh's centre, which lose a sub-ulp offset that is representable near z = 0. It now runs
+    on the global coordinates, with the float32 boxes alone in the shifted frame. The leak probe
+    gives 0 of 22 049.
+  - The owner built `~/worlds/Shiraishijima_lawnmower/Shiraishijima-empty`. The checks are tools
+    outside the repo: `tools/harbour_coverage.py` and `tools/harbour_depth_check.py`.
+    - Every non-hold-out harbour GPS fix lies inside the limits; six quays are within range of a
+      track.
+    - The bathymetry is a chart-datum survey. Its shape matches the sonar to a median 0.18–0.61 m
+      once a per-recording offset is removed. That offset is the tide: 1.2–3.9 m, rising through the
+      day.
+    - The renderers put z = 0 at the run's still water. Each recording is therefore rendered in a
+      derived world at its own water level. `tools/tide_worlds.py` builds it through the World
+      Builder's headless path from the owner's `builder_state.yaml`: survey depth + h, quay tops
+      unchanged. `Shiraishijima-wl3p85` and `-wl3p00` are built.
+    - The rule for h and the measured values are in `~/calib/raycast/harbour_tide.yaml`. The
+      hold-out's h is measured by the same rule at the final test.
+  - **Gates amendment 1** (`~/calib/raycast/gates_amendment_1.yaml`, sha256
+    `7c57fff820e5ee167807135ff7692de56d022e01db2c5f0abb3b347ab08fa592`, private).
+    - `harbour_quay_face` becomes AVAILABLE, with the rule it lacked. It is the quay echo's excess
+      over the seabed tail, with a ±3 m search for the GPS error. Two validation recordings carry it.
+    - Its tolerance (3 dB) and its non-motivating role are unchanged.
+    - It was written after its real values were measured (+8.36 dB and +3.23 dB) and before any
+      simulated harbour render.
+* 2026-11-04 — **Density convergence (§6) on the GPU: 5 mm stays.**
+  - Flat sand at 1.4 m and 6 m altitude, spacings 2.5 / 5 / 7 / 10 / 20 mm (`raycast_phase4.md`).
+  - 5 mm: ε_μ p95 = 0.008 / 0.006 (≤ 0.02); KS passes; range lag-1 0.50 at every spacing.
+  - 10 mm fails the mean at both altitudes (0.035 / 0.023). 7 mm passes with no margin.
+  - Cost: 2.5–3.3 s per flat ping-side on the GPU at 5 mm.
+  - Multipath diffuse pairs folded by reciprocity, (i, j) + (j, i) → 2 (i, j): K(K+1)/2 pairs
+    instead of K². `sigma_bistatic` is reciprocal to 1.2e-15 (2·10⁵ random geometries, three
+    materials).

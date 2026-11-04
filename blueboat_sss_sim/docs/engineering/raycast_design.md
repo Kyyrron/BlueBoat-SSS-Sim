@@ -314,11 +314,18 @@ the pool, harbour and wavy-wall worlds:
 
 The decision table goes into `raycast_phase4.md`.
 
+Patterns adopted from DAVE's multibeam sonar (Choi et al. 2021, doi:10.3389/frobt.2021.706646; code
+`IOES-Lab/dave`, Apache-2.0; re-implemented, credited in `raycast_dave_comparison.md` §7):
+a deterministic two-stage accumulation (per contributor-block writes, then a fixed-order reduction per
+bin) in place of atomics, persistent device buffers across pings, and frequency-domain synthesis for the
+coherent contributors (optional, Phase 5).
+
 ## 10. Determinism
 
 CPU: same seed → bit-identical image (numpy, counter-based hashes). GPU: identical contributor sets
-and phases (integer hashes). Sums are float64, or phases referenced to the bin range. Atomic order
-makes GPU results equal to CPU within G1, not bitwise; this is documented, not hidden.
+and phases (integer hashes). Sums are float64, or phases referenced to the bin range. With DAVE's
+two-stage reduction (no atomics; Choi et al. 2021, see §9) GPU results are bitwise repeatable run to
+run and equal to CPU within G1 (summation order differs from numpy's); documented, not hidden.
 
 ## 11. Integration contract (Phase 6)
 
@@ -373,3 +380,62 @@ Updated 2026-11-03 with the owner's answers.
     inner-scale roll-off), fitted in Phase 7 inside the J&R envelope.
   - The pool cannot constrain sand: its floor is painted concrete.
 - **Cross-talk (X1):** excluded, detection limit +6 dB.
+
+## 14. Session-3 decisions (2026-11-03): the bottom path and multipath
+
+**The floor's mean field (`specular.py`).** The coherent reflection of the seabed sheet is rendered as
+physical optics over the sheet's own triangles, not as an image construction:
+- planar parallelogram patches, linear phase integrated exactly (`sinc`s of `facets.po_bistatic`);
+- the Kirchhoff prefactor `i k/2π` in this renderer's `exp(−iωτ)` convention, so an infinite flat
+  floor returns the image source `V/(2h)` in amplitude **and phase** (the smooth solids' PO now carries
+  the same factor; magnitudes unchanged);
+- `V(θ)` at each patch's own incidence angle (the tangent-plane rule; J&R 8.49 for sediments, the
+  material's fluid half-space otherwise);
+- `√C = exp(−½ Δk_z² σ_h²)`, `Δk_z = k|n·(out − inc)|` (Eckart, bistatic form);
+- `σ_h` is **not a new constant**: the RMS of the same J&R power-law spectrum the diffuse law uses,
+  above `K_low = max(π/r_F, π/Δx)`, `r_F = √(λR/2)` the two-way first Fresnel radius and `Δx` the
+  sheet cell. The mesh carries every larger scale, so nothing is counted twice. Consequence: the
+  coherent fraction depends on the world's raster resolution beyond `h ≈ 2Δx²/λ` (5.9 m at 0.1 m),
+  a stated property of the composite split, not hidden;
+- a smooth stationary-phase window (weight 1 inside 8 Fresnel zones, raised cosine to 0 at 30) in the
+  bisector's tilt against the smoothed sheet normal, **anisotropic** for oblique specular geometry
+  (a bistatic zone is 1/sin ψ wider across the plane of incidence). Numerical settings, converged in
+  Phase 5;
+- known approximation: the carrier-frequency Kirchhoff kernel omits the envelope-derivative term
+  (≤ 1.2 % amplitude at the envelope flanks, 0 at the peak; S4/S5 residual phase 0.018 rad).
+
+**Finding.** With the literature spectra (SAX99 sand, Key West mud) extrapolated to 450 kHz, the nadir
+mean field is zero (C < 1e-13 at every altitude): the specular energy is entirely in the incoherent
+near-specular lobe, which the SSA already renders (broad and weak for SAX99). A coherent first bottom
+return exists only for `w₂ ≲ SAX99/30`, still inside the J&R sand envelope. So the 450 kHz spectrum
+(`w₂`, `γ₂`) decides NC #4 for this sensor; it is fitted in Phase 7 (bounds below) with NC #4 held.
+
+**Fitted-parameter bounds made concrete** (J&R Table 13.1 read 2026-11-03, `seabed_ssa.OVERRIDE_BOUNDS`;
+profile key `raycast.seabed.sediments`):
+
+| Sediment | w₂ | γ₂ | σ₂ |
+|---|---|---|---|
+| sand | [3.56e-7, 1.475e-4] (Panama City 84 … Panama City 93) | (2, 3.92] (SSA needs α ∈ (0, 1)) | [1e-4, 4e-3] (eq. 14.9) |
+| mud | [3.56e-7, 4.1e-3] (the whole table) | (2, 3.92] | [1e-4, 4e-3] |
+
+**Eigenray chains (`chains.py`).** The image method over the surface (exact plane), the seabed sheet
+and planar faces (walls). Floor bounces are the stationary points of the path length over the sheet,
+found by a damped Newton solve (analytic gradient with the smoothed slope, finite-difference Hessian;
+the fixed-point tangent iteration oscillated on curved floors). One eigenray per chain: on a floor
+with several specular points for one (P, X) the solve returns the one nearest the flat-floor image
+point (a stated limitation; 20 of 40 chains valid on a 0.6 m / 9 m wavy floor, all 40 on a sloping
+one). The near-field aperture pattern of a chain is evaluated at its departure direction **times its
+unfolded length** (the image transducer radiates toward X; at the unit vector it is the 1 m pattern —
+a bug found while integrating).
+
+**Multipath (`multipath.py`).** Every contributor through every pair of kept chains; a diffuse
+scatterer's pairs share its world-fixed factor (one `add_group` call per contributor chunk, so the
+pairs interfere in the mean: Lloyd, comb). Sequences are kept by the §2.2 energy bound, evaluated on
+geometry before any visibility ray. No physical path is counted twice:
+- a chain whose last bounce is the contributor's own surface is degenerate and not built;
+- the floor's mean field is the PO at the **first** floor bounce in time: out chains carry only the
+  surface image, back chains any surface/floor alternation.
+The incoherent share `1 − C` of each specular bounce (forward scatter, double scattering) is not
+rendered (optional, off), for the floor as for the surface. The surface RMS default is the geometric
+profile's judged open-water 0.02 m (surface chains then fall below the cut-off); a calm site is a
+record (pool 3e-4 m, pass 4).

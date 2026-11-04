@@ -48,13 +48,15 @@ class RaycastRenderer(SonarRenderer):
         self._rc = config or RaycastConfig()
         rc = self._rc
         self.mesh = mesh if mesh is not None else build_scene_mesh(scene, world_dir)
-        self.oracle = oracle if oracle is not None else SceneOracle(self.mesh)
+        self.oracle = (oracle if oracle is not None
+                       else SceneOracle(self.mesh, backend=rc.backend))
         self.water = _prop.Water(rc.water.temperature_c, rc.water.salinity_ppt,
                                  rc.water.ph, rc.water.mean_depth_m,
                                  float(OMNISCAN_FREQ_HZ))
         self.c = self.water.sound_speed
         self.k = self.water.wavenumber
         self.omega = 2.0 * np.pi * float(OMNISCAN_FREQ_HZ)
+        self.freq_hz = float(OMNISCAN_FREQ_HZ)
         self.alpha = self.water.alpha_db_per_m
         # The apertures are physical lengths: derived ONCE from the datasheet
         # widths at the device's nominal 1500 m/s, then radiated at the
@@ -71,7 +73,7 @@ class RaycastRenderer(SonarRenderer):
             raise ValueError(f"vertical_floor_amp {vf} outside [0, 0.3]")
         self.aperture = _beam.Aperture(
             L, _beam.aperture_from_width(rc.beam.height_deg, k_nom, False),
-            self.k, vertical_floor=vf)
+            self.k, vertical_floor=vf, gpu=(rc.backend == "warp"))
         self.tilt = np.radians(float(model.beam_tilt_deg))
         self.envelope = envelope_for(acquisition,
                                      rc.receiver.filter_duration_percent,
@@ -111,6 +113,54 @@ class RaycastRenderer(SonarRenderer):
                          for o in self._facet_objs]
         self._facet_sigma = [object_roughness_m(o) for o in self._facet_objs]
         self._facet_cache: dict[int, object] = {}
+        # The seabed sheet's coherent (mean-field) channel: the bottom path's
+        # specular return (specular.py; FBR imaged, NC #4).
+        sc = rc.specular
+        self.specular = None
+        if sc.enabled:
+            from .specular import SheetSpecular
+            self.specular = SheetSpecular(
+                self.mesh, scene, self.k, float(OMNISCAN_FREQ_HZ),
+                sc.window_n1, sc.window_n2, sc.patch_phase_rad,
+                sc.patch_min_m, sc.patch_max_m,
+                sediments=getattr(self.law, "sediments", None))
+        self._set_layers(lib)
+        self.multipath = None
+        if rc.paths.enabled and int(rc.paths.max_order) > 0:
+            from .multipath import Multipath
+            self.multipath = Multipath(self)
+
+    def _set_layers(self, lib) -> None:
+        """Flooded thin shells (a material backed by water, e.g. ``pp_shell``,
+        unless the instance says ``flooded: false``) transmit through their
+        surface triangles by the fluid-layer formula at the crossing angle
+        (O6): the measured 0.11 of the field box is a validation number, not
+        an input (raycast_design §3)."""
+        from ...worldgen.materials import (WATER_DENSITY_KGM3,
+                                           WATER_SOUND_SPEED_MPS)
+        from .scene_mesh import KIND_SMOOTH_OBJECT
+        m = self.mesh
+        nt = m.n_triangles
+        mask = np.zeros(nt, dtype=bool)
+        rho = np.ones(nt)
+        cr = np.ones(nt)
+        th = np.zeros(nt)
+        for o in self._facet_objs:
+            mat = lib.get(o.material)
+            params = dict(getattr(o, "params", None) or {})
+            if (mat.backing or "solid").lower() != "water" or params.get("flooded") is False:
+                continue
+            if mat.density_kgm3 <= 0 or mat.sound_speed_mps <= 0:
+                continue
+            wall = params.get("wall_mm")
+            d = float(wall) * 1e-3 if wall is not None else float(mat.wall_m)
+            sel = (m.kind == KIND_SMOOTH_OBJECT) & (m.object_id == int(o.object_id))
+            mask |= sel
+            rho[sel] = mat.density_kgm3 / WATER_DENSITY_KGM3
+            cr[sel] = mat.sound_speed_mps / WATER_SOUND_SPEED_MPS
+            th[sel] = d
+        k1 = 2.0 * np.pi * self.freq_hz / WATER_SOUND_SPEED_MPS
+        self.oracle.set_layers(mask, rho, cr, th, k1)
 
     # ------------------------------------------------------------- geometry
     def sensor_pose(self, side: Side, p: Pose3D) -> Pose3D:
@@ -181,6 +231,23 @@ class RaycastRenderer(SonarRenderer):
             hi = np.where(inb, np.maximum(hi, v[0]), hi)
         return lo, hi, q0 * h
 
+    def _band_bbox(self, P: np.ndarray, e_a: np.ndarray, e_n: np.ndarray
+                   ) -> tuple[float, float, float, float]:
+        """Bounding box (x0, y0, x1, y1) of the band parallelogram of
+        :meth:`_sheet_region`."""
+        ea_xy = e_a[:2]
+        na = np.linalg.norm(ea_xy)
+        eh = ea_xy / na
+        look = e_n[:2] / max(np.linalg.norm(e_n[:2]), 1e-9)
+        dz = abs(P[2] - self._zmin) + 1.0
+        W = (float(self._w_tab[-1]) + abs(e_a[2]) * dz) / na
+        c = P[:2]
+        poly = np.array([c - dz * look - W * eh, c + self.r_max * look - W * eh,
+                         c + self.r_max * look + W * eh,
+                         c - dz * look + W * eh])
+        return (float(poly[:, 0].min()), float(poly[:, 1].min()),
+                float(poly[:, 0].max()), float(poly[:, 1].max()))
+
     def _scatterers(self, P: np.ndarray, e_a: np.ndarray, e_n: np.ndarray
                     ) -> Scatterers:
         lo, hi, y0 = self._sheet_region(P, e_a, e_n)
@@ -206,8 +273,15 @@ class RaycastRenderer(SonarRenderer):
                                                sensor.roll, side.sign,
                                                self.tilt)
         grid = BinGrid(acq, self.envelope, self.omega, SPEED_OF_SOUND_MPS)
-        self.direct_path(P, e_a, e_n, e_v, grid)
-        self.facet_path(P, e_a, e_n, e_v, grid)
+        if self.multipath is not None:
+            self.multipath.diffuse(P, e_a, e_n, e_v, grid)
+            self.multipath.facets(P, e_a, e_n, e_v, grid, grid.mean)
+            if self.specular is not None:
+                self.multipath.floor_coherent(P, e_a, e_n, e_v, grid, grid.mean)
+        else:
+            self.direct_path(P, e_a, e_n, e_v, grid)
+            self.facet_path(P, e_a, e_n, e_v, grid)
+            self.floor_specular_path(P, e_a, e_n, e_v, grid)
         power = grid.mean
         lit = power > 0.0
         texture = np.where(lit, grid.intensity / np.where(lit, power, 1.0), 1.0)
@@ -286,6 +360,49 @@ class RaycastRenderer(SonarRenderer):
         return {"candidates": c["candidates"], "kept": c["kept"],
                 "visible": int(c["det"].size)}
 
+    # ------------------------------------------------- coherent floor channel
+    def floor_specular_contributions(self, P, e_a, e_n, e_v, B=None,
+                                     beam: bool = True,
+                                     visibility: bool = True) -> dict:
+        """The seabed sheet's mean field between the transducer P and the
+        receiver B (default P: the monostatic bottom path), as coherent
+        contributors: ``amp`` (pattern, TL, PO, V, sqrt(C), window) and the
+        delay. ``beam=False`` drops the pattern (the S4/S5 gate)."""
+        sp = self.specular
+        if sp is None:
+            return dict(amp=np.zeros(0, complex), tau=np.zeros(0), n=0)
+        B = P if B is None else np.asarray(B, float)
+        p = sp.patches(P, B, self._band_bbox(P, e_a, e_n))
+        if len(p) == 0:
+            return dict(amp=np.zeros(0, complex), tau=np.zeros(0), n=0)
+        amp, ra, rb, inc, out, w = sp.amplitudes(p, P, B)
+        keep = (w > 0.0) & (amp != 0.0) & (ra <= self.r_max) & (rb <= self.r_max)
+        idx = np.flatnonzero(keep)
+        if idx.size and beam:
+            bt = self.aperture.pattern(p.centre[idx] - P, e_a, e_n, e_v,
+                                       self._rc.beam.near_field)
+            br = bt if B is P else self.aperture.pattern(
+                p.centre[idx] - B, e_a, e_n, e_v, self._rc.beam.near_field)
+            amp = amp.copy()
+            amp[idx] = amp[idx] * bt * br
+        if idx.size and visibility:
+            off = self._rc.sampling.surface_offset_m
+            end = p.centre[idx] + off * p.normal[idx]
+            vis = ~self.oracle.occluded(np.broadcast_to(P, end.shape), end)
+            if B is not P:
+                vis &= ~self.oracle.occluded(np.broadcast_to(B, end.shape), end)
+            idx = idx[vis]
+        a = (amp[idx] * _prop.leg_amplitude(ra[idx], self.alpha)
+             * _prop.leg_amplitude(rb[idx], self.alpha))
+        return dict(amp=a, tau=(ra[idx] + rb[idx]) / self.c, n=int(idx.size),
+                    patches=len(p))
+
+    def floor_specular_path(self, P, e_a, e_n, e_v, grid: BinGrid) -> int:
+        c = self.floor_specular_contributions(P, e_a, e_n, e_v)
+        if c["n"]:
+            grid.add(c["amp"], c["tau"], diffuse=False)
+        return c["n"]
+
     # ------------------------------------------------------- smooth solids
     def _patches(self, i: int):
         p = self._facet_cache.get(i)
@@ -359,7 +476,10 @@ class RaycastRenderer(SonarRenderer):
         gv = np.einsum("ij,ij->i", p.v[idx], g[idx])
         area = (p.a[idx] * p.b[idx] * np.sinc(k * p.a[idx] * gu / np.pi)
                 * np.sinc(k * p.b[idx] * gv / np.pi))
-        amp = (k / (2.0 * np.pi)) * cos_t[idx] * area * refl
+        # Kirchhoff prefactor i k / 2 pi in this exp(-i omega tau)
+        # convention (specular.py): the phase consistent with the floor's
+        # mean field and the image paths; |amp| as facets.po_amplitude.
+        amp = (1j * k / (2.0 * np.pi)) * cos_t[idx] * area * refl
         if eckart is not None and rms_m > 0.0:
             psi = np.arcsin(np.clip(cos_t[idx], 0.0, 1.0))
             amp = amp * np.sqrt(eckart(psi, rms_m, k))

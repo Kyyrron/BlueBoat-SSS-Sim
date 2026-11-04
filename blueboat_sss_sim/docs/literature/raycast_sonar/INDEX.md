@@ -65,6 +65,9 @@ cited only where Jackson & Richardson cite it, never as the source of a constant
 | Car09 | Carey 2009, Acoustics Today 5(2):14 | 10.1121/1.3182842 | record | 02 |
 | Cer17 | Cerqueira et al. 2017, Computers & Graphics 68:66 | 10.1016/j.cag.2017.08.008 | record | 01 |
 | Choi21 | Choi et al. 2021, Front. Robot. AI 8:706646 | 10.3389/frobt.2021.706646 | full (open access) | 01 |
+| DAVE | IOES-Lab/dave, `gazebo/dave_gz_multibeam_sonar/multibeam_sonar/` (Choi21's code; Apache-2.0, NPS) | https://github.com/IOES-Lab/dave, branch `ros2` @ c1c2fba995e7 (CUDA core last changed 0f20acd, 2025-08-26) | full (code read 2026-11-03, not built) | 01; `docs/engineering/raycast_dave_comparison.md` |
+| Stonefish | Cieslak, Stonefish simulator, side-scan sensor (`SSS.cpp`, `OpenGLSSS.cpp`, `shaders/sss*.comp`) | https://github.com/patrykcieslak/stonefish (GPL-3.0) | code read 2026-11-03 (ideas only) | `raycast_dave_comparison.md` §6 |
+| HoloOcean-SSS | HoloOcean side-scan sensor documentation (octree / raycast / GPU back-ends) | https://github.com/byu-holoocean/holoocean-docs (`develop/_sources/sensors/sensors/sidescan-sonar-sensor.rst.txt`) | docs read 2026-11-03 | `raycast_dave_comparison.md` §6 |
 | Coi09a | Coiras & Groen 2009, *Advances in Sonar Technology* | 10.5772/39406 | record | 01 |
 | Coi09b | Coiras, Ramirez-Montesinos, Groen 2009, OCEANS-Europe | 10.1109/OCEANSE.2009.5278213 | record | 01 |
 | COJ92 | Cobra, Oppenheim, Jaffe 1992, IEEE JOE 17(3):252 | 10.1109/48.153442 | full (local) | 09 |

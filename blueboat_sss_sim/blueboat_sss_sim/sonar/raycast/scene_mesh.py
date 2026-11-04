@@ -96,10 +96,6 @@ class TriangleScene:
         n = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
         return n / np.maximum(np.linalg.norm(n, axis=1), 1e-300)[:, None]
 
-    def areas(self) -> np.ndarray:
-        tv = self.triangle_vertices()
-        return 0.5 * np.linalg.norm(
-            np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0]), axis=1)
 
 
 # =============================================================== primitives
@@ -528,9 +524,19 @@ class SceneHits:
 class SceneOracle:
     """The one visibility oracle: triangles (BVH) + the plane z = 0."""
 
-    def __init__(self, mesh: TriangleScene, bvh: TriangleBVH | None = None):
+    def __init__(self, mesh: TriangleScene, bvh: TriangleBVH | None = None,
+                 backend: str = "cpu"):
         self.mesh = mesh
-        self.bvh = bvh or TriangleBVH(mesh.vertices, mesh.triangles)
+        if bvh is None:
+            if backend == "warp":
+                # the GPU oracle (gpu_warp.py), imported only when selected
+                from .gpu_warp import WarpBVH
+                bvh = WarpBVH(mesh.vertices, mesh.triangles)
+            elif backend == "cpu":
+                bvh = TriangleBVH(mesh.vertices, mesh.triangles)
+            else:
+                raise ValueError(f"oracle backend {backend!r} (cpu | warp)")
+        self.bvh = bvh
 
     def closest(self, orig, dirs, t_max=np.inf, t_min: float = 1e-9
                 ) -> SceneHits:
@@ -549,6 +555,67 @@ class SceneOracle:
         return SceneHits(t=t, tri=tri, u=np.where(surf, 0.0, h.u),
                          v=np.where(surf, 0.0, h.v))
 
+    #: per-triangle thin-layer properties (``set_layers``); None = all opaque
+    layer = None
+
+    def set_layers(self, mask: np.ndarray, rho_ratio: np.ndarray,
+                   c_ratio: np.ndarray, thickness: np.ndarray, k1: float) -> None:
+        """Triangles that are flooded thin shells: a crossing transmits by
+        :func:`layer_transmission` instead of blocking."""
+        if not np.any(mask):
+            self.layer = None
+            return
+        self.layer = dict(mask=np.asarray(mask, bool),
+                          rho=np.asarray(rho_ratio, float),
+                          c=np.asarray(c_ratio, float),
+                          d=np.asarray(thickness, float), k1=float(k1))
+
+    def transmit(self, p0, p1, eps: float = 1e-6, max_cross: int = 12
+                 ) -> np.ndarray:
+        """Complex transmission of the open segment p0 -> p1: 0 where an
+        opaque triangle (or the sea surface) is crossed, else the product of
+        the thin layers' factors (1 when nothing is crossed)."""
+        p0 = np.atleast_2d(np.asarray(p0, dtype=np.float64)).copy()
+        p1 = np.atleast_2d(np.asarray(p1, dtype=np.float64))
+        n = p0.shape[0]
+        zs = self.mesh.surface_z
+        crosses = (np.maximum(p0[:, 2], p1[:, 2]) > zs + eps) & \
+            (np.minimum(p0[:, 2], p1[:, 2]) < zs - eps)
+        T = np.where(crosses, 0.0 + 0j, 1.0 + 0j)
+        act = ~crosses
+        nrm = None
+        for _ in range(max_cross):
+            if not act.any():
+                break
+            i = np.flatnonzero(act)
+            d = p1[i] - p0[i]
+            L = np.linalg.norm(d, axis=1)
+            u = d / np.maximum(L, 1e-300)[:, None]
+            h = self.bvh.closest(p0[i], u, t_max=np.maximum(L - eps, 0.0),
+                                 t_min=eps)
+            hit = h.tri >= 0
+            act[i[~hit]] = False
+            if not hit.any():
+                break
+            ih, tr = i[hit], h.tri[hit]
+            lay = self.layer
+            if lay is None:
+                T[ih] = 0.0
+                act[ih] = False
+                break
+            thin = lay["mask"][tr]
+            T[ih[~thin]] = 0.0
+            act[ih[~thin]] = False
+            if thin.any():
+                it, tt = ih[thin], tr[thin]
+                if nrm is None:
+                    nrm = self.mesh.normals()
+                cos1 = np.abs(np.einsum("ij,ij->i", nrm[tt], u[hit][thin]))
+                T[it] *= layer_transmission(cos1, lay["rho"][tt], lay["c"][tt],
+                                            lay["d"][tt], lay["k1"])
+                p0[it] = p0[it] + (h.t[hit][thin] + 10 * eps)[:, None] * u[hit][thin]
+        return T
+
     def occluded(self, p0, p1, eps: float = 1e-6) -> np.ndarray:
         """True where the open segment p0 -> p1 crosses the scene or leaves
         the water (crosses z = 0)."""
@@ -559,3 +626,27 @@ class SceneOracle:
         crosses = (np.maximum(p0[:, 2], p1[:, 2]) > zs + eps) & \
             (np.minimum(p0[:, 2], p1[:, 2]) < zs - eps)
         return out | crosses
+
+
+# ============================================================ thin layers
+def layer_transmission(cos1: np.ndarray, rho_ratio: np.ndarray,
+                       c_ratio: np.ndarray, d: np.ndarray, k1: float
+                       ) -> np.ndarray:
+    """Pressure transmission of a fluid layer (density and sound-speed ratios
+    to water, thickness ``d``) in water at incidence cosine ``cos1``
+    (Brekhovskikh & Lysanov 2003 ch. 2; Kinsler et al. par. 6.3, oblique):
+    ``T = 1 / (cos(k2z d) - i/2 (m + 1/m) sin(k2z d))``, ``m = Z2n / Z1n``,
+    ``Z_n = rho c / cos(theta)``, Snell in the layer (evanescent beyond its
+    critical angle). Referred to the straight water path through the same
+    thickness, in this renderer's exp(-i omega tau) convention (the conjugate
+    of the textbook exp(-i omega t) form). Shear in the layer is omitted (a
+    fluid layer; Folds & Loggins 1977 is the elastic upgrade), stated."""
+    c1 = np.clip(np.abs(np.asarray(cos1, float)), 1e-6, 1.0)
+    s1 = np.sqrt(1.0 - c1 * c1)
+    s2 = c_ratio * s1
+    c2 = np.sqrt((1.0 - s2 * s2).astype(complex))
+    c2 = np.where(np.imag(c2) < 0, -c2, c2)
+    k2z = (k1 / c_ratio) * c2
+    m = rho_ratio * c_ratio * c1 / np.where(np.abs(c2) > 1e-12, c2, 1e-12)
+    T = 1.0 / (np.cos(k2z * d) - 0.5j * (m + 1.0 / m) * np.sin(k2z * d))
+    return np.conj(T * np.exp(-1j * k1 * c1 * d))

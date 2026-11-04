@@ -163,6 +163,19 @@ class IkTable:
         return np.exp(v)
 
 
+_IK_TABLES: dict = {}
+
+
+def ik_table(beta: float) -> "IkTable":
+    """A memoised :class:`IkTable` (a fit rebuilds the law per evaluation;
+    the table depends on the spectral exponent only)."""
+    key = round(float(beta), 9)
+    t = _IK_TABLES.get(key)
+    if t is None:
+        t = _IK_TABLES[key] = IkTable(key)
+    return t
+
+
 # ------------------------------------------------------------------- the law
 @dataclass(frozen=True)
 class SedimentParams:
@@ -203,6 +216,45 @@ SEDIMENTS = {
 }
 
 
+#: Bounds of the fitted overrides (raycast_design §8). w2 and gamma2: the
+#: range of J&R Table 13.1 (p. 349; read 2026-11-03) -- sand sites (phi
+#: 0.51-2.63): w2 3.56e-7 (Panama City 84) .. 1.475e-4 (Panama City 93);
+#: mud (Key West, the only fine site besides Quinault): the whole table,
+#: 3.56e-7 .. 4.1e-3 (Quinault). gamma2: the table's 3.92 at most, and
+#: > 2 for the small-slope law's alpha = gamma2/2 - 1 in (0, 1) (and a finite
+#: coherent-sum RMS; Panama City 84's 1.89 is outside the law's range).
+#: sigma2: J&R eq. 14.9, "typical values 0.0001 to 0.004".
+OVERRIDE_BOUNDS = {
+    "sand": {"w2": (3.56e-7, 1.475e-4), "gamma2": (2.0 + 1e-6, 3.92),
+             "sigma2": (1e-4, 4e-3)},
+    "mud": {"w2": (3.56e-7, 4.1e-3), "gamma2": (2.0 + 1e-6, 3.92),
+            "sigma2": (1e-4, 4e-3)},
+}
+
+
+def sediments_for(overrides=None) -> dict:
+    """``SEDIMENTS`` with the bounded overrides applied (unknown sediment
+    or key, or a value outside its bound, raises)."""
+    import dataclasses
+    out = dict(SEDIMENTS)
+    for name, d in dict(overrides or {}).items():
+        if name not in OVERRIDE_BOUNDS:
+            raise KeyError(f"raycast.seabed.sediments: unknown sediment {name!r}")
+        bad = set(d) - set(OVERRIDE_BOUNDS[name])
+        if bad:
+            raise KeyError(f"raycast.seabed.sediments.{name}: unknown keys {sorted(bad)}")
+        for key, val in d.items():
+            lo, hi = OVERRIDE_BOUNDS[name][key]
+            if not lo <= float(val) <= hi:
+                raise ValueError(f"raycast.seabed.sediments.{name}.{key} = {val} "
+                                 f"outside [{lo}, {hi}]")
+        out[name] = dataclasses.replace(
+            SEDIMENTS[name], **{k: float(v) for k, v in d.items()},
+            source=SEDIMENTS[name].source + " (overridden: "
+            + ", ".join(sorted(d)) + ")")
+    return out
+
+
 def sin_theta_p(a_p: complex, cos_th: np.ndarray) -> np.ndarray:
     """``sin(theta_p) = sqrt(1 - a_p^2 cos^2 theta)`` on the branch whose
     transmitted wave decays into the sediment (Im(k_p sin theta_p) >= 0)."""
@@ -216,8 +268,13 @@ def reflection(p: SedimentParams, sin_th: np.ndarray) -> np.ndarray:
     sin_th = np.asarray(sin_th, dtype=np.float64)
     cos_th = np.sqrt(np.maximum(1.0 - sin_th ** 2, 0.0))
     stp = sin_theta_p(p.a_p, cos_th)
-    z = p.a_rho * p.a_p * sin_th / stp
-    return (z - 1.0) / (z + 1.0)
+    # at a lossless fast medium's critical angle sin(theta_p) = 0: z -> inf,
+    # V -> 1 (total reflection begins); guard the 0/0 there
+    crit = np.abs(stp) < 1e-15
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = p.a_rho * p.a_p * sin_th / np.where(crit, 1.0, stp)
+        V = (z - 1.0) / (z + 1.0)
+    return np.where(crit, 1.0 + 0j, V)
 
 
 class SSALaw:

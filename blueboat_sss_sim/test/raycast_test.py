@@ -829,6 +829,647 @@ def surface_path_checks() -> None:
           f"n=4 null {r29:.1f} m: {q29:.1f} dB; n=5 null {r15:.1f} m: {q15:.1f} dB")
 
 
+def bottom_path_checks() -> None:
+    """[S4/S5] the bottom path: the seabed sheet's mean field (PO) vs the
+    image source, monostatic and oblique; the floor-bounce eigenray vs
+    V(psi) sqrt(C); Fermat on a curved floor (P6, <= lambda/20)."""
+    from blueboat_sss_sim.core.types import Pose3D, Side
+    from blueboat_sss_sim.sonar.config import (SPEED_OF_SOUND_MPS,
+                                               AcquisitionParams)
+    from blueboat_sss_sim.sonar.raycast import beam as bm
+    from blueboat_sss_sim.sonar.raycast import chains as ch
+    from blueboat_sss_sim.sonar.raycast import paths as pa
+    from blueboat_sss_sim.sonar.raycast import propagation as pr
+    from blueboat_sss_sim.sonar.raycast import seabed_ssa as ssa
+    from blueboat_sss_sim.sonar.raycast.config import RaycastConfig
+    from blueboat_sss_sim.sonar.raycast.receiver import BinGrid
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R2] bottom path: the floor's mean field, floor-bounce eigenrays")
+    model = SonarModelConfig()
+    worst_db = worst_ph = 0.0
+    detail = []
+    for alt in (0.6, 1.4, 5.0, 10.0, 20.0):
+        acq = AcquisitionParams(range_length_mm=max(20000, int(np.ceil(alt * 1.6)) * 1000))
+        rr = RaycastRenderer(flat_scene(-(alt + model.sensor_depth_m)), acq,
+                             model, RaycastConfig())
+        P = np.array([*(lambda s: (s.x, s.y, s.z))(rr.sensor_pose(Side.PORT, Pose3D(0, 0, 0)))])
+        e_a, e_n, e_v = bm.transducer_frame(0, 0, 0, 1.0, rr.tilt)
+        for C in (1.0, 0.9, 0.5, 0.1):
+            sig = np.sqrt(-np.log(C)) / (2 * rr.k)
+            rr.specular.surf.rms_height = (lambda mat, R, lam, dx, s=sig:
+                                           np.full(np.shape(R), s))
+            c = rr.floor_specular_contributions(P, e_a, e_n, e_v, beam=False,
+                                                visibility=False)
+            g = BinGrid(acq, rr.envelope, rr.omega, SPEED_OF_SOUND_MPS)
+            g.add(c["amp"], c["tau"], diffuse=False)
+            V = ssa.reflection(ssa.SEDIMENTS["sand"], np.array([1.0]))[0]
+            ref = BinGrid(acq, rr.envelope, rr.omega, SPEED_OF_SOUND_MPS)
+            ref.add(np.array([V * np.sqrt(C) * pr.leg_amplitude(2 * alt, rr.alpha)]),
+                    np.array([2 * alt / rr.c]), diffuse=False)
+            b = int(np.argmax(np.abs(ref.field)))
+            e_db = abs(20 * np.log10(abs(g.field[b]) / abs(ref.field[b])))
+            e_ph = abs(float(np.angle(g.field[b] / ref.field[b])))
+            worst_db, worst_ph = max(worst_db, e_db), max(worst_ph, e_ph)
+        detail.append(f"{alt:g} m: {c['patches']} patches")
+    check("[S4/S5] monostatic: the floor's mean field = image source V(90) sqrt(C)/(2h) "
+          "(0.6-20 m, C = 1/0.9/0.5/0.1; <= 0.05 dB, <= 0.05 rad)",
+          worst_db <= 0.05 and worst_ph <= 0.05,
+          f"worst {worst_db:.4f} dB, {worst_ph:.4f} rad; " + ", ".join(detail))
+    # oblique: bistatic PO between A and B, and the floor-bounce eigenray
+    depth = 3.0
+    acq = AcquisitionParams(range_length_mm=80000, num_results=1200)
+    rr = RaycastRenderer(flat_scene(-depth, half=45.0), acq, model, RaycastConfig())
+    rr.r_max = 200.0
+    sig = 2e-4
+    rr.specular.surf.rms_height = lambda mat, R, lam, dx, s=sig: np.full(np.shape(R), s)
+    A = np.array([0.0, 0.0, -0.5])
+    e_a, e_n, e_v = bm.transducer_frame(0, 0, 0, 1.0, rr.tilt)
+    floor = ch.FloorBoundary(rr.specular)
+    wpo = wch = 0.0
+    lens = 0.0
+    for psi_deg in (80.0, 60.0, 30.0, 15.0, 8.0):
+        zB = -1.0
+        dx = (depth + A[2] + depth + zB) / np.tan(np.radians(psi_deg))
+        B = np.array([0.0, dx, zB])
+        rr._band_bbox = lambda P_, ea, en, _d=dx: (-2.0, -3.0, 2.0, _d + 3.0)
+        c = rr.floor_specular_contributions(A, e_a, e_n, e_v, B=B, beam=False,
+                                            visibility=False)
+        g = BinGrid(acq, rr.envelope, rr.omega, SPEED_OF_SOUND_MPS)
+        g.add(c["amp"], c["tau"], diffuse=False)
+        Af = A.copy(); Af[2] = -2 * depth - A[2]
+        Lr = np.linalg.norm(B - Af)
+        s_ = np.sin(np.radians(psi_deg))
+        V = ssa.reflection(ssa.SEDIMENTS["sand"], np.array([s_]))[0]
+        fac = V * np.exp(-0.5 * (2 * rr.k * sig * s_) ** 2)
+        ref = BinGrid(acq, rr.envelope, rr.omega, SPEED_OF_SOUND_MPS)
+        ref.add(np.array([fac * pr.leg_amplitude(Lr, rr.alpha)]),
+                np.array([Lr / rr.c]), diffuse=False)
+        b = int(np.argmax(np.abs(ref.field)))
+        wpo = max(wpo, abs(20 * np.log10(abs(g.field[b]) / abs(ref.field[b]))))
+        cb = ch.build(A, B[None, :], [floor], None, lam=2 * np.pi / rr.k)
+        wch = max(wch, abs(20 * np.log10(abs(cb.factor[0]) / abs(fac))))
+        lens = max(lens, abs(cb.length[0] - Lr))
+    rr.specular.surf.rms_height = type(rr.specular.surf).rms_height.__get__(rr.specular.surf)
+    check("[S4/S5] oblique (8-80 deg grazing): bistatic PO mean field and the "
+          "floor-bounce eigenray = V(psi) sqrt(C) at the image distance (<= 0.05 dB)",
+          wpo <= 0.05 and wch <= 0.05 and lens < 1e-9,
+          f"PO worst {wpo:.4f} dB; eigenray worst {wch:.2e} dB, length {lens:.1e} m")
+    # a surface chain is paths.surface
+    rng = np.random.default_rng(3)
+    X = np.column_stack([rng.uniform(-15, 15, 300), rng.uniform(-15, 15, 300),
+                         rng.uniform(-2.9, -0.3, 300)])
+    P = np.array([0.0, 0.0, -0.22])
+    srf = ch.SurfaceBoundary(rr.k, 3e-4)
+    a, b2 = ch.build(P, X, [srf]), pa.surface(P, X, rr.k, 3e-4)
+    check("surface chain == paths.surface (length, directions, factor)",
+          bool(np.allclose(a.length, b2.length) and np.allclose(a.depart, b2.depart)
+               and np.allclose(a.arrive, b2.arrive) and np.allclose(a.factor, b2.factor)))
+    # [P6] Fermat on a sloping floor vs a brute-force stationary search
+    n = 501
+    g6 = GridSpec(origin_x=-25.0, origin_y=-25.0, resolution=0.1, nx=n, ny=n)
+    xx = g6.origin_x + np.arange(n) * 0.1
+    yy = g6.origin_y + np.arange(n) * 0.1
+    Xg, Yg = np.meshgrid(xx, yy)
+    h6 = -3.0 - 0.04 * Yg - 0.15 * np.sin(2 * np.pi * (Xg + 0.5 * Yg) / 20.0)
+    sc6 = SceneModel(grid=g6, height=h6, reflectivity=np.full(h6.shape, 0.3),
+                     material_id=np.zeros(h6.shape, dtype=np.uint8),
+                     material_names=["sand"], objects=[], walls=[], seed=3,
+                     config_snapshot={}, outside="edge")
+    rr6 = RaycastRenderer(sc6, AcquisitionParams(), model, RaycastConfig())
+    fl6 = ch.FloorBoundary(rr6.specular)
+    lam6 = 2 * np.pi / rr6.k
+    Xs = np.column_stack([rng.uniform(-6, 6, 40), rng.uniform(4, 18, 40),
+                          rng.uniform(-1.5, -0.5, 40)])
+    cb6 = ch.build(P, Xs, [fl6], None, lam=lam6)
+    worst6 = 0.0
+    n_ok = 0
+    for i in np.flatnonzero(np.isfinite(cb6.length) & (np.abs(cb6.factor) > 0)):
+        Q = cb6.bounces[0][i]
+        # local brute force: the path length on a fine sheet grid around Q
+        u = np.linspace(-0.3, 0.3, 121)
+        qx, qy = np.meshgrid(Q[0] + u, Q[1] + u)
+        z, _, _ = rr6.specular._locate(qx.ravel(), qy.ravel())
+        Qs = np.column_stack([qx.ravel(), qy.ravel(), z])
+        Ls = np.linalg.norm(Qs - P, axis=1) + np.linalg.norm(Xs[i] - Qs, axis=1)
+        # the discrete stationary point of the true sheet path length: the
+        # grid point of least |grad L| (interior), compared in length
+        Lg = Ls.reshape(qx.shape)
+        gy, gx = np.gradient(Lg, u[1] - u[0])
+        gm = np.hypot(gx, gy)[2:-2, 2:-2]
+        jy, jx = np.unravel_index(int(np.argmin(gm)), gm.shape)
+        if min(jy, jx) < 2 or max(jy, jx) > gm.shape[0] - 3:
+            continue                      # stationary point outside the window
+        worst6 = max(worst6, abs(cb6.length[i] - Lg[jy + 2, jx + 2]))
+        n_ok += 1
+    check("[P6] Fermat on a sloping, gently curved floor (4 % + 0.15 m / 20 m): "
+          "the chain's reflection point is stationary (path error <= lambda/20)",
+          n_ok > 20 and worst6 <= lam6 / 20,
+          f"{n_ok} chains, worst {worst6 * 1e3:.3f} mm vs lambda/20 = "
+          f"{lam6 / 20 * 1e3:.3f} mm; iterations {cb6.iterations}")
+
+
+def comb_checks() -> None:
+    """[P2] the image comb: chains in an ideal waveguide (|R| = 1, calm)
+    vs the finite image sum at the same bounce cap and the closed form;
+    [P4] the pool FBR ramp from the floor's mean field through transducer
+    images (isotropic beam): direct, mixed (r_D + r_S)/2, surface-surface."""
+    from blueboat_sss_sim.core.types import Pose3D, Side
+    from blueboat_sss_sim.sonar.config import (SPEED_OF_SOUND_MPS,
+                                               AcquisitionParams)
+    from blueboat_sss_sim.sonar import waveguide as wg
+    from blueboat_sss_sim.sonar.raycast import beam as bm
+    from blueboat_sss_sim.sonar.raycast import chains as ch
+    from blueboat_sss_sim.sonar.raycast import seabed_ssa as ssa
+    from blueboat_sss_sim.sonar.raycast.config import (PathsConfig,
+                                                       RaycastConfig,
+                                                       shared_stage_model)
+    from blueboat_sss_sim.sonar.raycast.receiver import BinGrid
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R2] image comb and the pool FBR ramp")
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    D, zt = 0.9, 0.22
+    rr = RaycastRenderer(flat_scene(-D), AcquisitionParams(), model,
+                         RaycastConfig(paths=PathsConfig(surface_rms_m=0.0)))
+    mp = rr.multipath
+    mp.floor.factor = lambda Q, sp, Re: np.ones(Q.shape[0], dtype=complex)
+    P = np.array([0.0, 0.0, -zt])
+    worst_fin, worst_cl = 0.0, 0.0
+    det = []
+    for r, M in ((1.5, 6), (1.5, 40), (4.0, 6), (4.0, 12)):
+        X = np.array([[0.0, r, -zt]])
+        tot = 0.0
+        for seq in ch.sequences([mp.surface, mp.floor], M, 0):
+            c = ch.build(P, X, seq, None, mp.lam)
+            if abs(c.factor[0]) > 0:
+                tot += abs(c.factor[0]) ** 2 / c.length[0] ** 2
+        im = wg.image_set(zt, D, M + 2)
+        sel = im.n_bounce <= M
+        ref = float(np.sum(1.0 / (r * r + (im.depth[sel] - zt) ** 2)))
+        worst_fin = max(worst_fin, abs(tot / ref - 1.0))
+        det.append(f"r {r} m, {M} bounces: {10 * np.log10(tot / wg.ideal_image_sum_closed(r, D, zt)):+.3f} dB re closed form")
+        if (r, M) == (1.5, 40):
+            worst_cl = abs(10 * np.log10(tot / wg.ideal_image_sum_closed(r, D, zt)))
+    check("[P2] ideal-waveguide comb: chains = the image sum at the same bounce cap "
+          "(<= 1e-9), -> the closed form (<= 0.2 dB at 40 bounces, r = 1.5 m)",
+          worst_fin <= 1e-9 and worst_cl <= 0.2,
+          f"finite worst {worst_fin:.1e}; " + "; ".join(det))
+    # [P4] pool ramp: nadir 0.68 m in 0.9 m calm water, smooth floor (C = 1)
+    rr = RaycastRenderer(flat_scene(-D), AcquisitionParams(), model,
+                         RaycastConfig(paths=PathsConfig(surface_rms_m=0.0,
+                                                         max_order=3)))
+    rr.specular.surf.rms_height = lambda mat, R, lam, dx: np.zeros(np.shape(R))
+    s_ = rr.sensor_pose(Side.PORT, Pose3D(0, 0, 0))
+    P = np.array([s_.x, s_.y, s_.z])
+    e_a, e_n, e_v = bm.transducer_frame(0, 0, 0, 1.0, rr.tilt)
+    acq = AcquisitionParams()
+    g = BinGrid(acq, rr.envelope, rr.omega, SPEED_OF_SOUND_MPS)
+    rep = rr.multipath.floor_coherent(P, e_a, e_n, e_v, g, np.zeros(g.n),
+                                      beam=False, visibility=False)
+    h = D - zt
+    V = ssa.reflection(ssa.SEDIMENTS["sand"], np.array([1.0]))[0]
+    a = np.abs(g.coherent)
+    worst_pos, amps = 0.0, []
+    for L, amp_ref, name in ((2 * h, abs(V) / (2 * h), "direct"),
+                             (2 * h + 2 * zt, 2 * abs(V) / (2 * h + 2 * zt), "mixed"),
+                             (2 * h + 4 * zt, abs(V) / (2 * h + 4 * zt), "surface-surface")):
+        att = 10 ** (-rr.alpha * L / 20)
+        b_exp = (0.5 * L * SPEED_OF_SOUND_MPS / rr.c - g.start_m) / g.bin_m - 0.5
+        lo, hi = int(b_exp) - 4, int(b_exp) + 5
+        k = lo + int(np.argmax(a[lo:hi]))
+        y0, y1, y2 = a[k - 1], a[k], a[k + 1]
+        frac = 0.5 * (y0 - y2) / (y0 - 2 * y1 + y2)
+        worst_pos = max(worst_pos, abs(k + frac - b_exp))
+        amps.append(f"{name} {20 * np.log10(a[k] / (amp_ref * att * rr.envelope(np.array([0.0]))[0])):+.2f} dB")
+    check("[P4] pool FBR ramp (0.68 m altitude, 0.9 m calm water, smooth floor): "
+          "direct / mixed (r_D + r_S)/2 / surface-surface arrivals within 1 bin",
+          worst_pos <= 1.0,
+          f"worst {worst_pos:.2f} bin; peak amplitude vs image theory: "
+          + ", ".join(amps) + f"; floor pairs {rep['pairs']}, order {rep['order_reached']}")
+
+
+def wall_checks() -> None:
+    """[P3] a wall image exists only while its reflection point lies on the
+    face; [P5] an opaque sill between the boat and a quay in 0.9 m of calm
+    water removes the comb images whose legs it blocks (difference
+    reported)."""
+    from blueboat_sss_sim.core.types import Pose3D, Side, Wall
+    from blueboat_sss_sim.sonar.config import AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast import beam as bm
+    from blueboat_sss_sim.sonar.raycast import chains as ch
+    from blueboat_sss_sim.sonar.raycast.config import (PathsConfig,
+                                                       RaycastConfig,
+                                                       SamplingConfig,
+                                                       shared_stage_model)
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R2] wall paths: image validity, a sill shadowing the comb")
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    sc = flat_scene(-3.0)
+    sc.walls = [Wall("quay", -2.0, 8.0, 2.0, 8.0, top_z=0.5)]
+    rr = RaycastRenderer(sc, AcquisitionParams(), model, RaycastConfig())
+    mp = rr.multipath
+    face = [f for f in mp.faces if f.n[1] < -0.9][0]
+    P = np.array([0.0, 0.0, -0.22])
+    xs = np.linspace(-8.0, 8.0, 3201)
+    X = np.column_stack([xs, np.full(xs.size, 6.0), np.full(xs.size, -1.0)])
+    c = ch.build(P, X, [face], rr.oracle, mp.lam)
+    yf = face.c[1]
+    Pw = P.copy(); Pw[1] = 2 * yf - P[1]
+    t = (Pw[1] - yf) / (Pw[1] - X[:, 1])
+    Qx = Pw[0] + t * (X[:, 0] - Pw[0])
+    expect = np.abs(Qx - face.c[0]) <= face.hu
+    got = np.abs(c.factor) > 0
+    check("[P3] wall image: valid exactly while the reflection point lies on the "
+          "face (no ghost beyond a wall end)", bool(np.array_equal(expect, got)),
+          f"{int(got.sum())} of {xs.size} valid; face half-length {face.hu:.2f} m; "
+          f"mismatches {int((expect != got).sum())}")
+    # [P5] 0.9 m calm water, quay at y = 8 m, opaque sill at y = 4 m
+    acq = AcquisitionParams()
+    renders = {}
+    for label, walls in (("no sill", [Wall("quay", -10.0, 8.0, 10.0, 8.0, top_z=0.5)]),
+                         ("sill", [Wall("quay", -10.0, 8.0, 10.0, 8.0, top_z=0.5),
+                                   Wall("sill", -0.6, 4.0, 0.6, 4.0, top_z=-0.35,
+                                        thickness=0.3)])):
+        s9 = flat_scene(-0.9)
+        s9.walls = walls
+        r9 = RaycastRenderer(s9, acq, model, RaycastConfig(
+            paths=PathsConfig(surface_rms_m=3e-4),
+            sampling=SamplingConfig(scatterer_spacing_m=0.01)))
+        r9.specular.surf.rms_height = lambda mat, R, lam, dx: np.full(np.shape(R), 1e-5)
+        sensor = r9.sensor_pose(Side.PORT, Pose3D(0, 0, 0))
+        renders[label] = (r9.render(Side.PORT, Pose3D(0, 0, 0), 0.0).ping.power,
+                          dict(r9.multipath.last_report.get("diffuse", {})))
+    a, ra = renders["no sill"]
+    b, rb = renders["sill"]
+    r_dev = acq.range_start_mm / 1000 + (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+    face_r = 7.85 * 1500.0 / rr.c
+    bands = []
+    for lo, hi in ((face_r - 0.3, face_r + 0.3), (face_r + 0.3, face_r + 1.0),
+                   (face_r + 1.0, face_r + 3.0)):
+        m = (r_dev >= lo) & (r_dev < hi) & (a > 0)
+        bands.append(f"{lo:.1f}-{hi:.1f} m: {10 * np.log10(b[m].sum() / a[m].sum()):+.2f} dB")
+    # the images the sill blocks vanish: the wall scatterers straight behind it
+    # lose their direct chain; chains over its top (surface) survive
+    s9 = flat_scene(-0.9)
+    s9.walls = [Wall("quay", -10.0, 8.0, 10.0, 8.0, top_z=0.5),
+                Wall("sill", -0.6, 4.0, 0.6, 4.0, top_z=-0.35, thickness=0.3)]
+    r9 = RaycastRenderer(s9, acq, model, RaycastConfig(paths=PathsConfig(surface_rms_m=3e-4)))
+    Pt = np.array([sensor.x, sensor.y, sensor.z])
+    Xw = np.array([[sensor.x, 7.849, -0.8], [sensor.x, 7.849, -0.1]])
+    cd = ch.build(Pt, Xw, [], r9.oracle, r9.multipath.lam)
+    cs = ch.build(Pt, Xw, [r9.multipath.surface], r9.oracle, r9.multipath.lam)
+    ok5 = (not cd.visible[0]) and cd.visible[1] and cs.visible[0]
+    check("[P5] a sill between the boat and a quay (0.9 m calm water): the comb "
+          "images whose legs it blocks vanish, the others stay (tail reported)",
+          bool(ok5) and rb.get("contributors", 0) > 0,
+          f"low wall point: direct blocked {not cd.visible[0]}, over-the-top "
+          f"surface path clear {bool(cs.visible[0])}; upper point direct clear "
+          f"{bool(cd.visible[1])}; sill/no-sill energy: " + ", ".join(bands)
+          + f"; chains kept {ra.get('via')} / {rb.get('via')}")
+
+
+def diffraction_checks() -> None:
+    """[D1] ray-traced Fresnel-Kirchhoff on a knife edge (a 2 mm screen's
+    top edge) vs the Fresnel integral, v in [-2, 3]; [D2] the shadow edge
+    behind a sill scales as sqrt(lambda R)."""
+    from scipy.special import fresnel
+    from blueboat_sss_sim.core.types import Wall
+    from blueboat_sss_sim.sonar.raycast.diffraction import Diffraction
+    from blueboat_sss_sim.sonar.raycast import scene_mesh as smx
+    print("\n[R2] diffraction: knife edge")
+    sc = flat_scene(-20.0)
+    sc.walls = [Wall("screen", -25.0, 10.0, 25.0, 10.0, top_z=-2.0,
+                     thickness=0.002)]
+    mesh = smx.build_scene_mesh(sc)
+    orc = smx.SceneOracle(mesh)
+    lam = 1541.0 / 451127.0
+    dif = Diffraction(orc, lam)
+    vs = np.linspace(-2.0, 3.0, 21)
+    d1 = d2 = 10.0 - 0.001
+    h = vs / np.sqrt(2 * (d1 + d2) / (lam * d1 * d2))
+    z = -2.0 - h                       # leg below the edge: v > 0
+    A = np.column_stack([np.zeros_like(z), np.full_like(z, 0.0), z])
+    B = np.column_stack([np.zeros_like(z), np.full_like(z, 20.0), z])
+    U = dif.factor(A, B, np.full(z.size, 10.0))
+    S, C = fresnel(vs)                 # scipy returns (S, C)
+    F = 0.5 * (1 + 1j) * ((0.5 - C) - 1j * (0.5 - S))
+    ref = F
+    e_db = np.abs(20 * np.log10(np.abs(U) / np.abs(ref)))
+    e_ph = np.abs(np.angle(U / ref))
+    check("[D1] knife edge: |U/U0| vs |F(v)| <= 0.5 dB, phase <= 0.1 rad, v in [-2, 3]",
+          float(e_db.max()) <= 0.5 and float(e_ph.max()) <= 0.1,
+          f"worst {e_db.max():.3f} dB at v = {vs[np.argmax(e_db)]:+.2f}, "
+          f"{e_ph.max():.3f} rad at v = {vs[np.argmax(e_ph)]:+.2f}; "
+          f"|U| at v=0: {abs(U[np.argmin(np.abs(vs))]):.3f} (0.5)")
+    # [D2] the shadow edge behind a sill scales as sqrt(lambda R): the whole
+    # geometry scaled with R (transducer height, sill, distances), lambda
+    # fixed; ground width between |U|^2 = 0.25 (the geometric boundary) and
+    # 0.05 on the shadow side
+    Rs = np.array([2.0, 3.0, 4.5, 6.5, 9.5, 14.0, 20.0])
+    widths, local = [], []
+    for R in Rs:
+        zf = -0.16 * R                            # every length scales with R
+        sc2 = flat_scene(zf, half=max(30.0, 1.3 * R))
+        sc2.walls = [Wall("sill", -0.5 * R, 0.6 * R, 0.5 * R, 0.6 * R,
+                          top_z=zf + 0.03 * R, thickness=0.002)]
+        m2 = smx.build_scene_mesh(sc2)
+        o2 = smx.SceneOracle(m2)
+        dif2 = Diffraction(o2, lam, end_margin_m=0.0)
+        Pz = np.array([0.0, 0.0, -0.01 * R])
+        ys = np.linspace(0.62 * R, 1.0 * R, 1200)
+        X2 = np.column_stack([np.zeros_like(ys), ys, np.full_like(ys, zf + 1e-4 * R)])
+        L2 = np.linalg.norm(X2 - Pz, axis=1)
+        d1v = L2 * (0.6 * R) / ys                 # the plane through the sill
+        I = np.abs(dif2.leg_factors(np.broadcast_to(Pz, X2.shape), X2, d1v)) ** 2
+        # from the lit far side inward: the geometric boundary (|U|^2 first
+        # <= 0.25), then deeper into the shadow (<= 0.05)
+        Ir, yr = I[::-1], ys[::-1]
+
+        def cross(level, start=0):
+            k = start + int(np.argmax(Ir[start:] <= level))
+            # linear interpolation in log intensity between k-1 and k
+            a, b = np.log(Ir[k - 1]), np.log(max(Ir[k], 1e-12))
+            f = (np.log(level) - a) / (b - a)
+            return yr[k - 1] + f * (yr[k] - yr[k - 1]), k
+        y25, k25 = cross(0.25)
+        y05, _ = cross(0.05, k25)
+        widths.append(y25 - y05)
+        # local edge width at the geometric boundary: 0.25 / |dI/dy|
+        dy = 1e-3 * R
+        Xp = np.array([[0.0, y25 - dy, zf + 1e-4 * R], [0.0, y25 + dy, zf + 1e-4 * R]])
+        Lp = np.linalg.norm(Xp - Pz, axis=1)
+        Ip = np.abs(dif2.leg_factors(np.broadcast_to(Pz, Xp.shape), Xp,
+                                     Lp * (0.6 * R) / Xp[:, 1])) ** 2
+        local.append(0.25 / abs((Ip[1] - Ip[0]) / (2 * dy)))
+    slope = float(np.polyfit(np.log(Rs), np.log(local), 1)[0])
+    slope_x = float(np.polyfit(np.log(Rs), np.log(widths), 1)[0])
+    check("[D2] shadow-edge width behind a knife-edge sill ~ sqrt(lambda R): local "
+          "width 0.25/|dI/dy| at the geometric boundary, log-log slope 0.5 +- 0.05 "
+          "over R = 2-20 m (scaled geometry)",
+          abs(slope - 0.5) <= 0.05,
+          f"slope {slope:.3f}; local widths " + ", ".join(f"{w * 100:.1f} cm" for w in local)
+          + f"; (crossing distance 0.25->0.05: slope {slope_x:.3f}, finite-width "
+          "nonlinearity of v(y), recorded 2026-11-03)")
+
+
+def corner_checks() -> None:
+    """[O4] dihedral 8 pi a^2 b^2 / lambda^2 (two a x b plates at 90 deg, on
+    the bisector), [O5] trihedral 4 pi L^4 / (3 lambda^2) (triangular faces,
+    on the symmetry axis): PO at the first bounce in time, GO bounces on the
+    other faces after it (Hwang et al. 2015), far field (300 m)."""
+    from blueboat_sss_sim.sonar.raycast import chains as ch
+    from blueboat_sss_sim.sonar.raycast.multipath import po_pair
+    print("\n[R2] corner paths: dihedral, trihedral")
+    k = 2 * np.pi * 451127 / 1541.0
+    lam = 2 * np.pi / k
+    h = 0.002
+
+    def plate(origin, eu, ev, wu, wv, tri):
+        eu, ev = np.asarray(eu, float), np.asarray(ev, float)
+        uu = (np.arange(int(round(wu / h))) + 0.5) * h
+        vv = (np.arange(int(round(wv / h))) + 0.5) * h
+        U, V = (a.ravel() for a in np.meshgrid(uu, vv))
+        if tri:
+            keep = U / wu + V / wv <= 1.0
+            U, V = U[keep], V[keep]
+        n = np.cross(eu, ev)
+        c = np.asarray(origin, float) + np.outer(U, eu) + np.outer(V, ev)
+        m = U.size
+        poly = (np.array([[0, 0], [wu, 0], [0, wv]]) if tri else
+                np.array([[0, 0], [wu, 0], [wu, wv], [0, wv]]))
+        face = ch.FaceBoundary("f", origin, n, eu, ev, np.inf, np.inf,
+                               lambda s_: np.ones(np.shape(s_), dtype=complex),
+                               0.0, k, kind="O", poly=poly)
+        return dict(c=c, n=np.tile(n, (m, 1)), u=np.tile(eu, (m, 1)),
+                    v=np.tile(ev, (m, 1)), a=np.full(m, h), b=np.full(m, h),
+                    face=face)
+
+    def rcs(plates, d, R, max_b):
+        P = R * np.asarray(d, float) / np.linalg.norm(d)
+        tot = 0.0 + 0.0j
+        for pl in plates:
+            X = pl["c"]
+            dc = ch.build(P, X, [], None, lam)
+            others = [q["face"] for q in plates if q is not pl]
+            for seq in ch.sequences(others, max_b, 0, max_b):
+                cj = ch.build(P, X, seq, None, lam)
+                ok = np.abs(cj.factor) > 0
+                if not ok.any():
+                    continue
+                po = po_pair(pl["n"][ok], pl["u"][ok], pl["v"][ok], pl["a"][ok],
+                             pl["b"][ok], dc.arrive[ok], -cj.arrive[ok], k)
+                L = dc.length[ok] + cj.length[ok]
+                tot += np.sum(po * cj.factor[ok] * np.exp(-1j * k * L)
+                              / (dc.length[ok] * cj.length[ok]))
+        return 4 * np.pi * abs(tot * R * R) ** 2
+
+    a = b = 0.10
+    # plate A: x in [0, a], z in [-b/2, b/2], normal +y; plate B: y in
+    # [0, a], z in [-b/2, b/2], normal +x (both facing the viewer)
+    dih = [plate([0, 0, -b / 2], [0, 0, 1], [1, 0, 0], b, a, False),
+           plate([0, 0, -b / 2], [0, 1, 0], [0, 0, 1], a, b, False)]
+    s_d = rcs(dih, [1, 1, 0], 300.0, 1)
+    ref_d = 8 * np.pi * a * a * b * b / lam ** 2
+    e_d = 10 * np.log10(s_d / ref_d)
+    L = 0.10
+    tri = [plate([0, 0, 0], [1, 0, 0], [0, 1, 0], L, L, True),
+           plate([0, 0, 0], [0, 1, 0], [0, 0, 1], L, L, True),
+           plate([0, 0, 0], [0, 0, 1], [1, 0, 0], L, L, True)]
+    s_t = rcs(tri, [1, 1, 1], 300.0, 2)
+    ref_t = 4 * np.pi * L ** 4 / (3 * lam ** 2)
+    e_t = 10 * np.log10(s_t / ref_t)
+    check("[O4] dihedral 0.1 x 0.1 m plates on the bisector: 8 pi a^2 b^2 / lambda^2 "
+          "(<= 0.5 dB)", abs(e_d) <= 0.5,
+          f"{10 * np.log10(s_d):.2f} dBsm vs {10 * np.log10(ref_d):.2f} ({e_d:+.3f} dB)")
+    check("[O5] trihedral, triangular faces L = 0.1 m, on the axis: 4 pi L^4 / (3 lambda^2) "
+          "(<= 0.5 dB)", abs(e_t) <= 0.5,
+          f"{10 * np.log10(s_t):.2f} dBsm vs {10 * np.log10(ref_t):.2f} ({e_t:+.3f} dB)")
+
+
+def transmission_checks() -> None:
+    """[O6] a flooded pp_shell box (the 68 L field-box class) on flat sand:
+    the shadow behind it is transmitted through its walls by the fluid-layer
+    formula at each crossing angle -- REPORTED (the measured 0.11 is a
+    hold-out number, never a target; the pool box is the development check
+    in Phase 7)."""
+    from blueboat_sss_sim.core.types import Pose3D, Side
+    from blueboat_sss_sim.sonar.config import AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast import scene_mesh as smx
+    from blueboat_sss_sim.sonar.raycast.config import (RaycastConfig,
+                                                       SamplingConfig,
+                                                       shared_stage_model)
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R2] transmission: a flooded pp_shell box")
+    lib = MaterialLibrary()
+    t_n = smx.layer_transmission(np.array([1.0]), np.array([905 / 1025]),
+                                 np.array([2740 / 1500]), np.array([2e-3]),
+                                 2 * np.pi * 451127 / 1500)[0]
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    acq = AcquisitionParams()
+    out = []
+    for r0 in (6.1, 10.1):
+        res = {}
+        for label, with_box in (("box", True), ("none", False)):
+            g = GridSpec(origin_x=-15.0, origin_y=-5.0, resolution=0.05, nx=601, ny=601)
+            h = np.full((g.ny, g.nx), -1.7)
+            objs = []
+            if with_box:
+                cfg = ObjectFieldConfig.from_dict({"classes": {}, "explicit": [
+                    {"type": "plastic_box", "x": -0.345, "y": r0, "yaw": 0.0}]})
+                objs = place_objects(g, cfg, lib, np.random.default_rng(1), height=h)
+            refl = np.full(h.shape, 0.3)
+            ras = stamp_objects(objs, g, h, refl)
+            sc = SceneModel(grid=g, height=h, reflectivity=refl, **ras.scene_kwargs(),
+                            material_id=np.zeros(h.shape, dtype=np.uint8),
+                            material_names=["sand"], objects=objs, walls=[], seed=5,
+                            config_snapshot={}, outside="edge")
+            rr = RaycastRenderer(sc, acq, model, RaycastConfig(
+                sampling=SamplingConfig(scatterer_spacing_m=0.01)))
+            res[label] = rr.render(Side.PORT, Pose3D(0, 0, 0), 0.0).ping.power
+            if with_box:
+                o = objs[0]
+                far_edge = np.hypot(r0 + 0.5 * o.width, 1.7 - 0.22) * 1500 / rr.c
+        r_dev = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+        m = (r_dev > far_edge + 0.05) & (r_dev < far_edge + 1.05)
+        depth = 10 * np.log10(res["box"][m].mean() / res["none"][m].mean())
+        out.append(f"{r0} m: {depth:+.1f} dB")
+    check("[O6] flooded pp_shell box: two-way shadow depth over 0-1 m behind the echo "
+          "(REPORTED; transmission emerges from the layer formula)", True,
+          f"{'; '.join(out)}; one crossing at normal incidence |T|^2 = "
+          f"{abs(t_n) ** 2:.3f} ({10 * np.log10(abs(t_n) ** 2):+.2f} dB)")
+
+
+def fit_basis_checks() -> None:
+    """The fit basis (fitbasis.py) reproduces full renders for any fitted
+    parameter set (w2, gamma2, f_v, TVG k): <= 0.02 dB within 40 dB of the
+    peak, flat sand at two altitudes, level and rolled."""
+    import dataclasses
+    from blueboat_sss_sim.core.types import Pose3D, Side
+    from blueboat_sss_sim.sonar.config import AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast.config import (BeamConfig, RaycastConfig,
+                                                       ReceiverConfig,
+                                                       SeabedLawConfig,
+                                                       shared_stage_model)
+    from blueboat_sss_sim.sonar.raycast.fitbasis import build_basis, law_and_surface
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R2] fit basis: parametric re-evaluation vs full renders")
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    acq = AcquisitionParams()
+    sets = [dict(sed={}, f_v=0.0, k=0.0),
+            dict(sed={"sand": {"w2": 4.33e-7, "gamma2": 3.3}}, f_v=0.12, k=12.0),
+            dict(sed={"sand": {"w2": 2e-6, "gamma2": 2.6}}, f_v=0.3, k=30.0)]
+    worst, n_case, t_basis = 0.0, 0, []
+    for alt, pose in ((1.4, Pose3D(0, 0, 0)), (6.0, Pose3D(0, 0, 0.05, 0.08, -0.03, 0.0))):
+        sc = flat_scene(-(alt + model.sensor_depth_m))
+        base_rr = RaycastRenderer(sc, acq, model, RaycastConfig())
+        t0 = time.time()
+        basis = build_basis(base_rr, Side.PORT, pose)
+        t_basis.append(time.time() - t0)
+        for st in sets:
+            rc = RaycastConfig(seabed=SeabedLawConfig(sediments=st["sed"]),
+                               beam=BeamConfig(vertical_floor_amp=st["f_v"]),
+                               receiver=ReceiverConfig(tvg_k=st["k"]))
+            full = RaycastRenderer(sc, acq, model, rc, mesh=base_rr.mesh,
+                                   oracle=base_rr.oracle).render(Side.PORT, pose, 0.0).ping.power
+            law, surf = law_and_surface(base_rr, st["sed"])
+            pb = basis.power(law, surf, st["f_v"], st["k"])
+            sel = full > full.max() * 1e-4
+            worst = max(worst, float(np.max(np.abs(10 * np.log10(pb[sel] / full[sel])))))
+            n_case += 1
+    check("fit basis = full render for any fitted parameter set (<= 0.02 dB)",
+          worst <= 0.02,
+          f"{n_case} cases, worst {worst:.4f} dB; basis build {np.mean(t_basis):.1f} s per pose")
+    # the generated ray-cast profile: shared stage = the comparison profile,
+    # raycast section = PROVISIONAL_RAYCAST (regenerate, never hand-edit)
+    import yaml
+    from blueboat_sss_sim.sonar.config import SonarConfig, find_default_sonar_yaml
+    from blueboat_sss_sim.sonar.raycast.config import PROVISIONAL_RAYCAST, load_profile
+    prof = ROOT / "config" / "raycast_default_sonar.yaml"
+    c, rcp = load_profile(prof)
+    g = SonarConfig.from_yaml(find_default_sonar_yaml())
+    doc = yaml.safe_load(prof.read_text())
+    check("config/raycast_default_sonar.yaml: shared stage = default_sonar.yaml, raycast "
+          "section = PROVISIONAL_RAYCAST", c.model == g.model and c.acquisition == g.acquisition
+          and doc.get("raycast") == PROVISIONAL_RAYCAST and doc.get("renderer") == "raycast",
+          f"system gain {rcp.system_gain_db} dB, TVG k {rcp.receiver.tvg_k}")
+
+
+def gpu_checks() -> None:
+    """[G1] the GPU oracle (gpu_warp.py) = the CPU reference: the Phase-1
+    leak probe through it (0 leaks), and renders on both backends (flat sand;
+    a quay, a sill and the comb in 0.9 m calm water): mean eps_mu <= 1e-4,
+    same-seed intensity |I_gpu - I_cpu| / P <= 1e-3. Skips visibly without Warp."""
+    try:
+        from blueboat_sss_sim.sonar.raycast.gpu_warp import WarpBVH
+    except Exception as exc:                        # noqa: BLE001
+        skip("[G1] GPU = CPU", f"no Warp in this interpreter ({type(exc).__name__}); "
+             "run with ~/ros2_ws/sim_runs/raycast/venv/bin/python")
+        return
+    from blueboat_sss_sim.core.types import Pose3D, Side, Wall
+    from blueboat_sss_sim.sonar.config import AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast.config import RaycastConfig, shared_stage_model
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R4] GPU oracle (Warp) vs the CPU reference")
+    rng = np.random.default_rng(4)
+    leaks = probes = 0
+    for sol in [Solid("cylinder", 0.126, 0.483, axis=0), Solid("capsule", 0.05, 0.3, axis=1),
+                Solid("cone", 0.2, 0.5), Solid("annulus", 0.35, 0.2, 0.25),
+                Solid("box", 0.4, 0.3, 0.2)]:
+        vv, ff = sm.solid_mesh(sol)
+        cpu, gpu = TriangleBVH(vv, ff), WarpBVH(vv, ff)
+        tv = vv[ff]
+        fn = np.cross(tv[:, 1] - tv[:, 0], tv[:, 2] - tv[:, 0])
+        vn = np.zeros_like(vv)
+        for k in range(3):
+            np.add.at(vn, ff[:, k], fn)
+        e = np.concatenate([ff[:, [0, 1]], ff[:, [1, 2]], ff[:, [2, 0]]])
+        en = np.concatenate([fn, fn, fn])
+        uk, inv = np.unique(np.sort(e, axis=1), axis=0, return_inverse=True)
+        edge_n = np.zeros((uk.shape[0], 3))
+        np.add.at(edge_n, inv.ravel(), en)
+        targets = np.concatenate([vv, 0.5 * (vv[uk[:, 0]] + vv[uk[:, 1]])])
+        normals = np.concatenate([vn, edge_n])
+        normals /= np.linalg.norm(normals, axis=1)[:, None]
+        for tilt in (0.0, 0.02, 0.2):
+            dirs = normals + tilt * rng.normal(size=normals.shape)
+            dirs /= np.linalg.norm(dirs, axis=1)[:, None]
+            o = targets - 1e-3 * dirs
+            inside = cpu.brute_force_closest(o, -dirs, t_max=10.0).tri >= 0
+            h = gpu.closest(o, dirs, t_max=0.01)
+            leaks += int((inside & (h.tri < 0)).sum())
+            probes += int(inside.sum())
+    check("[G1] no leak through the GPU oracle (every vertex and edge midpoint of "
+          "closed solids)", leaks == 0, f"{leaks} leaks of {probes} probes")
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    acq = AcquisitionParams()
+    worst_mu = worst_e = 0.0
+    det = []
+    for label, kind, extra in (("flat sand 3 m", "flat", {}),
+                               ("quay + sill, 0.9 m calm water", "pool",
+                                {"paths": {"surface_rms_m": 3e-4},
+                                 "sampling": {"scatterer_spacing_m": 0.01}})):
+        if kind == "flat":
+            sc = flat_scene(-3.0)
+        else:
+            sc = flat_scene(-0.9)
+            sc.walls = [Wall("quay", -10.0, 8.0, 10.0, 8.0, top_z=0.5),
+                        Wall("sill", -0.6, 4.0, 0.6, 4.0, top_z=-0.35, thickness=0.3)]
+        out = {}
+        for be in ("cpu", "warp"):
+            rr = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict({"backend": be, **extra}))
+            t0 = time.time()
+            pg = rr.render(Side.PORT, Pose3D(0, 0, 0), 0.0).ping
+            out[be] = (pg.power, pg.power * pg.texture, time.time() - t0)
+        Pc, Ic, tc = out["cpu"]
+        Pg, Ig, tg = out["warp"]
+        sel = Pc > Pc.max() * 1e-4
+        mu = float(np.max(np.abs(Pg[sel] - Pc[sel]) / Pc[sel]))
+        ef = float(np.max(np.abs(Ig[sel] - Ic[sel]) / Pc[sel]))
+        worst_mu, worst_e = max(worst_mu, mu), max(worst_e, ef)
+        det.append(f"{label}: eps_mu {mu:.1e}, intensity {ef:.1e}; CPU {tc:.0f} s, GPU {tg:.1f} s")
+    check("[G1] renders: GPU oracle = CPU reference (eps_mu <= 1e-4, same-seed "
+          "intensity <= 1e-3 of P)", worst_mu <= 1e-4 and worst_e <= 1e-3, "; ".join(det))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
@@ -843,6 +1484,14 @@ def main() -> int:
     grouped_mean_checks()
     shared_stage_checks()
     surface_path_checks()
+    bottom_path_checks()
+    comb_checks()
+    wall_checks()
+    diffraction_checks()
+    corner_checks()
+    transmission_checks()
+    fit_basis_checks()
+    gpu_checks()
     po_closed_form_checks()
     seabed_law_checks()
     sc = synthetic_scene()

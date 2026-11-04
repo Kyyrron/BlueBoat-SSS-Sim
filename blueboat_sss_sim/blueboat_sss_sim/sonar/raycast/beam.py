@@ -70,6 +70,9 @@ class Aperture:
     #: ``b_v = sqrt(sinc^2 + floor^2)``. Unpublished for the Omniscan;
     #: bounded [0, 0.3], set by the NC #4 step / Phase 7 (raycast_design §8).
     vertical_floor: float = 0.0
+    #: Evaluate the near-field integral on the GPU (gpu_warp.near_pattern;
+    #: set by the renderer for ``backend: warp``; G1 holds it to the CPU).
+    gpu: bool = False
 
     def pattern(self, d: np.ndarray, e_a: np.ndarray, e_n: np.ndarray,
                 e_v: np.ndarray, near_field: bool = True,
@@ -95,6 +98,29 @@ class Aperture:
                 along[a:b] = self._near(d[a:b], R[a:b], s_a[a:b], e_a)
         return np.where(front, along * vert, 0.0)
 
+    def parts(self, d: np.ndarray, e_a: np.ndarray, e_n: np.ndarray,
+              e_v: np.ndarray, near_field: bool = True, chunk: int = 20000):
+        """The pattern's factors at offsets ``d``: (along-track complex
+        amplitude, the vertical strip's sinc, front mask). ``pattern`` is
+        ``front * along * sqrt(sinc^2 + vertical_floor^2)`` (or ``* sinc``
+        when the floor is 0); the fit basis (``fitbasis.py``) re-evaluates the
+        floor from these."""
+        d = np.atleast_2d(np.asarray(d, dtype=np.float64))
+        R = np.linalg.norm(d, axis=1)
+        Rs = np.maximum(R, 1e-9)
+        s_a = d @ e_a / Rs
+        s_v = d @ e_v / Rs
+        front = (d @ e_n / Rs) > 0.0
+        sinc_v = _sinc(0.5 * self.k * self.height_m * s_v)
+        if not near_field:
+            along = _sinc(0.5 * self.k * self.length_m * s_a).astype(complex)
+        else:
+            along = np.empty(d.shape[0], dtype=complex)
+            for a in range(0, d.shape[0], chunk):
+                b = min(a + chunk, d.shape[0])
+                along[a:b] = self._near(d[a:b], R[a:b], s_a[a:b], e_a)
+        return along, sinc_v, front
+
     def _near(self, d: np.ndarray, R: np.ndarray, s_a: np.ndarray,
               e_a: np.ndarray) -> np.ndarray:
         """Line-aperture integral over exact distances (Gauss-Legendre)."""
@@ -103,8 +129,11 @@ class Aperture:
         # k (|s_a| + L / (2 R)) -- nodes to resolve it (>= 6 per 2 pi).
         grad = k * (np.max(np.abs(s_a)) + L / (2.0 * max(np.min(R), 1e-3)))
         n = int(np.clip(np.ceil(grad * L / (2.0 * np.pi) * 6.0) + 16, 32, 4096))
-        x, w = np.polynomial.legendre.leggauss(n)
+        x, w = _gauss_legendre(n)
         u = 0.5 * L * x                                   # (n,)
+        if self.gpu:
+            from .gpu_warp import near_pattern
+            return near_pattern(d, e_a, u, w, k)
         # |d - u e_a| = sqrt(R^2 - 2 u (d.e_a) + u^2), stable for R >> u
         da = (d @ e_a)[:, None]
         r = np.sqrt(np.maximum(R[:, None] ** 2 - 2.0 * u[None, :] * da
@@ -113,6 +142,18 @@ class Aperture:
         # Spherical spreading of each element relative to the centre.
         amp = R[:, None] / np.maximum(r, 1e-9)
         return 0.5 * (ph * amp) @ w
+
+
+_GL_CACHE: dict = {}
+
+
+def _gauss_legendre(n: int):
+    """Memoised Gauss-Legendre nodes and weights (numpy recomputes them by an
+    eigenvalue solve on every call)."""
+    g = _GL_CACHE.get(n)
+    if g is None:
+        g = _GL_CACHE[n] = np.polynomial.legendre.leggauss(n)
+    return g
 
 
 def transducer_frame(yaw: float, pitch: float, roll: float, side_sign: float,

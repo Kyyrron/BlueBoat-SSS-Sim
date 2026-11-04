@@ -466,7 +466,8 @@ def _replay_block(st_roll, st_pitch, st_alts, st_index, alt_med, n: int,
 
 def _render_noisy(cfg, acq, side_name: str, alt: float, step: float,
                   n: int, seed: int, replay,
-                  reflectivity: float = SAND_REFLECTIVITY) -> dict:
+                  reflectivity: float = SAND_REFLECTIVITY,
+                  raycast: Mapping[str, Any] | None = None) -> dict:
     from ..analysis.calibration import fbr_bin, scale_to_db
     from ..core.types import Pose3D, Side
     from ..sonar.encoder import PingEncoder
@@ -474,9 +475,18 @@ def _render_noisy(cfg, acq, side_name: str, alt: float, step: float,
     from ..sonar.renderer import GeometricRenderer
     model = cfg.model
     half = acq.range_length_mm / 1000.0 + n * step + 5.0
-    scene = flat_scene(alt + model.sensor_depth_m, half,
-                       reflectivity=reflectivity)
-    rr = GeometricRenderer(scene, acq, model)
+    render = None
+    if raycast is not None:
+        # the ray-cast sensor (renderer hook, raycast_plan.md Phase A): full
+        # renders, cached per pose; its own shared-stage model
+        from ..sonar.raycast import calib as _rcal
+        rr, model, rkey = _rcal.noisy_renderer(cfg, acq, alt + model.sensor_depth_m,
+                                               half, raycast)
+        render = lambda sd, ps: _rcal.cached_render(rr, rkey, sd, ps)  # noqa: E731
+    else:
+        scene = flat_scene(alt + model.sensor_depth_m, half,
+                           reflectivity=reflectivity)
+        rr = GeometricRenderer(scene, acq, model)
     side = Side.PORT if replay is None else Side(side_name)
     enc = PingEncoder(side, acq, model)
     rng = np.random.default_rng(seed)
@@ -489,7 +499,8 @@ def _render_noisy(cfg, acq, side_name: str, alt: float, step: float,
         else:
             pose = Pose3D(x, 0.0, float(replay[2][k]), float(replay[0][k]),
                           float(replay[1][k]), 0.0)
-        pg = rr.render(side, pose, 0.0).ping
+        pg = (rr.render(side, pose, 0.0).ping if render is None
+              else render(side, pose))
         pg.power = apply_ping_noise(pg.power, bins < pg.altitude_m, 1.0, model,
                                     rng, specular=pg.specular,
                                     texture=pg.texture,
@@ -510,7 +521,11 @@ def _render_noisy(cfg, acq, side_name: str, alt: float, step: float,
 
 
 def _render_expected(cfg, acq, side_name: str, alt: float, gain: int,
-                     replay) -> dict:
+                     replay, raycast: Mapping[str, Any] | None = None) -> dict:
+    if raycast is not None:
+        # the ray-cast sensor: the exact fit basis (sonar/raycast/fitbasis.py)
+        from ..sonar.raycast.calib import expected_level
+        return expected_level(cfg, acq, side_name, alt, gain, replay, raycast)
     from ..analysis.calibration import fbr_bin
     from ..core.types import Pose3D, Side
     from ..sonar.renderer import GeometricRenderer
@@ -555,6 +570,7 @@ def sim_job(job: Mapping[str, Any]) -> dict:
     n = int(job.get("n_sim", N_SIM))
     seeds = tuple(job.get("seeds", SEEDS))
     rep_src = job.get("replay")
+    rc = job.get("raycast")          # None: the geometric renderer
     out: dict[str, Any] = dict(key=job["key"],
                                pulse_us=acq.pulse_duration_s(
                                    cfg.model.max_ping_rate_hz) * 1e6)
@@ -565,17 +581,17 @@ def sim_job(job: Mapping[str, Any]) -> dict:
         used = job.get("alt_used_noisy")
         if used is None:
             a = _render_noisy(cfg, acq, job["side"], target, job["step"], n,
-                              seeds[0], rep)
+                              seeds[0], rep, raycast=rc)
             used = target
             if np.isfinite(a["fbr_alt"]) and abs(a["fbr_alt"] - target) > bin_m:
                 used = max(target + (target - a["fbr_alt"]), 0.2)
                 a = _render_noisy(cfg, acq, job["side"], used, job["step"], n,
-                                  seeds[0], rep)
+                                  seeds[0], rep, raycast=rc)
         else:
             a = _render_noisy(cfg, acq, job["side"], used, job["step"], n,
-                              seeds[0], rep)
+                              seeds[0], rep, raycast=rc)
         b = _render_noisy(cfg, acq, job["side"], used, job["step"], n,
-                          seeds[1], rep)
+                          seeds[1], rep, raycast=rc)
         lin = lambda x: 10.0 * np.log10(np.mean(
             10.0 ** (x.astype(np.float64) / 10.0), axis=0))
         crest, lead = [], []
@@ -589,6 +605,7 @@ def sim_job(job: Mapping[str, Any]) -> dict:
                    fbr_alt_seed2=b["fbr_alt"],
                    mean=[a["rows"].mean(0), b["rows"].mean(0)],
                    lin=[lin(a["rows"]), lin(b["rows"])], rows=a["rows"],
+                   rows_seed2=b["rows"], fbr_rows=[a["fbr"], b["fbr"]],
                    mx=np.concatenate([a["mx"], b["mx"]]),
                    crest=np.array(crest), leading=np.array(lead),
                    fbr_detection=float(det.mean()))
@@ -597,14 +614,16 @@ def sim_job(job: Mapping[str, Any]) -> dict:
                _replay_block(*rep_src, target, N_EXPECTED, contiguous=False))
         used = job.get("alt_used_expected")
         if used is None:
-            e = _render_expected(cfg, acq, job["side"], target, job["gain"], rep)
+            e = _render_expected(cfg, acq, job["side"], target, job["gain"], rep,
+                                 raycast=rc)
             used = target
             if np.isfinite(e["fbr_alt"]) and abs(e["fbr_alt"] - target) > bin_m:
                 used = max(target + (target - e["fbr_alt"]), 0.2)
                 e = _render_expected(cfg, acq, job["side"], used, job["gain"],
-                                     rep)
+                                     rep, raycast=rc)
         else:
-            e = _render_expected(cfg, acq, job["side"], used, job["gain"], rep)
+            e = _render_expected(cfg, acq, job["side"], used, job["gain"], rep,
+                                 raycast=rc)
         out.update(exp_level=e["level"], exp_rendered_alt=used,
                    exp_fbr_alt=e["fbr_alt"])
     out["secs"] = time.time() - t0
@@ -624,6 +643,9 @@ def make_job(st: Stratum, cfg, *, mode: str, replay: str,
              alt=round(st.alt, 2) if rep is None else st.alt,
              step=st.step_m, mode=mode, replay=rep, n_sim=n_sim,
              seeds=tuple(seeds))
+    rc = getattr(cfg, "raycast", None)
+    if rc is not None:
+        j["raycast"] = rc
     for k, v in (alt_used or {}).items():
         j[k] = v
     return j
@@ -862,6 +884,10 @@ def set_params(cfg, names: Sequence[str], values: Sequence[float]):
     c = dataclasses.replace(cfg, acquisition=dataclasses.replace(
         cfg.acquisition), model=dataclasses.replace(cfg.model))
     for n, v in zip(names, values):
+        if n.startswith("raycast."):
+            from ..sonar.raycast.config import set_nested
+            c = dataclasses.replace(c, raycast=set_nested(c.raycast, n, float(v)))
+            continue
         sect, _, key = n.partition(".")
         cur = getattr(getattr(c, sect), key)
         setattr(getattr(c, sect), key, type(cur)(v) if isinstance(
@@ -1004,6 +1030,10 @@ def fit(strata: Sequence[Stratum], cfg, params: Sequence[str], *,
         b = e.bounds or [-np.inf, np.inf]
         lo.append(float(b[0]))
         hi.append(float(b[1]))
+        if p.startswith("raycast."):
+            from ..sonar.raycast.config import get_nested
+            x0.append(float(get_nested(cfg.raycast, p)))
+            continue
         sect, _, key = p.partition(".")
         x0.append(float(getattr(getattr(cfg, sect), key)))
     ev = _Evaluator(strata, cfg, params, metric, replay, executor, max_bins,

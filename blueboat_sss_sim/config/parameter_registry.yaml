@@ -1467,3 +1467,325 @@ parameters:
     experiment: a profilometer trace of the pool floor
     owner: sonar/waveguide.py
     source: {python: "blueboat_sss_sim.sonar.waveguide:PAINTED_CONCRETE_RMS_HEIGHT_M"}
+  # ------------------------------------------------ ray-cast sensor (renderer: raycast)
+  - name: raycast.system_gain_db
+    unit: dB
+    class: device
+    status: joint
+    default: 126.6
+    bounds: [105.0, 165.0]
+    tunable: true
+    meaning: "Ray-cast system gain (SL + RS + receiver constants): the one fitted level constant of the ray-cast sensor; the shared stage runs with it as calibration_db_offset"
+    identified_by: "provisional: flat sand at the bath3 geometry matched to the calibrated geometric renderer (raycast_phase2.md App. D); Phase-7 fit on calibration sessions"
+    metric: "seabed dB vs slant per altitude band (calibration/seabed.py)"
+    uncertainty: "joint with the spectrum and TVG k; variants 126.6-143.7"
+    confounders: [raycast.receiver.tvg_k, raycast.seabed.sediments.sand.w2]
+    experiment: "altitude sweep over one classified flat bottom, fixed gain"
+    owner: sonar/raycast/config.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:RaycastConfig.system_gain_db"}
+  - name: raycast.receiver.tvg_k
+    unit: dB/decade
+    class: device
+    status: estimated
+    default: 0.0
+    bounds: [0.0, 40.0]
+    tunable: true
+    meaning: "Device time-varied gain k log10(r) on the output; undocumented by the maker"
+    identified_by: "NC #4 step provisional k = 12 (geometric fit: partial compensation 0.30 x 40); Phase-7 fit"
+    metric: "seabed level vs slant and the first-return altitude law"
+    uncertainty: "0 (none) .. 40 (full spherical two-way)"
+    confounders: [raycast.system_gain_db]
+    experiment: "altitude sweep; slope of the seabed level with range"
+    owner: sonar/raycast/config.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ReceiverConfig.tvg_k"}
+  - name: raycast.receiver.filter_pulse_ratio
+    unit: 1
+    class: device
+    status: measured
+    default: 1.4
+    bounds: [0.5, 3.0]
+    tunable: false
+    meaning: "Receive filter duration as a multiple of the transmit pulse (CW tone burst, near-matched filter)"
+    identified_by: "X2 2026-11-03: speckle range correlation lags 1-3, structure floor removed, calibration median 1.43"
+    metric: "range lag-1..3 correlation"
+    uncertainty: "0.8-1.5 over pulses 44-208 us"
+    confounders: []
+    experiment: "a point-target range profile at several pulses"
+    owner: sonar/raycast/config.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ReceiverConfig.filter_pulse_ratio"}
+  - name: raycast.beam.vertical_floor_amp
+    unit: 1
+    class: device
+    status: undetermined
+    default: 0.0
+    bounds: [0.0, 0.3]
+    tunable: true
+    meaning: "Large-angle vertical response (one-way amplitude added in power to the strip sinc): the nadir level of the first bottom return"
+    identified_by: "unpublished; NC #4 step; Phase-7 fit with roll to separate it from the seabed law"
+    metric: "near-nadir crest profile"
+    uncertainty: "bounded [0, 0.3] (housing 20-29 mm across a ~3.5 mm element)"
+    confounders: [raycast.seabed.sediments.sand.w2]
+    experiment: "tank pattern measurement or roll sweep over a flat bottom"
+    owner: sonar/raycast/beam.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:BeamConfig.vertical_floor_amp"}
+  - name: raycast.beam.aperture_length_m
+    unit: m
+    class: device
+    status: derived
+    default: 0.0
+    tunable: false
+    meaning: "Along-track aperture; 0 = derived from the two-way width (24.6 cm); when set, bounded [0.224, 0.310] (datasheet far field 15 m / CAD housing 318 mm)"
+    identified_by: "datasheet two-way 0.5 deg; owner CAD 318 x 29 x 20 mm"
+    metric: "near-range along-track footprint"
+    uncertainty: "22.4-31.0 cm"
+    confounders: []
+    experiment: "near-range along-track footprint of a point target"
+    owner: sonar/raycast/beam.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:BeamConfig.aperture_length_m"}
+  - name: raycast.beam.floor_db
+    unit: dB
+    class: model_structure
+    status: structural
+    default: -40.0
+    tunable: false
+    meaning: "Contributors kept while the two-way pattern exceeds this (sidelobes feed the shadow floor)"
+    identified_by: "design §3 (uniform-aperture sidelobes -26.5 dB two-way); Phase-5 convergence"
+    metric: "shadow floor"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast/renderer.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:BeamConfig.floor_db"}
+  - name: raycast.seabed.sediments.sand.w2
+    unit: m^(4-gamma2)
+    class: environment
+    status: literature
+    default: 4.33e-05
+    bounds: [3.56e-07, 0.0001475]
+    tunable: true
+    meaning: "sand roughness spectrum strength (J&R power law) extrapolated to 450 kHz; decides the coherent first bottom return"
+    identified_by: "JR07 Table 13.1 SAX99 at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held"
+    metric: "near-nadir crest profile; seabed level vs grazing angle"
+    uncertainty: "J&R Table 13.1 envelope; FLAGGED: extrapolated 10x in frequency (J&R 6.5 caveat)"
+    confounders: [raycast.seabed.sediments.sand.gamma2, raycast.system_gain_db]
+    experiment: "a roughness profile (laser/stereo) of the survey bottom"
+    owner: sonar/raycast/seabed_ssa.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:SEDIMENTS['sand'].w2"}
+  - name: raycast.seabed.sediments.sand.gamma2
+    unit: 1
+    class: environment
+    status: literature
+    default: 3.04
+    bounds: [2.000001, 3.92]
+    tunable: true
+    meaning: "sand roughness spectral exponent (J&R power law)"
+    identified_by: "JR07 Table 13.1; > 2 for the small-slope law"
+    metric: "seabed level vs grazing angle"
+    uncertainty: "(2, 3.92]"
+    confounders: [raycast.seabed.sediments.sand.w2]
+    experiment: "a roughness profile of the survey bottom"
+    owner: sonar/raycast/seabed_ssa.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:SEDIMENTS['sand'].gamma2"}
+  - name: raycast.seabed.sediments.sand.sigma2
+    unit: 1/dB
+    class: environment
+    status: literature
+    default: 0.002
+    bounds: [0.0001, 0.004]
+    tunable: true
+    meaning: "sand sediment volume parameter sigma_v / alpha_p"
+    identified_by: "JR07 eq. 14.9 typical range; mid-range default"
+    metric: "near-nadir level on mud"
+    uncertainty: "1e-4 .. 4e-3"
+    confounders: []
+    experiment: "a core sample (attenuation, heterogeneity)"
+    owner: sonar/raycast/seabed_ssa.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:SEDIMENTS['sand'].sigma2"}
+  - name: raycast.seabed.sediments.mud.w2
+    unit: m^(4-gamma2)
+    class: environment
+    status: literature
+    default: 0.000464
+    bounds: [3.56e-07, 0.0041]
+    tunable: true
+    meaning: "mud roughness spectrum strength (J&R power law) extrapolated to 450 kHz; decides the coherent first bottom return"
+    identified_by: "JR07 Table 13.1 Key West at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held"
+    metric: "near-nadir crest profile; seabed level vs grazing angle"
+    uncertainty: "J&R Table 13.1 envelope; FLAGGED: extrapolated 10x in frequency (J&R 6.5 caveat)"
+    confounders: [raycast.seabed.sediments.mud.gamma2, raycast.system_gain_db]
+    experiment: "a roughness profile (laser/stereo) of the survey bottom"
+    owner: sonar/raycast/seabed_ssa.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:SEDIMENTS['mud'].w2"}
+  - name: raycast.seabed.sediments.mud.gamma2
+    unit: 1
+    class: environment
+    status: literature
+    default: 3.29
+    bounds: [2.000001, 3.92]
+    tunable: true
+    meaning: "mud roughness spectral exponent (J&R power law)"
+    identified_by: "JR07 Table 13.1; > 2 for the small-slope law"
+    metric: "seabed level vs grazing angle"
+    uncertainty: "(2, 3.92]"
+    confounders: [raycast.seabed.sediments.mud.w2]
+    experiment: "a roughness profile of the survey bottom"
+    owner: sonar/raycast/seabed_ssa.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:SEDIMENTS['mud'].gamma2"}
+  - name: raycast.seabed.sediments.mud.sigma2
+    unit: 1/dB
+    class: environment
+    status: literature
+    default: 0.002
+    bounds: [0.0001, 0.004]
+    tunable: true
+    meaning: "mud sediment volume parameter sigma_v / alpha_p"
+    identified_by: "JR07 eq. 14.9 typical range; mid-range default"
+    metric: "near-nadir level on mud"
+    uncertainty: "1e-4 .. 4e-3"
+    confounders: []
+    experiment: "a core sample (attenuation, heterogeneity)"
+    owner: sonar/raycast/seabed_ssa.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:SEDIMENTS['mud'].sigma2"}
+  - name: raycast.water.temperature_c
+    unit: degC
+    class: environment
+    status: literature
+    default: 27.3
+    bounds: [15.0, 35.0]
+    tunable: false
+    meaning: "Water temperature (absorption, sound speed); default = mean of the per-site NOAA OISST estimates"
+    identified_by: "OISST v2.1 per site and date (harbour 28.5, beach 27.5, pool 26.0), band +-3 degC"
+    metric: "range scale; level vs range"
+    uncertainty: "+-3 degC"
+    confounders: []
+    experiment: "a thermometer reading at the next field session"
+    owner: sonar/raycast/config.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:WaterConfig.temperature_c"}
+  - name: raycast.water.salinity_ppt
+    unit: ppt
+    class: environment
+    status: literature
+    default: 35.0
+    bounds: [30.0, 40.0]
+    tunable: false
+    meaning: "Salinity (standard seawater; every corpus site is seawater, owner 2026-11-03)"
+    identified_by: "J&R App. B.3 standard seawater"
+    metric: "absorption"
+    uncertainty: "+-3 ppt"
+    confounders: []
+    experiment: "a conductivity reading"
+    owner: sonar/raycast/config.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:WaterConfig.salinity_ppt"}
+  - name: raycast.paths.surface_rms_m
+    unit: m
+    class: environment
+    status: judged
+    default: 0.02
+    bounds: [1.0e-05, 0.05]
+    tunable: false
+    meaning: "Water-surface RMS height for the Eckart fraction of surface bounces; judged open-water default (calm pool: a site record, 3e-4)"
+    identified_by: "the geometric profile's judged surface_rms_height_m; pass-4 pool overlay 3e-4"
+    metric: "surface multipath / Lloyd fringes"
+    uncertainty: "1e-5 .. 0.05"
+    confounders: []
+    experiment: "a wave staff / still-water photo; later the sea state"
+    owner: sonar/raycast/config.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:PathsConfig.surface_rms_m"}
+  - name: raycast.paths.cutoff_db
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 10.0
+    tunable: false
+    meaning: "Energy cut-off of multipath sequences below the bin's noise + reverberation [dB]"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:PathsConfig.cutoff_db"}
+  - name: raycast.sampling.scatterer_spacing_m
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 0.005
+    tunable: false
+    meaning: "World lattice spacing of the diffuse scatterers [m]"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:SamplingConfig.scatterer_spacing_m"}
+  - name: raycast.specular.window_n1
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 8.0
+    tunable: false
+    meaning: "Stationary-phase window of the floor mean field: full weight inside this many Fresnel zones"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:SpecularConfig.window_n1"}
+  - name: raycast.specular.window_n2
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 30.0
+    tunable: false
+    meaning: "Stationary-phase window: taper reaches 0 here [zones]"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:SpecularConfig.window_n2"}
+  - name: raycast.diffraction.sectors
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 16
+    tunable: false
+    meaning: "Edge-sampling directions of the Fresnel-Kirchhoff disc"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:DiffractionConfig.sectors"}
+  - name: raycast.diffraction.end_margin_m
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 0.05
+    tunable: false
+    meaning: "Geometry within this distance of a contributor is its own support, not an occluder [m]"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:DiffractionConfig.end_margin_m"}
+  - name: raycast.po.curvature_refine
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 16.0
+    tunable: false
+    meaning: "PO tessellation curvature criterion refinement over the facet layer's"
+    identified_by: "numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:PoConfig.curvature_refine"}

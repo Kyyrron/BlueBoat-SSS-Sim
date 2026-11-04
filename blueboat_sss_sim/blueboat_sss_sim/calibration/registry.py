@@ -232,12 +232,14 @@ def load_registry(path: str | Path | None = None) -> Registry:
 
 # ------------------------------------------------------------- code values
 def _python_value(spec: str) -> Any:
-    """``"pkg.module:ATTR"``, ``"pkg.module:ATTR[key]"`` or
-    ``"pkg.module:Dataclass.field"`` (the field's default)."""
+    """``"pkg.module:ATTR"``, ``"pkg.module:ATTR[key]"``,
+    ``"pkg.module:ATTR[key].attr"`` or ``"pkg.module:Dataclass.field"``
+    (the field's default)."""
     mod_name, _, expr = spec.partition(":")
     mod = importlib.import_module(mod_name)
     m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?"
-                 r"(?:\[(-?\d+|'[^']*'|\"[^\"]*\")\])?$", expr)
+                 r"(?:\[(-?\d+|'[^']*'|\"[^\"]*\")\])?"
+                 r"(?:\.([A-Za-z_][A-Za-z0-9_]*))?$", expr)
     if not m:
         raise ValueError(f"cannot parse python source {spec!r}")
     obj = getattr(mod, m.group(1))
@@ -250,6 +252,8 @@ def _python_value(spec: str) -> Any:
     if m.group(3) is not None:
         k = m.group(3)
         obj = obj[int(k)] if k.lstrip("-").isdigit() else obj[k.strip("'\"")]
+    if m.group(4):                       # an attribute of the indexed item
+        obj = getattr(obj, m.group(4))
     return obj
 
 

@@ -51,9 +51,10 @@ class DiffuseLaw:
                                            _ACOUSTIC, acoustic_reflection)
         tables: dict = {}
         laws: dict = {}
-        for name, p in _ssa.SEDIMENTS.items():
+        self.sediments = _ssa.sediments_for(getattr(cfg, "sediments", None))
+        for name, p in self.sediments.items():
             beta = round(2.0 * p.alpha, 6)
-            tables.setdefault(beta, _ssa.IkTable(beta))
+            tables.setdefault(beta, _ssa.ik_table(beta))
             laws[name] = len(self._laws)
             self._laws.append(_ssa.SSALaw(p, k, frequency_hz, c_water,
                                           table=tables[beta]))
@@ -86,4 +87,30 @@ class DiffuseLaw:
             m = (law_idx == j) & (ci > 0.0)
             if m.any():
                 out[m] = law.sigma(ci[m], cs[m], -np.ones(int(m.sum())))
+        return out * self._scale[mat]
+
+    def sigma_bistatic(self, normal: np.ndarray, d_in: np.ndarray,
+                       d_out: np.ndarray, material: np.ndarray | None = None
+                       ) -> np.ndarray:
+        """Bistatic cross-section per unit area per steradian: ``d_in`` the
+        propagation direction arriving at the facet, ``d_out`` the direction
+        leaving it toward the receiver (J&R 13.1-13.7 geometry; the SSA law
+        and the volume term are written for any (theta_i, theta_s, phi)).
+        Backscatter (d_out = -d_in) equals :meth:`sigma`. 0 where either
+        leg meets the facet from behind."""
+        from .paths import bistatic_angles
+        si, ss, cphi = bistatic_angles(normal, d_in, d_out)
+        front = (si > 0.0) & (ss > 0.0)
+        si = np.clip(si, 0.0, 1.0)
+        ss = np.clip(ss, 0.0, 1.0)
+        if self.cfg.law == "lambert":
+            return np.where(front, self._mu * si * ss, 0.0)
+        mat = (np.zeros(si.shape, dtype=np.int64) if material is None
+               else np.asarray(material, dtype=np.int64))
+        out = np.zeros(si.shape)
+        law_idx = self._law_of[mat]
+        for j, law in enumerate(self._laws):
+            m = (law_idx == j) & front
+            if m.any():
+                out[m] = law.sigma(si[m], ss[m], cphi[m])
         return out * self._scale[mat]

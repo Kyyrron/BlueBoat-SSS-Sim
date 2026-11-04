@@ -120,6 +120,11 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.specular_strength` | 1.75 | 1 | device | estimated | yes | detector-located FBR crest of the harbour calibration anchor (1.36, pass 2, 2026-10-30), raised to the NC #4 FBR-envelope bound over seagrass (1.75); was 12, fitted to max_pwr_db | `model.specular_width_deg`, `model.specular_spreading_exponent`, `model.beam_sidelobe_floor` |
 | `model.tvg_compensation` | 0.3 | fraction | device | joint | yes | same two-altitude fit; only spreading_exponent*(1-tvg) enters the diffuse curve | `model.lambert_exponent`, `model.spreading_exponent`, `model.calibration_db_offset` |
 | `model.watercolumn_noise` | 4.68e-06 | linear power (renderer units) | device | measured | yes | corpus water-column band, re-expressed at the current offset | `model.ringing_level_db`, `model.calibration_db_offset` |
+| `raycast.beam.aperture_length_m` | 0.0 | m | device | derived | no | datasheet two-way 0.5 deg; owner CAD 318 x 29 x 20 mm | -- |
+| `raycast.beam.vertical_floor_amp` | 0.0 | 1 | device | undetermined | yes | unpublished; NC #4 step; Phase-7 fit with roll to separate it from the seabed law | `raycast.seabed.sediments.sand.w2` |
+| `raycast.receiver.filter_pulse_ratio` | 1.4 | 1 | device | measured | no | X2 2026-11-03: speckle range correlation lags 1-3, structure floor removed, calibration median 1.43 | -- |
+| `raycast.receiver.tvg_k` | 0.0 | dB/decade | device | estimated | yes | NC #4 step provisional k = 12 (geometric fit: partial compensation 0.30 x 40); Phase-7 fit | `raycast.system_gain_db` |
+| `raycast.system_gain_db` | 126.6 | dB | device | joint | yes | provisional: flat sand at the bath3 geometry matched to the calibrated geometric renderer (raycast_phase2.md App. D); Phase-7 fit on calibration sessions | `raycast.receiver.tvg_k`, `raycast.seabed.sediments.sand.w2` |
 | `material.gravel.reflectivity` | 0.7 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
 | `material.mud.reflectivity` | 0.3 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
 | `material.pe_cement.wall_m` | 0.006 | m | environment | judged | no | inferred from the maker's mass (6.0 kg) and size (228 x 94 mm) with cement 2.0-2.3 g/cm3; not published | `material.pe_cement.roughness_m` |
@@ -145,6 +150,15 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.wall_echo_strength` | 30.0 | 1 | environment | estimated | yes | fullHarbourCleanExample quay (face +22.8/+18.9 dB vs model +21.8) | `model.wall_face_diffuse`, `wall.reflectivity` |
 | `model.wall_face_diffuse` | 0.5 | 1 | environment | judged | yes | judged | `model.wall_echo_strength` |
 | `model.wall_pontoon_specular` | 0.15 | 1 | environment | judged | yes | judged | `model.wall_echo_strength` |
+| `raycast.paths.surface_rms_m` | 0.02 | m | environment | judged | no | the geometric profile's judged surface_rms_height_m; pass-4 pool overlay 3e-4 | -- |
+| `raycast.seabed.sediments.mud.gamma2` | 3.29 | 1 | environment | literature | yes | JR07 Table 13.1; > 2 for the small-slope law | `raycast.seabed.sediments.mud.w2` |
+| `raycast.seabed.sediments.mud.sigma2` | 0.002 | 1/dB | environment | literature | yes | JR07 eq. 14.9 typical range; mid-range default | -- |
+| `raycast.seabed.sediments.mud.w2` | 0.000464 | m^(4-gamma2) | environment | literature | yes | JR07 Table 13.1 Key West at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held | `raycast.seabed.sediments.mud.gamma2`, `raycast.system_gain_db` |
+| `raycast.seabed.sediments.sand.gamma2` | 3.04 | 1 | environment | literature | yes | JR07 Table 13.1; > 2 for the small-slope law | `raycast.seabed.sediments.sand.w2` |
+| `raycast.seabed.sediments.sand.sigma2` | 0.002 | 1/dB | environment | literature | yes | JR07 eq. 14.9 typical range; mid-range default | -- |
+| `raycast.seabed.sediments.sand.w2` | 4.33e-05 | m^(4-gamma2) | environment | literature | yes | JR07 Table 13.1 SAX99 at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held | `raycast.seabed.sediments.sand.gamma2`, `raycast.system_gain_db` |
+| `raycast.water.salinity_ppt` | 35.0 | ppt | environment | literature | no | J&R App. B.3 standard seawater | -- |
+| `raycast.water.temperature_c` | 27.3 | degC | environment | literature | no | OISST v2.1 per site and date (harbour 28.5, beach 27.5, pool 26.0), band +-3 degC | -- |
 | `wall.roughness_m` | 0.003 | m | environment | judged | yes | judged; fitted only through the far-ghost level | `model.wall_diffuse_fraction` |
 | `waveguide.painted_concrete_rms_height_m` | 0.0001 | m | environment | judged | no | micro-texture Ra 1-5 um by stylus (Courard, Garbacz & Gorka, ICPIC 2004); trowel waviness sub-mm; pool W2 FIT prefers the lower bound | `model.surface_rms_height_m` |
 | `waveguide.sand_density_ratio` | 2.0 | 1 | environment | literature | no | J&R 2007 Table 5.1 medium sand (SAX99 rho 2.066 g/cm3 vs 1.024), doi:10.1007/978-0-387-36945-7 | `waveguide.sand_speed_ratio` |
@@ -178,6 +192,14 @@ Not yet registered, but worth adding when they become identifiable:
 | `model.waveguide_facet_max_order` | 2 | 1 | model_structure | structural | no | numerical setting (cost) | -- |
 | `model.waveguide_max_order` | 30 | 1 | model_structure | structural | no | numerical setting | -- |
 | `model.waveguide_rel_cut` | 0.0001 | 1 | model_structure | structural | no | numerical setting (cost) | -- |
+| `raycast.beam.floor_db` | -40.0 | dB | model_structure | structural | no | design §3 (uniform-aperture sidelobes -26.5 dB two-way); Phase-5 convergence | -- |
+| `raycast.diffraction.end_margin_m` | 0.05 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.diffraction.sectors` | 16 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.paths.cutoff_db` | 10.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.po.curvature_refine` | 16.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.sampling.scatterer_spacing_m` | 0.005 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.specular.window_n1` | 8.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.specular.window_n2` | 30.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
 | `sea.hull.damping.heave_ns_per_m` | 245.0 | N s/m | vehicle_control | judged | yes | judged | `sea.hull.mass_kg` |
 | `sea.hull.damping.pitch_nms_per_rad` | 13.0 | N m s/rad | vehicle_control | judged | yes | judged | -- |
 | `sea.hull.damping.roll_nms_per_rad` | 20.0 | N m s/rad | vehicle_control | judged | yes | judged | -- |

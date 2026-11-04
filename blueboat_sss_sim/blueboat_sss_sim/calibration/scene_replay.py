@@ -55,7 +55,7 @@ def _acq(cfg, p: ReplayPose):
 
 
 def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
-                seed: int = 0) -> dict:
+                seed: int = 0, world_dir=None) -> dict:
     """Render ``poses`` in ``scene`` with the sonar config ``cfg``.
 
     Returns ``rows`` (n, N) reported dB (float32; NaN-padded if the bin count
@@ -63,6 +63,13 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
     renderer's geometric altitude, m) and ``out_of_map`` (count of pings whose
     beam left the scene grid). Renderers are built once per acquisition and
     side, in the order the poses come, so a fixed ``seed`` is reproducible.
+
+    A ``cfg`` carrying a ray-cast section (``sonar.raycast.config.
+    raycast_sonar_config``, the seabed engine's hook) renders with the
+    ray-cast sensor and its shared-stage model, one scene mesh and oracle for
+    every renderer of the call; ``world_dir`` (that sensor only) gives its
+    mesh the world's terrain-only raster. Otherwise the geometric renderer,
+    unchanged.
     """
     from ..analysis.calibration import fbr_bin, scale_to_db
     from ..core.types import Pose3D, Side
@@ -73,6 +80,22 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
     if mode not in ("noisy", "expected"):
         raise ValueError(f"mode {mode!r} (noisy | expected)")
     model = cfg.model
+    rc = getattr(cfg, "raycast", None)       # None: the geometric renderer
+    if rc is not None:
+        from ..sonar.raycast.config import RaycastConfig, shared_stage_model
+        from ..sonar.raycast.renderer import RaycastRenderer
+        rcfg = RaycastConfig.from_dict(rc)
+        model = shared_stage_model(cfg.model, rcfg.system_gain_db)
+        shared: dict = {}
+
+        def make(acq):
+            r = RaycastRenderer(scene, acq, model, rcfg, world_dir=world_dir,
+                                mesh=shared.get("mesh"), oracle=shared.get("oracle"))
+            shared.update(mesh=r.mesh, oracle=r.oracle)
+            return r
+    else:
+        def make(acq):
+            return GeometricRenderer(scene, acq, model)
     rng = np.random.default_rng(seed)
     cache: dict = {}
     nmax = max((p.num_results for p in poses), default=0)
@@ -86,7 +109,7 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
         if key not in cache:
             acq = _acq(cfg, p)
             side = Side.PORT if p.side == "port" else Side.STARBOARD
-            cache[key] = (acq, side, GeometricRenderer(scene, acq, model),
+            cache[key] = (acq, side, make(acq),
                           PingEncoder(side, acq, model),
                           (np.arange(acq.num_results) + 0.5) * acq.bin_size_m)
         acq, side, rr, enc, bins = cache[key]

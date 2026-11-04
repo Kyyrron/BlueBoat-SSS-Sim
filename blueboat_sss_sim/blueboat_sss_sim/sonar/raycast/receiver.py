@@ -106,6 +106,31 @@ class BinGrid:
                     np.bincount(bb, weights=c.real, minlength=self.n)
                     + 1j * np.bincount(bb, weights=c.imag, minlength=self.n))
 
+    def taps(self, tau: np.ndarray):
+        """The envelope taps of contributors at delays ``tau``: (contributor
+        index, bin, envelope weight w, carrier exp(-i omega tau)) -- what
+        :meth:`add` deposits, as sparse triplets (the fit basis)."""
+        tau = np.asarray(tau, dtype=np.float64)
+        carrier = np.exp(-1j * np.fmod(self.omega * tau, 2.0 * np.pi))
+        centre = np.floor((0.5 * self.device_c * tau - self.start_m)
+                          / self.bin_m).astype(np.int64)
+        ii, bb, ww = [], [], []
+        idx = np.arange(tau.size)
+        for j in range(-self._k, self._k + 1):
+            b = centre + j
+            ok = (b >= 0) & (b < self.n)
+            if not ok.any():
+                continue
+            w = self.env(self.t_b[b[ok]] - tau[ok])
+            nz = w != 0.0
+            ii.append(idx[ok][nz])
+            bb.append(b[ok][nz])
+            ww.append(w[nz])
+        if not ii:
+            z = np.zeros(0)
+            return z.astype(np.int64), z.astype(np.int64), z, carrier
+        return np.concatenate(ii), np.concatenate(bb), np.concatenate(ww), carrier
+
     def add_group(self, det: np.ndarray, f: np.ndarray, tau: np.ndarray,
                   group: np.ndarray, chunk: int = 400_000) -> None:
         """Deposit contributors that come in coherent groups: every path

@@ -1,8 +1,12 @@
-# Ray-cast sensor — Phase 2 report (IN PROGRESS): CPU reference renderer, path by path
+# Ray-cast sensor — Phase 2 report: CPU reference renderer, path by path
 
-Started 2026-11-02. Gate: `raycast_plan.md` §Phase 2. Tolerances: `raycast_design.md` §7. Command:
-`python3 -m test.raycast_test [--quick]` from the package source root. Last run: 43 passed,
-0 failed, 1 skipped, in 347 s (quick). Smoke test 493/493.
+Started 2026-11-02, closed 2026-11-04 (gate status at the end). Gate: `raycast_plan.md` §Phase 2.
+Tolerances: `raycast_design.md` §7. Command: `python3 -m test.raycast_test [--quick]` from the package
+source root. Last full run (2026-11-04, multipath default): **112 passed, 0 failed, 4 skipped** in
+3040 s (`~/ros2_ws/sim_runs/raycast/notes/s3/rt_full_s3.log`), plus the fit-basis and profile checks
+run separately (pass). Only 6 world folders exist since 2026-11-03 22:20: the harbour
+(`Shiraishijima_lawnmower`), `arob2027` and original pool worlds were removed outside this work, so
+the mesh section covers 6 worlds + the synthetic one (Phase 1: 13).
 
 ## Correction and additions (2026-11-03)
 
@@ -23,13 +27,14 @@ Started 2026-11-02. Gate: `raycast_plan.md` §Phase 2. Tolerances: `raycast_desi
 
 | Path | Status |
 |---|---|
-| **direct** | built; A1, R1, B1–B3, S1–S4, C1, O1–O3 and M6 pass. **Open: NC #4** (see below), S5 (Eckart √C on bounce legs, wanted with the bounce paths), the incoherent remainder of smooth solids, and rough walls' coherent share |
-| surface | `paths.py` (direct, surface image with Eckart √C, both legs ray-cast) and the grouped coherent receiver (`BinGrid.add_group`: one scatterer's path pairs interfere). **S6 and P1 pass** (Lloyd nulls exact to 1.3e-5; two-way nulls −36/−37 dB at 23/29 m). Renderer integration (every scatterer's four pairs, bistatic law) is next |
-| bottom / comb | not started |
-| wall | not started (wall triangles already scatter diffusely on the direct path) |
-| dihedral | not started |
-| diffraction | not started |
-| transmission / internal reflection | not started |
+| **direct** | A1, R1, B1–B3, S1–S5, C1, O1–O3, M6 pass |
+| **surface** | S6, P1 pass; renderer integration through the multipath pairs (calm surface: +0.8…+4.9 dB at 4–20 m, Lloyd) |
+| **bottom / comb** | S4/S5 (mean field), P2, P4, P6 pass |
+| **wall** | P3, P5 pass; P7 in the session-3 section |
+| **dihedral** | O4 (+0.019 dB), O5 (−0.146 dB) pass |
+| **diffraction** | D1 pass; D2 pass on the local width (the first metric failed, recorded) |
+| **transmission** | O6 reported: −5.5 / −3.5 dB at 6.1 / 10.1 m |
+| **NC #4** | met with the provisional spectrum (w₂ = literature/100): 0 regressions; NOT met with the literature spectra (10 regressions) |
 
 ## What was built
 
@@ -126,14 +131,13 @@ renderer handles the same issue with a judged `beam_sidelobe_floor` (0.004) and 
   parameter fitted on the calibration sessions only (`raycast_design.md` §8);
 - record it, never tune it per scene.
 
-## Not yet done in Phase 2
+## Not yet done in Phase 2 (updated 2026-11-04)
 
-- Bounce paths (surface, bottom, wall, dihedral, image comb) with S5, P1–P7, O4–O5.
-- Diffraction (D1, D2).
-- Transmission (O6).
-- The NC4 envelope.
-- Labels (ground truth read off the result).
-- Registry entries for the new constants (planned for Phase 6 with the integration, smoke `[16]`).
+- ~~Bounce paths, diffraction, transmission, NC4~~: done (session-3 section).
+- P7 (B1 on the wavy-wall world): see the session-3 section.
+- Labels (ground truth read off the result): moved to Phase 6 by the approved reorder (not needed for
+  the fit).
+- Registry entries: done for the fitted and structural ray-cast constants (21 entries, smoke `[16]`).
 
 ## Appendix A (2026-11-03): owner-supplied full texts, and what changed
 
@@ -252,3 +256,69 @@ image of the transducer in the local floor plane, with amplitude V·√C over th
 2. Re-run the NC #4 envelope.
 3. The 450 kHz spectrum (w₂, γ₂), f_v and TVG k are then fitted together in Phase 7 on calibration
    sessions (the near-nadir crest profile, the altitude law, and roll for the pattern).
+
+
+## Session 3 (2026-11-03/04): the remaining paths
+
+Code (all in `sonar/raycast/`):
+- `specular.py`: the floor's mean field;
+- `chains.py`: eigenray chains, Newton Fermat;
+- `multipath.py`: grouped pairs, energy cut-off, wall and object faces, the floor channel through
+  transducer images;
+- `diffraction.py`;
+- thin-shell transmission (`scene_mesh.layer_transmission`, `SceneOracle.transmit`);
+- `fitbasis.py`, `calib.py` (Phase A).
+
+Design decisions: `raycast_design.md` §14.
+
+| Gate | Tolerance | Result |
+|---|---|---|
+| [S4/S5] floor mean field = image source, monostatic, 0.6–20 m, C 1…0.1 | 0.05 dB, 0.05 rad | 0.014 dB, 0.018 rad |
+| [S4/S5] oblique bistatic PO and floor eigenray, 8–80° | 0.05 dB | 0.014 dB; eigenray 2e-15 dB |
+| [P6] Fermat on a sloping floor (4 % + 0.15 m / 20 m) | λ/20 = 0.17 mm | 0.005 mm |
+| [P2] comb = image sum at the same bounce cap; → closed form | 1e-9; 0.2 dB | 8e-16; −0.115 dB at 40 bounces |
+| [P4] pool FBR ramp arrivals (isotropic beam) | 1 bin | 0.02 bin; amplitudes −0.16 / +0.01 / −0.04 dB |
+| [P3] no wall image beyond the face | exact | 0 mismatches of 3201 |
+| [P5] sill between boat and quay, 0.9 m calm water | blocked images vanish | yes; tail −7 to −9 dB behind the face |
+| [D1] knife edge vs F(v), v ∈ [−2, 3] | 0.5 dB, 0.1 rad | 0.197 dB, 0.029 rad |
+| [D2] shadow-edge width ∝ √(λR) | slope 0.5 ± 0.05 | **first metric 0.560 (FAIL, recorded)**; local width 0.486 (pass) |
+| [O4] dihedral 8πa²b²/λ² | 0.5 dB | +0.019 dB |
+| [O5] trihedral 4πL⁴/(3λ²) | 0.5 dB | −0.146 dB |
+| [O6] flooded pp_shell box shadow | reported | −5.5 dB (6.1 m), −3.5 dB (10.1 m); one normal crossing \|T\|² = 0.840 |
+| fit basis = full render (Phase A) | 0.02 dB | 0.0009 dB |
+
+**Failures on the way, each found by a gate, and the fixes:**
+1. **S4/S5 oblique, −6.8 dB at 30° grazing.** V was evaluated at the angle between the facet normal
+   and the bisector (≈ 90°) instead of at the patch's incidence angle.
+2. **The window was isotropic.** A bistatic Fresnel zone is 1/sin ψ wider across the plane of
+   incidence; the zone index now carries it.
+3. **The Fermat fixed-point iteration oscillated on curved floors** (law residual up to 36°). It is
+   replaced by a damped Newton solve: residual 1e-6°.
+4. **Multipath was cut for a calm surface.** The near-field pattern of a chain was evaluated at the
+   unit departure vector, i.e. at 1 m; it is now taken at the unfolded length. (A plain
+   `SonarModelConfig` in a test also put the noise floor 45 dB too loud; tests now use the shared stage.)
+5. **D1:** a sign error in the kernel (renderer convention `exp(−ik ΔL)`) and the test's swapped scipy
+   `fresnel` outputs. Polar sampling converged slowly; edge-aware chord integration with adaptive
+   bisection replaced it.
+6. **D2:** fixed offsets broke the scaling, and the screen thickness scaled with R. The pre-stated
+   metric itself fails (0.560); the local width passes (0.486).
+7. **A runtime warning:** at a fast half-space's critical angle `sin θ_p = 0`. Guarded: |V| = 1 there.
+
+**Limitations stated, not hidden:**
+- one eigenray per floor chain (a floor with several specular points keeps the one nearest the
+  flat-floor image point);
+- diffraction on the direct chain only (bounce chains keep boolean visibility);
+- the carrier-frequency Kirchhoff kernel (≤ 1.2 % at the envelope flanks);
+- the fluid-layer transmission (no shear: Folds & Loggins is the upgrade);
+- the incoherent share 1 − C of specular bounces is not rendered.
+
+**Literature comparison (owner request):** `raycast_dave_comparison.md`. DAVE (Choi et al. 2021),
+Stonefish and HoloOcean render the first hit only. DAVE's GPU patterns are adopted and credited.
+
+**CPU cost (reference, single-threaded numpy):**
+- flat sand, 20 m / 1200 bins, 5 mm lattice: 9–11 s per ping-side (1.5–1.8 M scatterers);
+- pool scene in calm water (the echo comb): more than 15 min per ping-side (measurement completing,
+  Phase A report).
+
+Warp on the RTX 4060: 115 M closest-hit and 434 M occlusion rays/s on the 1.24 M-triangle pool mesh
+(`notes/s4/warp_bench.log`).

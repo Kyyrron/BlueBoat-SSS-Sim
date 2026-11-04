@@ -79,6 +79,12 @@ class SeabedLawConfig:
     #: integration machinery's test law (Mackenzie 1961, mu = -27 dB).
     law: str = "ssa"
     lambert_mu_db: float = -27.0
+    #: Per-sediment overrides of the J&R parameters the 450 kHz law
+    #: extrapolates (``seabed_ssa.SEDIMENTS``): ``{name: {w2, gamma2,
+    #: sigma2}}``. Fitted in Phase 7 (raycast_design §8), each inside the
+    #: bounds of ``seabed_ssa.OVERRIDE_BOUNDS`` (J&R Table 13.1, eq. 14.9);
+    #: empty = the literature defaults.
+    sediments: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -122,23 +128,107 @@ class PoConfig:
 
 
 @dataclass(frozen=True)
+class SpecularConfig:
+    """The seabed sheet's coherent (mean-field) channel (``specular.py``):
+    numerical settings only, converged in Phase 5 (raycast_design §6)."""
+
+    enabled: bool = True
+    #: Stationary-phase window in Fresnel zones of the specular direction:
+    #: weight 1 inside ``window_n1``, raised-cosine taper to 0 at
+    #: ``window_n2``. Set by the S4/S5 truncation study (raycast_phase2.md).
+    window_n1: float = 8.0
+    window_n2: float = 30.0
+    #: Patch size from the quadratic-phase criterion k a^2 / (4 R) <= this
+    #: [rad], clipped to [patch_min_m, patch_max_m].
+    patch_phase_rad: float = 0.02
+    patch_min_m: float = 0.002
+    patch_max_m: float = 0.02
+
+
+@dataclass(frozen=True)
+class PathsConfig:
+    """Two-way multipath (``multipath.py``, ``chains.py``)."""
+
+    enabled: bool = True
+    #: Hard cap on specular bounces per one-way chain; the energy cut-off
+    #: (``cutoff_db``) normally stops earlier (design §2.2).
+    max_order: int = 12
+    #: A sequence of chains is kept while its energy bound exceeds the
+    #: bin's (noise + reverberation) minus this [dB].
+    cutoff_db: float = 10.0
+    #: RMS height of the water surface (Eckart coherent fraction of every
+    #: surface bounce). JUDGED open-water default, the geometric profile's
+    #: ``surface_rms_height_m`` (wind ripple, ~cm: coherent ~0 at the comb's
+    #: angles); a calm pool is a site record (pass-4 overlay 3e-4 m). From the
+    #: sea state when the node has one (Phase 6).
+    surface_rms_m: float = 0.02
+    floor_bounces: bool = True
+    #: Wall faces as bounce boundaries (ghosts via quays), at most
+    #: ``max_wall_bounces`` per chain.
+    walls: bool = True
+    max_wall_bounces: int = 1
+    #: Planar faces of smooth solids as GO bounces after the PO bounce
+    #: (corner paths: dihedral, trihedral; O4/O5), at most this many.
+    object_faces: bool = True
+    max_object_bounces: int = 2
+
+
+@dataclass(frozen=True)
+class DiffractionConfig:
+    """Fresnel-Kirchhoff at shadow edges (``diffraction.py``); numerical
+    settings, converged in Phase 5 (D1 study: 16 directions -> 0.20 dB)."""
+
+    enabled: bool = True
+    window_n1: float = 6.0
+    window_n2: float = 20.0
+    sectors: int = 16
+    coarse: int = 20
+    bisect: int = 7
+    #: geometry within this distance of a contributor is its own support
+    #: (covered by the scattering law), never an occluder [m]
+    end_margin_m: float = 0.05
+    #: clear legs whose contributor lies within this cell of a blocked one
+    #: are tested for the lit side of a shadow edge [m]
+    neighbour_cell_m: float = 0.25
+
+
+@dataclass(frozen=True)
 class RaycastConfig:
     seed: int = 0
+    #: The system gain [dB]: ``SL + RS`` and the receiver's constants, the
+    #: one fitted level constant of this sensor (raycast_design §8). The
+    #: shared encoder/noise stage runs with it as ``calibration_db_offset``
+    #: (``shared_stage``); the profile's own ``model`` section keeps the
+    #: geometric offset its measured noise levels are paired with. Default:
+    #: the provisional anchor of the literature spectra (flat sand at the
+    #: bath3 geometry matched to the calibrated geometric renderer, TVG k 12;
+    #: raycast_phase2.md Appendix D). Bounds [105, 165] dB (the anchors of
+    #: every spectrum variant tried, 126.6-143.7, +-20 dB).
+    system_gain_db: float = 126.6
+    #: The visibility oracle: "cpu" (the numpy BVH, the reference) or
+    #: "warp" (the GPU oracle, gpu_warp.py; gate G1 holds it to the CPU).
+    backend: str = "cpu"
     water: WaterConfig = field(default_factory=WaterConfig)
     beam: BeamConfig = field(default_factory=BeamConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     seabed: SeabedLawConfig = field(default_factory=SeabedLawConfig)
     receiver: ReceiverConfig = field(default_factory=ReceiverConfig)
     po: PoConfig = field(default_factory=PoConfig)
+    specular: SpecularConfig = field(default_factory=SpecularConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
+    diffraction: DiffractionConfig = field(default_factory=DiffractionConfig)
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> "RaycastConfig":
         d = dict(d or {})
-        top = {"seed", "water", "beam", "sampling", "seabed", "receiver", "po"}
+        top = {"seed", "system_gain_db", "backend", "water", "beam", "sampling", "seabed",
+               "receiver", "po", "specular", "paths", "diffraction"}
         bad = set(d) - top
         if bad:
             raise KeyError(f"Unknown raycast keys: {sorted(bad)}")
         return cls(seed=int(d.get("seed", 0)),
+                   system_gain_db=float(d.get("system_gain_db", 126.6)),
+                   backend=str(d.get("backend", "cpu")),
                    water=_strict(WaterConfig, d.get("water"), "water"),
                    beam=_strict(BeamConfig, d.get("beam"), "beam"),
                    sampling=_strict(SamplingConfig, d.get("sampling"),
@@ -146,7 +236,12 @@ class RaycastConfig:
                    seabed=_strict(SeabedLawConfig, d.get("seabed"), "seabed"),
                    receiver=_strict(ReceiverConfig, d.get("receiver"),
                                     "receiver"),
-                   po=_strict(PoConfig, d.get("po"), "po"))
+                   po=_strict(PoConfig, d.get("po"), "po"),
+                   specular=_strict(SpecularConfig, d.get("specular"),
+                                    "specular"),
+                   paths=_strict(PathsConfig, d.get("paths"), "paths"),
+                   diffraction=_strict(DiffractionConfig, d.get("diffraction"),
+                                       "diffraction"))
 
 
 def shared_stage_model(base, system_gain_db: float):
@@ -166,3 +261,127 @@ def shared_stage_model(base, system_gain_db: float):
         noise_floor=float(base.noise_floor) * scale,
         watercolumn_noise=float(base.watercolumn_noise) * scale,
         reverberation_db=0.0)
+
+
+def shared_stage(model, rc: "RaycastConfig"):
+    """The shared encoder/noise stage of this sensor: the profile's ``model``
+    section (geometric offset, measured noise levels) re-expressed under
+    ``rc.system_gain_db`` (:func:`shared_stage_model`)."""
+    return shared_stage_model(model, float(rc.system_gain_db))
+
+
+def load_profile(path):
+    """A ray-cast sonar profile: ``(SonarConfig, RaycastConfig)``. The
+    ``acquisition`` / ``model`` sections load exactly as for the geometric
+    renderer (``SonarConfig.from_yaml`` ignores the other keys); ``raycast``
+    is strict; ``renderer`` must say ``raycast``."""
+    import yaml
+    from ..config import SonarConfig
+    with open(path, "r", encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    if str(doc.get("renderer", "raycast")) != "raycast":
+        raise ValueError(f"{path}: renderer {doc.get('renderer')!r} is not raycast")
+    return SonarConfig.from_yaml(path), RaycastConfig.from_dict(doc.get("raycast"))
+
+
+def _sonar_config_cls():
+    from ..config import SonarConfig
+    return SonarConfig
+
+
+@dataclass
+class RaycastSonarConfig(_sonar_config_cls()):
+    """A ``SonarConfig`` carrying a ray-cast section: the calibration engine
+    (``calibration/seabed.py``) renders its jobs through this sensor when
+    the config has a ``raycast`` mapping (fitted ``raycast.*`` parameters
+    live there)."""
+
+    raycast: dict = field(default_factory=dict)
+
+
+def raycast_sonar_config(cfg, raycast: Mapping[str, Any]) -> RaycastSonarConfig:
+    """``cfg`` (a ``SonarConfig``) with a strictly validated ray-cast
+    section."""
+    RaycastConfig.from_dict(raycast)          # raises on unknown keys
+    return RaycastSonarConfig(acquisition=cfg.acquisition, model=cfg.model,
+                              raycast=_deepcopy(dict(raycast)))
+
+
+def _deepcopy(d):
+    import copy
+    return copy.deepcopy(d)
+
+
+def get_nested(d: Mapping[str, Any], dotted: str):
+    """The value of ``raycast.<a>.<b>...`` in a ray-cast mapping, the code
+    default (dataclass / ``seabed_ssa.SEDIMENTS``) when the mapping is
+    silent."""
+    parts = dotted.split(".")[1:] if dotted.startswith("raycast.") else dotted.split(".")
+    node: Any = d
+    for k in parts:
+        if isinstance(node, Mapping) and k in node:
+            node = node[k]
+        else:
+            node = None
+            break
+    if node is not None:
+        return node
+    if parts[:2] == ["seabed", "sediments"]:
+        from .seabed_ssa import SEDIMENTS
+        return getattr(SEDIMENTS[parts[2]], parts[3])
+    obj: Any = RaycastConfig()
+    for k in parts:
+        obj = getattr(obj, k)
+    return obj
+
+
+def set_nested(d: dict, dotted: str, value) -> dict:
+    """A copy of ``d`` with ``raycast.<a>.<b>... = value``."""
+    out = _deepcopy(d)
+    parts = dotted.split(".")[1:] if dotted.startswith("raycast.") else dotted.split(".")
+    node = out
+    for k in parts[:-1]:
+        node = node.setdefault(k, {})
+    node[parts[-1]] = value
+    return out
+
+
+#: The provisional ray-cast section of ``config/raycast_default_sonar.yaml``
+#: (2026-11-03): the 450 kHz spectra at 1/100 of J&R Table 13.1's SAX99 /
+#: Key West values -- the smallest change that held the NC #4 envelope
+#: (``raycast_plan.md`` status 2026-11-03, NC4 v3: 0 regressions; SAX99/30
+#: left 2), inside the sand envelope -- with its anchor gain (flat sand at
+#: the bath3 geometry matched to the calibrated geometric renderer) and the
+#: provisional TVG k 12. To be replaced by the Phase-7 fit.
+PROVISIONAL_RAYCAST = {
+    "system_gain_db": 143.7,
+    "receiver": {"tvg_k": 12.0},
+    "seabed": {"sediments": {"sand": {"w2": 4.33e-7}, "mud": {"w2": 4.64e-6}}},
+}
+
+
+def write_default_profile(path, base_yaml=None) -> None:
+    """Generate ``config/raycast_default_sonar.yaml``: ``acquisition`` and
+    ``model`` copied from the geometric comparison profile (so the shared
+    stage never drifts from it), ``renderer: raycast`` and
+    :data:`PROVISIONAL_RAYCAST`. Regenerate, never hand-edit."""
+    import yaml
+    from ..config import find_default_sonar_yaml
+    base = yaml.safe_load(open(base_yaml or find_default_sonar_yaml(),
+                               encoding="utf-8"))
+    RaycastConfig.from_dict(PROVISIONAL_RAYCAST)
+    doc = {"renderer": "raycast", "acquisition": base["acquisition"],
+           "model": base["model"], "raycast": PROVISIONAL_RAYCAST}
+    head = ("# GENERATED by blueboat_sss_sim.sonar.raycast.config."
+            "write_default_profile -- regenerate, never hand-edit.\n"
+            "# The ray-cast sensor's profile (renderer: raycast). acquisition"
+            " and model = config/default_sonar.yaml\n# (the shared encoder"
+            " / noise stage; model.calibration_db_offset is the level the"
+            " measured noise\n# constants are paired with -- the ray-cast"
+            " system gain is raycast.system_gain_db). raycast: the\n#"
+            " provisional section (PROVISIONAL_RAYCAST): spectra at 1/100 of"
+            " J&R Table 13.1, NC #4-held,\n# replaced by the Phase-7 fit."
+            " docs/engineering/raycast_design.md §8, §14.\n")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(head)
+        yaml.safe_dump(doc, f, sort_keys=False)
