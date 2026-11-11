@@ -422,6 +422,7 @@ def _write_metadata(out: Path, state: "BuilderState", scene: SceneModel,
             "top_z": float(w.top_z), "reflectivity": float(w.reflectivity),
             "thickness": float(w.thickness), "kind": str(w.kind),
             "draft_m": float(w.draft_m), "roughness_m": float(w.roughness_m),
+            "material": str(w.material),
             # Chord of a curved wall: the builder wall it came from.
             "curve": curve_base_name(w.name),
         } for w in scene.walls],

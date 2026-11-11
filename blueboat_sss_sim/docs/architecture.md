@@ -47,6 +47,9 @@ blueboat_sss_sim/
 │   │                geo.py (equirectangular lat/lon ↔ EN, GeoAnchor, slippy)
 │   │                trajectory.py (WaypointTrajectory, TimedTrajectory =
 │   │                               MCS blueboat_trajectory/1, load_trajectory)
+│   │                gauss_legendre_cache.py (the live node's exact GL-node cache)
+│   │                sim_hold.py (pause Gazebo while a slow ray-cast ping renders,
+│   │                             gz-transport, imported lazily; 2026-11-09)
 │   ├── worldgen/    noise.py → terrain.py (texture) → objects.py → scene.py
 │   │                depth/   (authored bathymetry: ingest.py CSV/GeoTIFF,
 │   │                          interpolate.py wall-aware fill, presets.py
@@ -68,6 +71,11 @@ blueboat_sss_sim/
 │   ├── sonar/       config.py / acoustics.py / multipath.py / noise.py /
 │   │                renderer.py / facets.py (smooth-object Kirchhoff
 │   │                patches, NC #17) / encoder.py
+│   │                raycast/ (the second SonarRenderer, 2026-11: 3-D ray
+│   │                casting, coherent summation, 6-DoF; CPU reference +
+│   │                Warp GPU path gpu_warp.py / gpu_render.py; the
+│   │                empirical correction layer correction.py, off by
+│   │                default → docs/engineering/raycast_design.md)
 │   ├── sea/         ROS-free sea state: spectrum.py (JONSWAP/PM, dispersion)
 │   │                wavefield.py / current.py (seeded, smooth Gauss-Markov
 │   │                + weak eddies: a function of seed, t, x, y) / hull.py
@@ -111,6 +119,11 @@ blueboat_sss_sim/
 ├── config/          default_world / shallow_water_world / enclosed_basin_world
 │                    default_sonar / coverage_pass_sonar / enclosed_basin_sonar
 │                    shallow_beach_sonar / fault_injection_sonar (test only)
+│                    field_candidate_v1_sonar (calibration candidate) /
+│                    pool_environment_pass4_sonar (pool site overlay) /
+│                    raycast_default_sonar (the ray-cast sensor's profile) /
+│                    raycast_live / raycast_fast (generated live variants)
+│                    parameter_registry (calibration registry)
 │                    materials / materials_literature (override) /
 │                    seabed_recipes / sea_states / sea_schedule_example
 ├── launch/          sss_sim_launch, sim_world_launch, full_mission_launch,
@@ -118,6 +131,7 @@ blueboat_sss_sim/
 ├── docs/            this documentation set
 ├── msg_reference/   OmniscanProfile.msg (reference copy only)
 └── test/            smoke_test.py (offline gate) · gui_smoke.py (offscreen Qt)
+                     raycast_test.py (the ray-cast sensor's gates, not in the hook)
                      gazebo_sea_test.py (Gazebo sea gate, not in the hook)
                      fixtures/survey_lawnmower.yaml (frozen calibration context)
                      fixtures/render_baseline_v1.npz (render regression)
@@ -158,7 +172,7 @@ mission bundles still load everywhere (their frozen `sonar.yaml` /
 
 | Interface | Where | Replace/extend to… |
 |---|---|---|
-| `SonarRenderer` ABC | `sonar/renderer.py` | plug a higher-fidelity acoustic model with zero changes elsewhere |
+| `SonarRenderer` ABC | `sonar/renderer.py` | plug a higher-fidelity acoustic model with zero changes elsewhere. Two implementations: `GeometricRenderer` (default, the comparison model) and `RaycastRenderer` (`sonar/raycast/`, selected by the node's `renderer` / launch `sonar_renderer:=raycast`, run in a slowed simulation, `real_time_factor:=`; `configuration_guide.md` §2c, `integration_guide.md` §2b) |
 | `DEPTH_PRESETS` | `worldgen/depth/presets.py` | add a bathymetry pattern — fn + label + schema rows; the GUI form is generated |
 | Object `CATALOG` | `worldgen/objects.py` | add litter classes (mask + material + priors + optional `fill_fraction_range` / `params_schema`); GUI, placement and metadata pick it up |
 | `Material` table | `worldgen/materials.py` + `config/materials.yaml` | add seabed/object materials: a material's two-way `transmission` (0 = opaque, the default; `pp_shell` 0.11 is the flooded field box), its physical acoustic constants (`_ACOUSTIC`: density, sound speed, backing, wall — which give a smooth object its reflection coefficient, NC #17) and the literature-anchored override `config/materials_literature.yaml`. Never a per-object brightness |
@@ -166,7 +180,7 @@ mission bundles still load everywhere (their frozen `sonar.yaml` /
 | `objects.classes` / `objects.explicit` | world YAML / `BuilderState` | per-class scattering with clustering, or verbatim placement — matched pairs, RTK clusters, and the World Builder's hand-placed objects (`BuilderState.objects.placed` pins the scatter into the same form) |
 | plugin prefix (`gz` default / `ignition`) | `sdf_writer.py` | target Gazebo Fortress instead of Garden/Harmonic |
 | `LayerSpec` registry | `worldgen/depth/layers/` | add a seabed layer kind — fn + schema + geometry + channels + `reference`; the menu, the property form, the compositor and the bake pick it up. A kind whose parameters invert what its blend mode means can override the blend on its own result (`LayerOutput.blend`, as a dredged basin with a floor above the bed does) |
-| sonar profiles | `config/*_sonar.yaml` | one file per idea: the calibration anchor, the 30 m diagnostic profile (`coverage_pass_sonar`, historical name), the shallow-beach paths, the fault-injection knobs. A profile carries the whole model, so a legacy frozen copy renders with the constants it was frozen with |
+| sonar profiles | `config/*_sonar.yaml` | one file per idea: the calibration anchor, the 30 m diagnostic profile (`coverage_pass_sonar`, historical name), the shallow-beach paths, the fault-injection knobs. The ray-cast sensor's profile (`raycast_default_sonar`, `renderer: raycast` + a strict `raycast:` section, `configuration_guide.md` §2c) and the calibration candidate / site overlays are different in kind. A profile carries the whole model, so a legacy frozen copy renders with the constants it was frozen with |
 
 ## 6. Why not a Gazebo sensor plugin? (decision record)
 
@@ -178,6 +192,8 @@ for detector training* and the vehicle is a surface craft whose pose
 Gazebo already publishes, rendering acoustics CPU-side against the
 ground-truth heightfield is both more faithful and more maintainable. The
 `SonarRenderer` ABC preserves the option of a GPU/plugin backend later.
+**Realised 2026-11** as `RaycastRenderer` (`sonar/raycast/`, GPU via Warp): still inside the ROS
+node, not a Gazebo plugin. It runs in a slowed simulation (`integration_guide.md` §2b).
 
 ## 7. Why the world frame is the re-based path frame (decision record)
 

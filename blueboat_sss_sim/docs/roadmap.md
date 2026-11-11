@@ -54,11 +54,12 @@ texture-classification realism; detector-level impact is modest.
 Seagrass sway as a per-ping phase jitter on the seagrass-material texture;
 addresses A4 partially without giving up the static-scene architecture.
 
-## 7. GPU / Gazebo-sensor backend (only if needed)
-If world sizes or ping rates ever outgrow the CPU renderer, reimplement
-`SonarRenderer` on a GPU ray caster (or a Gazebo sensor plugin feeding
-ranges + material IDs) behind the same ABC. The interface, noise stack
-and encoder layers are already backend-agnostic.
+## 7. GPU / Gazebo-sensor backend — built as the ray-cast sensor (2026-11)
+Done as a second `SonarRenderer` behind the same ABC: `sonar/raycast/` (3-D ray casting, coherent
+summation, 6-DoF, a Warp GPU path), selected per run and run in a slowed simulation
+(`integration_guide.md` §2b). The geometric renderer stays the default and the comparison model.
+Open: its calibration (`docs/engineering/raycast_assessment.md`), ground-truth contacts under the
+ray-cast, the GPU memory at ranges above 40 m (CUDA error 101, `raycast_assessment.md` §13.7).
 
 ## 8. Sim-to-real calibration over a known bottom
 Two passes are done (`docs/sonar_model.md` §6): the encoder carries the

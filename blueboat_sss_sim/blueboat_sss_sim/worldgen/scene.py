@@ -47,6 +47,9 @@ GEO_CONVENTION = "equirectangular_wgs84_r6378137"
 _WALL_KEYS = {f.name for f in dataclasses.fields(Wall)}
 #: Wall kinds the renderer models (core.types.Wall docstring).
 WALL_KINDS = ("quay", "pontoon")
+#: What a wall face is built of (``Wall.material``): the two usual kinds of
+#: quay, gravity type (concrete caisson or block) and steel sheet pile.
+WALL_MATERIALS = ("concrete", "metal")
 
 
 def _walls_from_list(items: Any) -> list[Wall]:
@@ -76,6 +79,9 @@ def _walls_from_list(items: Any) -> list[Wall]:
             raise ValueError(f"pontoon '{w.name}' needs a positive draft_m")
         if w.roughness_m < 0.0:
             raise ValueError(f"wall '{w.name}' roughness_m must be >= 0")
+        if w.material not in WALL_MATERIALS:
+            raise ValueError(f"wall '{w.name}' material {w.material!r} is not "
+                             f"one of {sorted(WALL_MATERIALS)}")
         walls.append(w)
     names = [w.name for w in walls]
     if len(set(names)) != len(names):

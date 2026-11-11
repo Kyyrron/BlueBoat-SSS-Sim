@@ -287,18 +287,156 @@ ever shows within-ping smear at the swath edge, this is where it belongs.
 
 ## Ray-cast sensor (`renderer: raycast`) — in progress since 2026-11-02
 
+### [P0] Option A plan — independent review of 2026-11-11 (built; the owner's live test is next)
+Record: `blueboat_sss_sim/docs/engineering/independent_review_2026-11-11.md` (decision, plan,
+as-built, results against their pre-stated tolerances); plan file
+`~/.claude/plans/pasted-content-id-5000-independent-lively-flask.md`. The owner chose to keep
+and improve the custom ray-cast (HoloOcean / hybrid rejected, `holoocean_reference.md`).
+
+**Done 2026-11-11:** run provenance + stale-install warning (`core/provenance.py`,
+`~/ground_truth/run_info`, GCS `metadata.json["simulation"]`); bottom line verified offline with
+the processor's own tracker (`analysis/raycast_bottomline.py`: locked 99.7 % on the 11-11 track);
+ground-truth contacts (`sonar/raycast/labels.py`, `raycast.labels.enabled`) and `range_scale`
+(Perception applies it); the shadow floor added in the field domain (`raycast.floor.addition`);
+`seed_per_run`; Gazebo object heights (`sdf_writer.py`); **objects as their own meshes**
+(`raycast.objects.mode: solid`, `sonar/raycast/object_mesh.py`: catalog primitives and fine mask
+meshes on the terrain sheet). All on in the two harbour profiles only; default / live / fast are
+unchanged. Gates: smoke `[18]`, `raycast_test --only L` / `--only O`, guard
+`~/ros2_ws/sim_runs/raycast/review_a/guard_a.py --check`.
+
+**Done 2026-11-11, second pass (one surface rule; `.claude/raycast-live.md`):** every object as
+parts with materials (`worldgen/compounds.py`; the mask skins are gone), the diffuse share of
+smooth surfaces and `raycast.objects.fouling` (node `fouling`), a steel-belted car-tyre tread,
+`Wall.material` (World Builder), gravel / rock levels, world material overrides, the nadir onset
+fade (`correction.onset_fade_m`), Gazebo visuals from the same parts, and the GCS Record ON race
+that left a session without a `.svlog` (BlueBoat-SSS). Justification and references:
+`blueboat_sss_sim/docs/simulator_justification.md`.
+
+**Open, in order:**
+- **[P0] Owner's live test** (`python3 -m blueboat_sss_sim.core.provenance --check` tells whether
+  the install matches the source): MCS "Ray-cast — harbour, fast" on the harbour world, GCS record.
+  Look at: the nadir edge (a ramp, no bright line), the bottom line (locked, about 0.3 m late like
+  the real tracker), the pallets as boards, `metadata.json["simulation"]`, and Perception's
+  dataset-mode boxes (`BlueBoat-Perception/tools/draw_labels.py`). The bicycle tyres stay faint
+  (bare rubber, 2 cm proud): try `sonar_fouling:=0.5`. For a meaningful detection test build a
+  world with objects above the thesis' own floor (>= 0.5 m, relief >= 0.2 m: car tyres, concrete
+  blocks, drums, crates); a world re-saved with Edit shows the compounds in Gazebo too.
+- **[P1] WP5 — validation world + `raycast_test --only V`** (range bin, shadow at two altitudes,
+  plate / drum aspect, occlusion behind a quay, roll / pitch / heave, seed independence, cost
+  record). `[L]` and `[O]` already cover labels, shadow length, material ordering, the surface
+  rule, fouling and repeatability on synthetic scenes.
+- **[P2] Cost of mirror patches:** a pallet is ~28 000 patches processed whenever it is within
+  range, also off the beam (40 vs 35 ms per cycle on the 07:57 track). An exact off-beam skip is
+  possible when no wall or object face is in reach.
+- **[P2] Not modelled, stated:** hollow bodies (pipe bore, drum, open crate), sheet-pile
+  corrugation and fenders, absorption in tyre rubber (no value read at a source), the builder's
+  reflectivity-gain layer (seabed patchiness), seagrass, a mirror return from a wall smoother
+  than 1.6 mm; extended contact keys for rested objects (Perception's footprint is L × W).
+- **[P2] Perception / GCS follow-ups:** Perception should store the run record with a dataset
+  (it has the sensor's `run_id`); the GCS replay window does not show the record.
+- **Limits to state in the thesis:** `independent_review_2026-11-11.md` §11.
+
 A second `SonarRenderer`: 3-D ray casting with coherent summation and full 6-DoF motion,
 beside the unchanged geometric renderer. Plan, gates and the Phase-7 data split:
 `blueboat_sss_sim/docs/engineering/raycast_plan.md` (status log at its end). Design:
 `raycast_design.md`. Literature: `docs/literature/raycast_sonar/`.
 
-### [P1] Phases 2–8 of the ray-cast plan
-Phase 0 (literature, design) and Phase 1 (mesh export, CPU oracle; gate met, `raycast_phase1.md`)
-are done. Phase 2 (CPU reference renderer) is in progress: the direct path and the J&R small-slope
-seabed law pass their gates (`raycast_phase2.md`). Next:
-- the NC #4 first-bottom-return question (nadir sits near the vertical aperture's first null);
-- then the bounce paths, diffraction, transmission, labels. It would also close "Intra-ping motion is not modelled (S12)"
-above, for that renderer only.
+### [P1] Live ray-cast in a slowed simulation (built and run live 2026-11-07)
+Node selection (`renderer`, `raycast_backend`), `sonar_renderer:=`, `real_time_factor:=`, the
+one-clock plumbing (Control / SSS / Perception / MCS), warp in the node's interpreter, the
+start-up warm-up and the exact Gauss-Legendre cache are done; live on `flat_5p0m` x0.08 held
+20 Hz (CLAUDE.md §3.1). Open:
+- (closed 2026-11-11) `ground_truth/contacts` under the ray-cast: `sonar/raycast/labels.py`, on in
+  the harbour profiles (`raycast.labels.enabled`).
+- The GCS replay-path sonar (`blueboat_gcs/ros/sonar_source.py`) passes no renderer
+  (§11 "both paths").
+- Per-scene factors: harbour (Shiraishijima, 20 m / 1200 bins, hybrid v2) **x0.03 holds 20 Hz**, measured end
+  to end through the MCS and GCS Apps on 2026-11-07 (`integration_guide.md` §2b). The pool is still to be
+  measured. The node logs the factor it needs.
+- **GCS bottom tracking on ray-cast pings** (found 2026-11-07): the processor's tracker reads the hybrid's first
+  return 1.4–1.6 m late and jumps by metres; the geometric renderer at the same poses is within 2 cm. The
+  ray-cast has no sharp first-return line, and NC #4 was never established for it. The images are fine, but
+  their georeference near nadir is not. A fix is model work: the owner decides.
+- Fixed 2026-11-07: `sss_sim_node.main` swallows rclpy's teardown race. Before, every MCS stop of a ray-cast run
+  printed a traceback and "process has died".
+- Speed: a cycle is mostly CPU numpy (scatterers, chains, laws, deposits) and costs 2-3x more
+  live than offline under CPU contention; `GpuMultipath._beam` could use
+  `core/gauss_legendre_cache.leggauss` itself (today the node installs it process-wide).
+- **Quay cost (2026-11-09, `.claude/raycast-live.md`).** The first full MCS + GCS run lost 23 % of its pings
+  past a quay (port ping-side 1–7 s, 16 s at the pier corner, vs 0.08 s in open water). Done: the node holds
+  Gazebo while a cycle overruns (`core/sim_hold.py`, `sonar_hold_sim`), and MCS lists the generated live
+  variants (`raycast_live_sonar.yaml` bit-identical, `raycast_fast_sonar.yaml` identical by eye). Verified
+  live headless on 2026-11-09 (`raycast-live.md`: 1 548 pings at exactly 50 ms through the pier corner, 0 late,
+  `/clock` keeps publishing while paused). Still to see: a full MCS + GCS mission (the `.svlog`, seabed images
+  without repeated-ping stripes, the wall time vs the ~1.3 h / ~0.9 h estimate, an MCS stop mid-hold).
+  2026-11-09 23:23: an MCS ray-cast launch with the Gazebo GUI froze (the GUI segfaulted at start-up in
+  gz-transport's discovery `getenv`; `raycast-live.md`). Fixed: `headless` auto (server only for the
+  ray-cast), the launch stops with the reason when Gazebo exits by itself, the hold re-detects a late
+  Gazebo. 2026-11-10: server-only hid Gazebo from MCS runs; the GUI is back as a separate respawning
+  `gz sim -g` client (a GUI crash no longer reaches the server). To see live: the Gazebo-exit shutdown and
+  the GUI client (window opens, a killed `gz sim -g` respawns while `/clock` runs on) — smoke-checked only.
+  Engine items left, not done because they change renders or need a study (owner, 2026-11-09: optimise,
+  do not change the model):
+  - (a) Quay boxes are sampled whole at 5 mm (buried part, back face, top above water, bottom):
+    23–38 % of all contributors can receive no sound, yet each pays every multipath bound and pair.
+    Dropping them before the bound is NOT exact (1 / 176 route side-pings changed by up to 5 dB: they
+    inflate the loose bound); dropping them only from the pairs stage would be. The above-water face is
+    also not occluded by the surface in the bound.
+  - (b) `GpuMultipath._select_set` costs contributors × candidate sequences (one launch + sync each, no
+    pruning of the children of dropped sequences): 71 candidates at a pier corner, ~0.13 s each.
+  - (c) Diffraction keys its lit-side table on 2-D xy cells (`neighbour_cell_m`), so blocked points above
+    the waterline / below the seabed flag a whole wall column; the factor kernel then runs on every
+    wall-face leg near the waterline, toe and box ends (1–5 s per quay ping-side).
+  - (d) Every kernel is fp64 on an RTX 4060 (1:64 fp64 rate).
+
+### [P1] Optimise the ray-cast `fast` variant (owner order 2026-11-10) — built, owner look test pending
+Plan and as-built notes: `blueboat_sss_sim/docs/engineering/raycast_fast_optimize_plan.md`.
+- Built: culling of unreachable points, reuse of the echo-path selection, closed-form edge diffraction
+  (diffraction back on), fp32 visibility; only `raycast_fast_sonar.yaml` turns them on (`config.ENGINE_KNOBS`).
+- Default and live are unchanged (guard `~/ros2_ws/sim_runs/raycast/fast_opt/guard.py`); `test.raycast_test
+  --only F` passes.
+- Offline: pier-corner ping-side 2.04 → 0.29 s, quay 0.91 → 0.43 s.
+- Open:
+  - the owner's live look test (harbour, MCS "Ray-cast — fast" vs "Ray-cast", x0.5);
+  - if more speed is wanted, the fp64 chain geometry of the pair and bound kernels (now the dominant cost).
+- **Phase 2 built 2026-11-10** (§4b of the plan): fast at 10 mm + `band_cull`, floor-pair reuse, exact
+  overhead cuts for every profile, hold margin 5 ms, `real_time_factor` and MCS Slow-down up to x4. Open: the
+  owner's live test of fast at x2–x3 (look: speckle grain at 10 mm, the band cull near quays; whether the boat
+  still tracks the path above x1).
+
+### [P1] Ray-cast calibration: the harbour-first hybrid (2026-11-07) — testable, EXCLUDED by its rule
+Phases 0–6 are built, and the GPU path is complete. Phase A / attempt 2 and Stage 2 failed their
+physical gates, so the owner redirected the work to a physical core plus a separate empirical correction
+(`docs/engineering/raycast_assessment.md` §13; gates amendments 6b/6c/6d in `~/calib/raycast/`).
+- Correction v2 cuts the harbour first-return crest residual from 7–10 to 1.7–1.8 dB.
+- Both acquisition groups are still EXCLUDED by the pre-registered rule: P2 fails at 9–10 m, and the S6 speckle
+  stability check fails.
+- Owner: a known limitation, not a no-go. The testable profile is
+  `~/calib/raycast/correction/raycast_harbour_hybrid_v2_sonar.yaml` (outside the repository).
+
+Open:
+- NC #4 for the hybrid (not triggered by the rule);
+- S7, the quay face;
+- noisy rows for every in-domain stratum;
+- the before-nadir rise at 9–10 m, which needs the harbour-world replay;
+- the crest window's along-track speckle correlation: 0.03–0.09 in the simulation against 0.23–0.62 in real
+  recordings.
+
+### [P1] Ray-cast GPU memory: CUDA error 101 above 40 m (diagnosed 2026-11-07, open)
+Error 101 is device out-of-memory, not an ordinal bug (`raycast_assessment.md` §13.7).
+
+Peak per ping-side, harbour worst case (the quay inside the swath), one renderer (the live node), measured on an
+RTX 4060 8 GB:
+
+| range | 20 m | 25 m | 30 m | 35 m | 40 m | 50 m |
+|---|---|---|---|---|---|---|
+| peak | 2.3 GB | 3.1 GB | 3.6 GB | 5.7 GB | 6.3 GB | **OOM** |
+
+- An offline replay holding several renderers (`scene_replay.render_rows`) fails at 40 m already.
+- The README advice is to keep the ray-cast at ≤ 30 m (20 m is the survey setting).
+- Fix candidates, not applied:
+  - release every cached renderer's buffers before a retry;
+  - process the per-ping scatterer pipeline in range segments. This is exact, and needs G1.
 
 ### [P2] Re-stamping a saved rested object is not idempotent (found 2026-11-02)
 `objects._rasterize_solid` writes the settled pose back into the object, including the bank tilt.
@@ -931,3 +1069,85 @@ lawnmower, 19 354 pings, mosaic cells 3.4 M):
   `config/shallow_water_world.yaml` ships for.
   Detector evaluation stays in the **waterfall** domain regardless (root
   `CLAUDE.md` CM-10); there a 0.77 m object spans ~20 bins at 37.5 mm/bin.
+
+---
+
+## Waves review + renderer picture comparison (2026-11-10) — hand-offs
+
+Evidence: `~/ros2_ws/sim_runs/waves_review/` (`REPORT.md`, `out/`), plan
+`~/.claude/plans/pasted-content-id-09ed-see-in-sleepy-hartmanis.md`. Done the same day:
+wave levels Tp = 3.6 √Hs + `harbour_chop`, hybrid slope discretisation, draft decay,
+corpus attitude-spectrum targets and gates, link-frame inertia mirror, opt-in
+`scatterer_anchoring: ground`, `analysis/picture_compare.py`.
+
+### [P1] Owner look test + live gate on the new sea (owner runs it)
+Re-run the 2026-11-10 harbour protocol with `harbour_chop` (and `smooth`), geometric and
+ray-cast, plus `test/gazebo_sea_test.py` (default `--waves harbour_chop`, spectral criteria).
+Then `python3 -m blueboat_sss_sim.analysis.picture_compare` on the new sessions against the
+rebuilt real ones (`~/ros2_ws/sim_runs/waves_review/real_sessions/`).
+
+### [P1] Ray-cast, for its session (measured on the harbour runs; not edited here)
+- **Shadows are empty**: anchor shadows −55…−65 dB re the seabed in front (A1/A2),
+  detector input 0 (77–99 % pure black); real −21…−42 dB with speckle texture (sd
+  6–7 dB), geometric −25…−36 dB textured. NC #15's reverberation floor is missing.
+- **First return untrackable**: the GCS `row_bottom_m` jumps p90 0.35–0.42 m row to row and
+  reads 0.3–0.8 m deep (geometric 0.02–0.03 m). The display model and the georeference use
+  it, so ray-cast AI tiles carry row-wise normalisation jitter (NC #4 not established).
+- **No ground-truth contacts**: no labelled datasets (CM-11).
+- **Absolute level ~+11 dB hot at 20 m / 1200 / 44.3 µs** (harbour, altitude 5.5–7.5 m):
+  plain seabed 54.4 / 48.2 / 41.5 dB at 8 / 12 / 16 m slant against real 43.4 / 36.6 /
+  31.0 (`toOptimize` 18.4 m segment, alt 4.8 m) and geometric 46.6 / 41.5 / 36.6. In
+  Perception's `fixed_gray` detector input (fitted on real data) 71–78 % of the ray-cast's
+  plain-seabed pixels saturate at 255 (geometric 20–23 %, real 1.3–1.6 %): the texture the
+  detector sees is clipped. The hybrid correction was fitted at 40 m / 600 / 106 µs; its
+  transfer to the default acquisition is the known limitation, now measured.
+These four are what stands between the ray-cast's better seabed texture and production use.
+The geometric's +3–6 dB is consistent with the missing pulse-length level term
+(field calibration 2026-10-23: +0.93 dB/dB, provisional in `field_candidate_v1`).
+
+**Patched the same day for the harbour (items 1–3; `.claude/raycast-live.md` "Harbour
+profiles", `docs/engineering/raycast_assessment.md` §14):** `config/raycast_harbour_live_sonar.yaml`
+/ `raycast_harbour_fast_sonar.yaml` = the v2 harbour core (level), its near-nadir table edge-held
+to 4.5 m (first return), the NC #15 floor at 18 dB on a per-ping ambient reference (shadows).
+Still open:
+- **[P1] Owner look test** of the harbour profiles: the harbour protocol with
+  `sonar_config:=config/raycast_harbour_fast_sonar.yaml`, then `picture_compare --fixed-gray`
+  (REPORT.md §4). Expected: saturation toward real 1.3–1.6 %, textured shadows ~−20…−28 dB, no
+  0.5 m late bottom line. Promote nothing to the default ray-cast profile before it.
+- **[P2] Ground-truth contacts** for the ray-cast (item 4, deferred by the owner).
+- **[P2] D3**, the physical shadow floor at the corpus quay (blocked by CUDA 101): when it runs,
+  the measured 18 dB stand-in can be compared with physics, and the default can stay physics-only.
+- **[P3]** The v2 table above 11.3 m (off) and below 3.5 m (off); P2's 9–10 m bands stay 3.3–3.7 dB
+  cold near nadir.
+- **v2 (same day, after the owner's run):** shadow lines (the floor reference) and the lost bottom
+  line (the 600-bin near range at 1200 bins) fixed in the harbour profiles; `raycast_assessment.md`
+  §14.1. Open:
+  - **[P2] The geometric carries the same 600-bin near range at 1200 bins / 44.3 µs** (ringing end
+    0.50 m, noise estimate 40.6 dB, water column 26 dB; real 0.14 m / 28.5 / 14.5). Its sharp crest
+    keeps the tracker locked, so nothing breaks, but the water column it draws is ~12 dB too bright.
+    The fix (`HARBOUR_NEAR_RANGE` measured, a per-acquisition near range in the shared model) moves the
+    comparison profile: NC #6, owner's call.
+  - **[P3]** The ray-cast bottom line is now steadier than the real one (jumps p90 0.07 vs 0.88 m);
+    heave and waves in a live run add some. Nothing to fit until a live comparison.
+
+### [P2] Hull v2 (not in scope 2026-11-10; feasibility measured)
+The model's pitch response is ~1.4× the real one at `harbour_chop` (1.03–1.18° vs
+0.60–0.87°) and its natural periods are short (roll 0.42 s / pitch 0.72 s vs the corpus's
+~0.8–0.9 s response, output-only ζ ≈ 0.1–0.25 vs judgement 0.4). Causes: BlueROV2 roll/
+pitch added inertia (0.12 kg·m² vs ~3.1 / 2.6 kg·m² of demihull strip-theory added inertia),
+damping sized, not measured. Routes: (a) Control add-only BlueBoat hydrodynamic profile
+(owner order needed), or (b′) an exact delay-free "inertia scaling" of the sea node's own
+wrench (Plan-agent design, SSS-Sim only; a literal −ΔI·α term is unstable at ΔI/I ≈ 1.2).
+Also `hull.water_density` 1000 → 1025 (sites are seawater), and a dockside roll/pitch decay
+test (ITTC 7.5-02-07-02.1 §2.3.5: ~10 cycles, 25 Hz ATTITUDE). Control's report calls 5.64
+the yaw inertia; it is pitch in Gazebo (rotated inertial frame) -- Control's TODO.
+
+### [P2] Geometric: make `scatterer_anchoring: ground` the default?
+Opt-in since 2026-11-10 (`config/ground_anchored_sonar.yaml`). Default = deliberate
+render-fixture rebaseline; decide after the owner's look test of wave runs.
+
+### [P2] Geometric seabed texture is smoother than real (cross-ref B3)
+Harbour plain seabed, gain 4, 18–27 m / 1200: 9×9 high-pass std 4.7–4.8 dB (real 5.4–5.5,
+ray-cast 5.4), dark tail p1 −16.5 dB re the mean (real −20.2…−20.4, ray-cast −20.0),
+intensity contrast 0.97 (real 1.06–1.09). Same diagnosis as B3 ("per-ping level fluctuation
+missing", pool per-bin std 6.29 vs 4.99).

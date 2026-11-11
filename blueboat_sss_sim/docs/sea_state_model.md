@@ -32,6 +32,25 @@ resolved on 2026-10-09: the catamaran hydrostatics now carry the hull in
 
 ---
 
+**2026-11-10 revision, in one paragraph.** The real BlueBoat's attitude
+(id-150 ATTITUDE, 25 Hz, four live-clock Shiraishi-jima harbour recordings,
+`config/corpus_attitude_targets.yaml`) rocks at **~1.1 Hz** on every survey
+line whatever the heading (roll centroid 1.11–1.17 Hz, 85–93 % of roll power
+in 0.8–2 Hz, roll std 0.91–1.21°, pitch 0.60–0.87°); the simulated boat at the
+old `smooth` (Tp 2.8 s) matched the *std* but rocked at **~0.65 Hz** -- the
+regular, slow wave pattern seen in the 2026-11-10 harbour sonar runs. Three
+causes, three fixes: (1) every wave level now follows the fetch-limited
+young-sea relation **Tp = 3.6 √Hs** (§4.1; owner's decision), with a new
+site level `harbour_chop` (0.07 m, 0.95 s) that reproduces the corpus
+spectrum; (2) the field is discretised to resolve the wave-**slope**
+spectrum up to 3 Hz (`hybrid`, §4.2) -- equal-energy bins had lumped the
+whole short-wave tail into one component; (3) the hull reads the
+Froude-Krylov pressure at its 4.5 cm **draft** (§5, retiring S4's "no
+depth decay"). The offline mirror's pitch inertia was also wrong (§5:
+5.64 kg·m², not 3.92). The gates now compare motion **spectra** with the
+corpus (§9). Wave-run recordings before this date are not comparable bit
+for bit.
+
 ## 1. Scope and boundary
 
 The sea state acts on the **hull only**. Nothing else in the world moves:
@@ -181,13 +200,21 @@ two coincide. The variance `m0 = ∫S dω = Hs²/16` is reproduced within 2 %
 (`[10]`). γ and the spreading `s` are per-preset fields (a "custom" wave
 state from the MCS sets them explicitly).
 
-**Peak period per preset**: the DNV-RP-C205 [5] §3.5.10 steepness band
-`3.6 √Hs ≤ Tp ≤ 5 √Hs` describes a pure wind sea; a harbour basin open to
-a channel carries swell and wake energy on top, so the presets sit above
-that band (up to `10 √Hs` for the smallest ripples riding a longer
-swell): rippled 2.0 s, smooth 2.8 s, slight 3.6 s, rough 4.5 s. The
-`tp_from_hs_dnv` helper still returns the pure wind-sea mid-band value for
-reference.
+**Peak period per preset (2026-11-10): Tp = 3.6 √Hs**
+(`spectrum.TP_PER_SQRT_HS`, `tp_fetch_limited`), the fetch-limited young
+sea. The fetch-limited growth laws give Tp/√Hs = 3.0–4.0 s/√m for a
+harbour (U10 4–10 m/s over 0.3–2 km): JONSWAP [3] (ε̃ = 1.6·10⁻⁷ X̃,
+f_m U/g = 3.5 X̃^−0.33) and Kahma & Calkoen [26] eqs (2)–(3) stable
+(ε̃ = 9.25·10⁻⁷ X̃^0.766, ω̃p = 11.99 X̃^−0.242) and (6)–(7) unstable
+(5.38·10⁻⁷ X̃^0.940, 14.19 X̃^−0.283), with X̃ = gF/U10², ε̃ = g²ε/U10⁴,
+ω̃p = ωp U10/g; 3.6 is also DNV-RP-C205 [5] §3.5.10's lower bound and the
+value that reproduces the corpus motion (§9). Levels: rippled 0.80 s,
+harbour_chop 0.95 s, smooth 1.39 s, slight 2.13 s, rough 2.79 s. Until
+2026-11-10 the presets sat *above* the band (2.0–4.5 s, "swell and wake
+energy on top"); the corpus shows almost no roll power below 0.5 Hz
+(2–3 %), and the long-period energy that does exist (wakes, swell trains)
+is the `events:` groups' (§4.1b). `tp_from_hs_dnv` still returns the
+mid-band value for reference.
 
 ### 4.1b Random wave groups (`sea/events.py`)
 
@@ -215,7 +242,29 @@ rate, the zeros between groups, the envelope bound and seed determinism.
 
 ### 4.2 Directional field
 
-`sea/wavefield.py` discretises the spectrum into `N_f = 16` frequency
+`sea/wavefield.py` discretises the spectrum into frequency bins times
+`N_d = 12` directions. **Since 2026-11-10 (`hull.wave_response.discretisation:
+hybrid`, `spectrum.hybrid_frequencies`)**: 12 equal-energy bins over
+0.4–1.5 × the peak, then log-spaced bins (ratio 1.25, ≤ 24 frequencies in
+all) up to `f_max_hz` = 3 Hz, each band's component placed where k² equals
+the band's slope variance over its variance -- so every band carries its
+exact elevation AND slope variance (m0 rescaled exact). Why: equal-energy
+bins resolve the *elevation* spectrum, but a 1.2 m catamaran rolls and
+pitches on the *slope* spectrum (k² S ∝ f⁻¹ in the tail); for the old 2.8 s
+sea the 16 bins ended at 0.89 Hz, the last one carrying the whole tail and
+~40–50 % of the discrete slope forcing (a spurious line), with nothing above
+it although half the slope variance lies there (OrcaFlex and ITTC
+7.5-02-07-01.1 [28] warn that wide tail bins fail to excite a response;
+Mérigaud & Ringwood [29] advise against equal-area schemes). 3 Hz is where
+the 0.15 m demihull beam averages the waves out (a null near 3.2 Hz) and
+the response falls as (f_n/f)² above the ~1.2 Hz resonance. Fossen's
+practice [27] is equal Δω with ω drawn inside each interval and A_k =
+√(2 S(ω_k) Δω); the per-tick cost of the hull integration (100 Hz,
+3.5 ms at 24 × 12 components) bounds us at 24 frequencies, which the slope
+check of `[10]` (within 3 % of the continuous slope variance to 3 Hz, no
+component > 25 % of it) shows is enough. The wake groups keep their own
+8 × 3 equal-energy field (unchanged). Before 2026-11-10, and still without
+the `wave_response` block: `N_f = 16` frequency
 bins of **equal energy** (component at the energy-weighted centre of each
 band, so the discrete sum carries exactly m0 and resolves the peak where
 the energy is) times `N_d = 12` directions with the cos^{2s}(Δθ/2)
@@ -250,10 +299,21 @@ are unchanged (they are launch arguments), the labels are plain:
 | Key | Label | Hs [m] | Tp [s] | γ / s | wake groups (per h, Hs, Tp, dur) | WMO 3700 |
 |---|---|---|---|---|---|---|
 | calm | Calm (flat water) | 0 | — | — | none | 0 |
-| rippled | Ripples (0.05 m) | 0.05 | 2.0 | 1.5 / 3 | 4, 0.08 m, 5 s, 25 s | 1 |
-| smooth | Light chop (0.15 m) | 0.15 | 2.8 | 1.5 / 3 | 6, 0.12 m, 5.5 s, 25 s | 2 |
-| slight | Choppy (0.35 m) | 0.35 | 3.6 | 1.5 / 3 | 8, 0.25 m, 6 s, 25 s | 2 |
-| rough | Rough (0.6 m) — stress test | 0.60 | 4.5 | 1.5 / 3 | 15, 0.35 m, 7 s, 30 s | 3 |
+| rippled | Ripples (0.05 m) | 0.05 | 0.80 | 1.5 / 3 | 4, 0.08 m, 5 s, 25 s | 1 |
+| harbour_chop | Harbour chop (site, 0.07 m) | 0.07 | 0.95 | 1.5 / 3 | 5, 0.10 m, 5 s, 25 s | 1 |
+| smooth | Light chop (0.15 m) | 0.15 | 1.39 | 1.5 / 3 | 6, 0.12 m, 5.5 s, 25 s | 2 |
+| slight | Choppy (0.35 m) | 0.35 | 2.13 | 1.5 / 3 | 8, 0.25 m, 6 s, 25 s | 2 |
+| rough | Rough (0.6 m) — stress test | 0.60 | 2.79 | 1.5 / 3 | 15, 0.35 m, 7 s, 30 s | 3 |
+
+Periods since 2026-11-10 (Tp = 3.6 √Hs, §4.1; were 2.0 / 2.8 / 3.6 / 4.5 s).
+`harbour_chop` is an **inverse estimate**: the height whose offline motion
+(`simulate_3dof`) matches the corpus roll std and spectrum (roll 0.84–1.17°
+at 1.06–1.12 Hz vs real 0.91–1.21° at 1.11–1.17 Hz; pitch 1.03–1.18° vs real
+0.60–0.87° -- the model's pitch response is ~1.4× the real one, a hull
+limitation recorded in `TODO.md`, not tuned away), not a wave measurement.
+Measured offline per level (one seed, 90 s): rippled roll 0.6° / pitch 0.7°,
+smooth 2.3° / 2.2° (heave 2.8 cm), slight 4.5° / 3.4° (7.9 cm), rough
+4.3° / 4.0° (11.9 cm) -- the label texts quote these.
 
 Plain-language keys (2026-10-08, additive; resolved in
 `sea/presets.py`, never by MCS):
@@ -350,20 +410,41 @@ command-line `Sim_launch.py` without `sea_state_launch.py` beside it stays
 on the box (control tuning, no seabed scene). The MCS SEA STATE box flags
 a run on the box (readback `hull.model: gazebo_box`).
 
-Resulting stiffness and natural periods (URDF inertia, the plugin's
-added-mass diagonal, `HullBoxes.restoring_summary`, `[10]`):
+Resulting stiffness and natural periods (URDF inertia in the **link**
+frame, the plugin's added-mass diagonal, `HullBoxes.restoring_summary`,
+`[10]`). The xacro writes the base link's `<inertia>` as (2.42, 3.92,
+5.64) kg·m² in an inertial frame rolled by `rpy="${pi/2} 0 0"`, which
+swaps y and z: Gazebo's **pitch** inertia is 5.64 kg·m², its yaw 3.92.
+Until 2026-11-10 this table and the offline mirror took 3.92 as pitch
+(0.60 s; corrected below; `sea.motion.URDF_LINK_INERTIA`, smoke `[10]`
+re-derives it from Control's xacro):
 
 | Hull | A_wp [m²] | C33 [N/m] | C44 [N·m/rad] | C55 [N·m/rad] | T_heave | T_roll | T_pitch |
 |---|---|---|---|---|---|---|---|
-| Gazebo box (only without the sea node) | 0.129 | 1263 | 39 | 5–46* | 0.98 s | 1.6 s | 1.9–5.5 s* |
-| catamaran (every run with the sea node) | 0.36 | 3530 | 577 | 443 | 0.59 s | 0.42 s | 0.60 s |
+| Gazebo box (only without the sea node) | 0.129 | 1263 | 38 | 4–46* | 0.98 s | 1.6 s | 2.2–7.3 s* |
+| catamaran (every run with the sea node) | 0.36 | 3530 | 577 | 440 | 0.59 s | 0.42 s | 0.72 s |
 
 \* the 97 %-submerged box's pitch stiffness is strongly non-linear about
 the trim (its waterplane engages only as an end emerges). With natural
-periods well below the presets' 2.0–4.5 s wave band (Tp) and the ROV-class damping, the
+periods well below a long-period wave band (Tp ≥ ~2 s) and the ROV-class damping, the
 catamaran **contours** the surface quasi-statically: heave ≈ η, pitch and
-roll ≈ the local wave slope along and across the heading — the physically
-expected behaviour of a small catamaran in harbour chop.
+roll ≈ the local wave slope along and across the heading. **Since 2026-11-10
+the levels at and below `smooth` are NOT in that regime** (Tp 0.8–1.4 s,
+wavelength 1–3 m ≈ the hull): the hull filters the surface (the beam-sea
+roll moment peaks at λ = 2 × the demihull spacing, ~1.0 Hz; the head-sea
+pitch moment near 0.93 Hz) and responds near its own resonances -- which
+is what the corpus shows (a heading-invariant ~1.1 Hz peak, output-only
+estimates roll ≈ 1.15–1.3 Hz with ζ ≈ 0.1–0.25, pitch ≈ 1.05–1.2 Hz with
+ζ ≈ 0.1–0.2). The Froude–Krylov pressure is therefore read at the
+**draft** since 2026-11-10 (`hull.wave_response.draft_decay`): each
+component of the surface the hull integrates is attenuated by
+cosh(k(h−d))/cosh(kh) at d = the 4.5 cm draft (`WaveField.decay`; e^(−kd)
+in deep water: 0.83 at 1 Hz, 0.49 at 2 Hz; Journée & Massie [30] eq. 8.43,
+the "Smith effect"); the surface elevation the readback reports stays the
+undecayed one. The hull's own natural periods and damping (BlueROV2 added
+inertia 0.12 kg·m² against ~3 kg·m² of demihull added inertia; judgement
+ζ ≈ 0.4 against the corpus's 0.1–0.25) stay a recorded limitation
+(`TODO.md` "hull v2").
 
 Checks in `[10]`: a crest of +0.1 m lifts by `ρ g A_wp η = 353 N`; a
 trough of −0.1 m drops the full weight (the shallow-draft hull hangs);
@@ -543,7 +624,8 @@ roughness of the sea surface in the optional surface mirror (S8).
   boat moves on an invisible surface. The indicators (§9) show the state.
 * **S4 — hydrostatic Froude–Krylov on a box catamaran.** No diffraction,
   no radiation beyond the plugin's added mass and damping plus the
-  linear hull damping of §5.7, no Smith-effect depth decay, pressure
+  linear hull damping of §5.7, the Smith-effect depth decay applied at
+  the mean draft since 2026-11-10 (one depth for every column), pressure
   taken along world-vertical columns (exact for the level hull,
   small-angle for a tilted one) with the first-order horizontal
   component of §5.5, demihull geometry approximated by boxes.
@@ -598,8 +680,20 @@ as a detail line, never asserted), the fixed one must put the heave peak
 above 1.5 s with < 10 % of the power above 1 Hz, roll and pitch std in
 0.5–2.5°, a non-zero surge force and yaw moment, and stay finite.
 
-**Real-boat anchor (corpus `ATTITUDE`, 25 Hz, seven Shiraishi-jima
-recordings, 2026-09-05):** roll std 0.9–1.3°, pitch std 0.8–1.5° about a
+**Real-boat SPECTRUM (2026-11-10, `config/corpus_attitude_targets.yaml`,
+generated by `python3 -m blueboat_sss_sim.analysis.sea_validation targets`,
+never hand-edited):** the four live-clock harbour recordings on their
+straight, under-way lines (`analysis.sea_validation.attitude_spectra`: 20 s
+Welch windows after a 10 s high-pass): roll std 0.91–1.21°, centroid
+1.11–1.17 Hz, 85–93 % of its power in 0.8–2 Hz; pitch std 0.60–0.87°,
+centroid 0.91–1.17 Hz; yaw rate 1.7–2.8 °/s with 31–72 % of its power above
+1.2 Hz. Smoke `[10]` reproduces one file's numbers exactly and gates
+`harbour_chop` offline (roll centroid within 0.15 Hz of the band, ≥ 75 % in
+0.8–2 Hz, roll/pitch std 0.6–1.6°); `test/gazebo_sea_test.py` (default
+`--waves harbour_chop`) gates the same spectrum live plus wave-rate yaw
+jitter (≥ 5 % above 1.2 Hz). The contouring checks (heave std = Hs/4 at Tp)
+apply only to seas with a peak wavelength ≥ 4 hull lengths.
+**Earlier anchor (2026-09-05, std only):** roll std 0.9–1.3°, pitch std 0.8–1.5° about a
 +2° bow-up trim, dominant period 1.0–1.2 s (short wind chop), rates
 5–10 °/s. That band is the *measurement*; the pass criterion the gates
 enforce is the wider **0.5–2.5°** (roll and pitch std, `simulate_3dof`
@@ -776,9 +870,35 @@ the *Change sea state…* dialog that publishes on `/sim/sea_state/command`.
     disturbances", *Sensors* 19(5), 1068, 2019 — waves, wind and current
     degrade USV trajectories in simulation. doi:
     [10.3390/s19051068](https://doi.org/10.3390/s19051068)
+26. K. K. Kahma and C. J. Calkoen, "Reconciling discrepancies in the observed
+    growth of wind-generated waves", *J. Phys. Oceanogr.* 22(12), 1389–1405,
+    1992 -- eqs (2)–(3), (6)–(7): fetch-limited energy and peak frequency,
+    stable / unstable stratification (read first-hand, 2026-11-10). doi:
+    [10.1175/1520-0485(1992)022<1389:RDITOG>2.0.CO;2](https://doi.org/10.1175/1520-0485(1992)022<1389:RDITOG>2.0.CO;2)
+27. T. I. Fossen, *Lecture Notes TTK4190 Guidance, Navigation and Control of
+    Vehicles*, ch. 10 "Environmental Forces and Moments" (slides; the book's
+    ch. 10, doi:10.1002/9781119575016.ch10, was not available) -- slide 34:
+    A_k = √(2 S(ω_k) Δω), repetition after 2π/Δω, ω_k drawn inside each
+    interval; MSS example 100 frequencies.
+28. ITTC Recommended Procedures 7.5-02-07-01.1 "Laboratory modelling of
+    multidirectional irregular wave spectra" (2017) and 7.5-02-07-02.1
+    "Seakeeping experiments" (2024) -- component counts, repetition period,
+    f_T/f_P > 2 (prefer 3). https://www.ittc.info (no DOI)
+29. P. Mérigaud and J. V. Ringwood, "Free-surface time-series generation for
+    wave energy applications", *IEEE J. Oceanic Eng.* 43(1), 19–35, 2018 --
+    against equal-area discretisation schemes. doi:
+    [10.1109/JOE.2017.2691199](https://doi.org/10.1109/JOE.2017.2691199)
+30. J. M. J. Journée and W. W. Massie, *Offshore Hydromechanics*, TU Delft,
+    2001 (open courseware, no DOI) -- eq. 8.43, pressure decay with depth;
+    pp. 6-23/24, a body follows the waves only for λ ≫ its length.
+31. D. Tamsett and P. Hogarth, "Sidescan sonar beam function and seabed
+    backscatter functions from trace amplitude and vehicle roll data",
+    *IEEE J. Oceanic Eng.* 41(1), 2016 -- roll modulates trace amplitude
+    through the rotated beam function (our banding mechanism, §7). doi:
+    [10.1109/JOE.2015.2390732](https://doi.org/10.1109/JOE.2015.2390732)
 
 Every DOI above was resolved at doi.org and its title checked against
-Crossref on 2026-10-08.
+Crossref on 2026-10-08; refs 1-25 re-checked and 26-31 added on 2026-11-10.
 
 ## 11. Research log — where each modelling decision comes from
 
@@ -806,6 +926,10 @@ realistically hard, reproducibly.
 | Soomere [13] | Wake wave trains in sheltered water | Group shape (a few long-period cycles, rising and decaying) | Poisson arrivals and Hann envelope are assumptions | No wake census at the site |
 | Newman [2]; Fossen [1] §8.2 | Froude–Krylov force; long-wave RAO limit "the body follows the surface" | Hydrostatic FK on the catamaran hull + first-order horizontal FK | No radiation/diffraction beyond the plugin's added mass and the hull damping | L/λ small; validated in Gazebo: heave std = Hs/4 at the wave period (§12) |
 | VRX, Bingham et al. [11]; Paravisi et al. [25] | USV simulators with PM waves, buoyancy, wind, current | Confirmation that environmental forcing visibly degrades USV tracks | Not adopted as code (GPL C++, replaces the boat's own plugins = a change to BlueBoat-Control) | CM-3 / NC #8 |
+| Robotics simulators (2026-11-10 survey): VRX (3 Gerstner components, buoyancy at 2 points per hull), gz-waves / asv_wave_sim and Stonefish (FFT seas, hydrostatic pressure per hull-mesh triangle), MARUS (Crest + per-triangle forces), USVSim (osgOcean FFT, per-link buoyancy); HoloOcean and DAVE: no physical waves | Hydrostatic / Froude–Krylov pressure on a hull representation under a synthesized sea, radiation mostly ignored | That this family is the established robotics practice (ours is the same, seeded and validated) | A JONSWAP spectrum resolved to 3 Hz instead of 3 components or a visual FFT grid; the draft decay most of them omit | Real-time cost vs fidelity; ship simulators (Fossen MSS) instead superpose RAOs from panel codes, which a 1.2 m catamaran without hydrodynamic coefficients cannot use |
+| Hasselmann et al. [3]; Kahma & Calkoen [26]; DNV [5] | Fetch-limited growth of Hs and Tp | Tp = 3.6 √Hs for every level (2026-11-10) | One rule for all levels; the wind/fetch is not an input | The corpus fixes the site's sea only through the boat's motion |
+| ITTC [28]; Mérigaud & Ringwood [29]; Fossen [27] | Spectrum discretisation and component counts | Resolve the response band; avoid wide tail bins | 24 × 12 components (cost-bound) instead of ≥ 100 frequencies | Checked by slope coverage, not by count |
+| Journée & Massie [30] | Pressure decay with depth; small-body limit | Draft decay at the mean draft | One depth per column, no diffraction | λ ≈ L at 1 Hz: the whole-body small-body limit fails, the column integration keeps the averaging |
 
 ### 11.3 The side-scan sonar on a moving surface platform
 

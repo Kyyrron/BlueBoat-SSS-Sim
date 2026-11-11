@@ -95,8 +95,15 @@ class PingBasis:
         mats = np.unique(np.concatenate([self.a_mat, self.c_mat])).astype(np.int64)
         sig = np.zeros((self.theta_nodes.size, max(int(mats.max()) + 1, 1)
                         if mats.size else 1))
+        # the node table is the same for every basis: computed once per law
+        # (the same call on the same nodes, so the same values)
+        memo = law.__dict__.setdefault("_basis_sigma", {})
+        nodes_key = self.theta_nodes.tobytes()
         for m in mats:
-            sig[:, m] = law.sigma(c, c, np.full(c.size, m, dtype=np.int64))
+            col = memo.get((nodes_key, int(m)))
+            if col is None:
+                col = memo[(nodes_key, int(m))] = law.sigma(c, c, np.full(c.size, m, dtype=np.int64))
+            sig[:, m] = col
         out = np.zeros(self.n)
         if self.a_bin.size:
             w = sig[self.a_node, self.a_mat] * (self.a_S4 + 2.0 * f2 * self.a_S2
@@ -194,10 +201,15 @@ def build_basis(rr, side: Side, pose: Pose3D) -> PingBasis:
     keys = np.concatenate([e[0] for e in entries])
     bw = np.concatenate([e[1] for e in entries])
     ss = np.concatenate([e[2] for e in entries])
-    uk, inv = np.unique(keys, return_inverse=True)
-    S4 = np.bincount(inv, weights=bw * ss * ss)
-    S2 = np.bincount(inv, weights=bw * ss)
-    S0 = np.bincount(inv, weights=bw)
+    # keys are bounded (bin x node x material): a dense bincount gives the
+    # unique keys and, accumulating in input order, the same per-key sums as
+    # np.unique + bincount(inverse) without the sort (bit for bit)
+    nkey = int(grid.n) * nn * nm
+    present = np.bincount(keys, minlength=nkey)
+    uk = np.flatnonzero(present)
+    S4 = np.bincount(keys, weights=bw * ss * ss, minlength=nkey)[uk]
+    S2 = np.bincount(keys, weights=bw * ss, minlength=nkey)[uk]
+    S0 = np.bincount(keys, weights=bw, minlength=nkey)[uk]
     a_mat = uk % nm
     a_node = (uk // nm) % nn
     a_bin = uk // (nm * nn)
@@ -267,10 +279,41 @@ def law_and_surface(rr, sediments: dict | None):
     law = DiffuseLaw(SeabedLawConfig(law=rr._rc.seabed.law,
                                      lambert_mu_db=rr._rc.seabed.lambert_mu_db,
                                      sediments=dict(sediments or {})),
-                     rr.mesh.material_names, rr.k, rr.freq_hz, rr.c)
+                     rr.mesh.material_names, rr.k, rr.freq_hz, rr.c, lib=rr.lib,
+                     objects=list(getattr(rr._scene, "objects", None) or []),
+                     split=rr.objects_mode == "solid", fouling=rr.fouling)
     surf = MaterialSurface(rr.mesh.material_names, rr.freq_hz,
-                           getattr(law, "sediments", None))
+                           getattr(law, "sediments", None), rr.lib)
     return law, surf
+
+
+def _small_int(a: np.ndarray) -> np.ndarray:
+    """``a`` in the smallest signed integer dtype that holds its values."""
+    if a.size == 0 or not np.issubdtype(a.dtype, np.integer):
+        return a
+    lo, hi = int(a.min()), int(a.max())
+    for t in (np.int8, np.int16, np.int32):
+        if np.iinfo(t).min <= lo and hi <= np.iinfo(t).max:
+            return a.astype(t)
+    return a
+
+
+def compact_basis(b: PingBasis) -> PingBasis:
+    """The same basis in less memory, ``power`` bit for bit: integer arrays
+    in the smallest dtype that holds them, and the conditional contributors
+    whose taps are all zero dropped (each deposits exact zeros, and the
+    others keep their order, so every bin's sum is unchanged). The fit holds
+    every basis of every stratum at once (8.7 GB as stored, 2026-11-04)."""
+    import dataclasses
+    kw = {f.name: getattr(b, f.name) for f in dataclasses.fields(b)}
+    for k in ("a_bin", "a_node", "a_mat", "c_mat", "c_start", "h_mat", "h_tap_i", "h_tap_b"):
+        kw[k] = _small_int(np.asarray(kw[k]))
+    if b.c_w2.size:
+        live = np.any(b.c_w2 != 0, axis=1)
+        if not live.all():
+            for k in ("c_along4", "c_s2", "c_L4A", "c_theta", "c_mat", "c_start", "c_w2"):
+                kw[k] = np.ascontiguousarray(kw[k][live])
+    return PingBasis(**kw)
 
 
 def save_basis(b: PingBasis, path) -> None:

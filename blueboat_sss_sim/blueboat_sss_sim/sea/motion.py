@@ -46,7 +46,17 @@ from .spectrum import G
 #: mirror for the offline integrator; BlueROV2 coefficients, von Benzon
 #: 2022).
 URDF_MASS_KG = 16.15
+#: The ``<inertia>`` attributes (ixx, iyy, izz) of ``blueboat.xacro``'s base
+#: link AS WRITTEN -- in the inertial frame, which the xacro rotates by
+#: ``rpy="${pi/2} 0 0"``. Do not use these as body-axis moments.
 URDF_INERTIA = (2.42369, 3.9235025, 5.6403125)
+#: The same tensor in the LINK (body) frame, what Gazebo integrates: the
+#: π/2 roll of the inertial frame swaps its y and z axes, so pitch (Iyy)
+#: is the attribute ``izz`` and yaw (Izz) the attribute ``iyy``. Until
+#: 2026-11-10 the offline mirror took ``iyy`` as pitch (3.92 instead of
+#: 5.64 kg·m²): Gazebo's pitch period is 0.72 s, not the 0.60 s the model
+#: doc quoted. Smoke ``[10]`` re-derives this from Control's xacro.
+URDF_LINK_INERTIA = (URDF_INERTIA[0], URDF_INERTIA[2], URDF_INERTIA[1])
 URDF_COG_Z = -0.12913
 PLUGIN_ADDED_MASS = (14.57, 0.12, 0.12)          # zDotW, kDotP, mDotQ
 PLUGIN_LINEAR = (-17.955, -10.888, -20.761)      # zW, kP, mQ
@@ -243,8 +253,8 @@ def simulate_3dof(presets, state, *, duration_s: float = 60.0,
     flat = lambda x, y: np.zeros_like(x)  # noqa: E731
     z_eq = gz_box.equilibrium_z()
     m_eff = URDF_MASS_KG + PLUGIN_ADDED_MASS[0]
-    i_eff = (URDF_INERTIA[0] + PLUGIN_ADDED_MASS[1],
-             URDF_INERTIA[1] + PLUGIN_ADDED_MASS[2])
+    i_eff = (URDF_LINK_INERTIA[0] + PLUGIN_ADDED_MASS[1],
+             URDF_LINK_INERTIA[1] + PLUGIN_ADDED_MASS[2])
     weight = URDF_MASS_KG * G
 
     n = int(round(duration_s / dt))

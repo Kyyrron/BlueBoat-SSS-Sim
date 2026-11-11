@@ -91,11 +91,64 @@ def _seabed_mesh(scene: SceneModel, max_verts_axis: int = 200,
     return verts, faces.astype(np.int64)
 
 
+def _compound_sdf(o: PlacedObject, z_base: float, lib: MaterialLibrary) -> str:
+    """An object of several parts (``worldgen.compounds``): one visual per
+    part, in the envelope's frame -- the geometry the ray-cast sensor meshes,
+    placed by the same rule (``scene_mesh.facet_transform``). An annulus is
+    drawn as a disc and a rod's axis is the SDF cylinder's z."""
+    from . import compounds
+    from .solids import rot_x, rot_y, rotation_rpy, rpy_from_rotation
+    env = compounds.envelope(o)
+    if o.rested:
+        z, rpy = o.rest_z, (o.roll, o.pitch, o.yaw)
+    else:
+        z, rpy = z_base + o.effective_height - float(env.extent[2]), (0.0, 0.0, o.yaw)
+    axis_to_z = (rot_y(np.pi / 2), rot_x(-np.pi / 2), np.eye(3))
+    visuals = []
+    for i, p in enumerate(compounds.parts(o)):
+        sol, R = p.solid, p.R
+        if sol.kind == "box":
+            geom = f"<box><size>{sol.a:.3f} {sol.b:.3f} {sol.c:.3f}</size></box>"
+        elif sol.kind == "ellipsoid":
+            geom = f"<ellipsoid><radii>{sol.a:.3f} {sol.b:.3f} {sol.c:.3f}</radii></ellipsoid>"
+        else:                                    # cylinder, annulus (as a disc)
+            length = sol.c if sol.kind == "annulus" else sol.b
+            R = R @ axis_to_z[2 if sol.kind == "annulus" else sol.axis]
+            geom = (f"<cylinder><radius>{sol.a:.3f}</radius>"
+                    f"<length>{length:.3f}</length></cylinder>")
+        r, gg, b = lib.get(p.material or o.material).color
+        roll, pitch, yaw = rpy_from_rotation(R)
+        visuals.append(f"""
+        <visual name="v{i}">
+          <pose>{p.t[0]:.3f} {p.t[1]:.3f} {p.t[2]:.3f} {roll:.4f} {pitch:.4f} {yaw:.4f}</pose>
+          <geometry>{geom}</geometry>
+          <material>
+            <ambient>{r} {gg} {b} 1</ambient>
+            <diffuse>{r} {gg} {b} 1</diffuse>
+          </material>
+        </visual>""")
+    roll, pitch, yaw = rpy_from_rotation(rotation_rpy(*rpy))
+    return f"""
+    <model name="obj_{o.object_id:04d}_{o.type}">
+      <static>true</static>
+      <pose>{o.x:.3f} {o.y:.3f} {z:.3f} {roll:.4f} {pitch:.4f} {yaw:.4f}</pose>
+      <link name="link">{"".join(visuals)}
+      </link>
+    </model>"""
+
+
 def _object_sdf(o: PlacedObject, z_base: float, lib: MaterialLibrary) -> str:
     spec = CATALOG[o.type]
+    from .compounds import _BUILDERS
+    if o.type in _BUILDERS:
+        return _compound_sdf(o, z_base, lib)
     color = lib.get(o.material).color
     h = max(o.effective_height, 0.01)
-    z = z_base + h / 2 - o.proud_height * o.burial * 0.5
+    # The visual is the part proud of the seabed, standing on it: its top at
+    # terrain + effective height, where the acoustic scene puts it. (Until
+    # 2026-11-11 the burial was subtracted a second time -- it is already in
+    # the effective height -- and the top sat proud * burial / 2 too low.)
+    z = z_base + h / 2
     if o.rested and spec.solid(o) is not None:
         return _rested_object_sdf(o, spec, z_base, color)
     if spec.sdf_shape == "cylinder_upright":
@@ -171,8 +224,11 @@ def _wall_sdf(w: Wall, z_floor: float) -> str:
 
 def _rested_object_sdf(o: PlacedObject, spec, z_base: float, color) -> str:
     """A 3-D rested object: the same primitive the acoustic stamp used,
-    at the settled pose (rest orientation composed with the bank tilt,
-    centre ``rest_z`` above the pre-stamp terrain)."""
+    at the settled pose (rest orientation composed with the bank tilt).
+    ``rest_z`` is the WORLD z of the solid's centre (``solids.settle``
+    returns it absolute; ``sonar/facets.py`` and the ray-cast mesh read it
+    so). Until 2026-11-11 the terrain height was added to it here, which
+    drew every rested object one water depth too deep in Gazebo."""
     from .solids import rotation_rpy, rpy_from_rotation, rot_y
     sol = spec.solid(o)
     R = rotation_rpy(o.roll, o.pitch, o.yaw)
@@ -191,7 +247,7 @@ def _rested_object_sdf(o: PlacedObject, spec, z_base: float, color) -> str:
     else:
         geom = (f"<box><size>{sol.a:.3f} {sol.b:.3f} {sol.c:.3f}</size></box>")
     roll, pitch, yaw = rpy_from_rotation(R)
-    z = z_base + o.rest_z
+    z = o.rest_z
     r, gg, b = color
     return f"""
     <model name="obj_{o.object_id:04d}_{o.type}">

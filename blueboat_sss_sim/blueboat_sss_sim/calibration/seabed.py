@@ -378,7 +378,7 @@ def acquisition_for(cfg, range_mm: int, num_results: int, pulse_us: float,
 
 
 def flat_scene(depth_m: float, half_m: float, res: float = 0.1,
-               reflectivity: float = SAND_REFLECTIVITY):
+               reflectivity: float = SAND_REFLECTIVITY, material: str = "sand"):
     from ..core.types import GridSpec
     from ..worldgen.scene import SceneModel
     n = int(round(2 * half_m / res)) + 1
@@ -387,7 +387,7 @@ def flat_scene(depth_m: float, half_m: float, res: float = 0.1,
     return SceneModel(grid=g, height=np.full((n, n), -float(depth_m)),
                       reflectivity=np.full((n, n), reflectivity),
                       material_id=np.zeros((n, n), dtype=np.uint8),
-                      material_names=["sand"], objects=[], walls=[], seed=0,
+                      material_names=[material], objects=[], walls=[], seed=0,
                       config_snapshot={})
 
 
@@ -480,9 +480,36 @@ def _render_noisy(cfg, acq, side_name: str, alt: float, step: float,
         # the ray-cast sensor (renderer hook, raycast_plan.md Phase A): full
         # renders, cached per pose; its own shared-stage model
         from ..sonar.raycast import calib as _rcal
-        rr, model, rkey = _rcal.noisy_renderer(cfg, acq, alt + model.sensor_depth_m,
-                                               half, raycast)
-        render = lambda sd, ps: _rcal.cached_render(rr, rkey, sd, ps)  # noqa: E731
+        # the ray-cast sensor has sediments, not a reflectivity: the dark
+        # envelope bottom (0.22) is its mud (NC #4 "sand and mud")
+        mat = "sand" if reflectivity == SAND_REFLECTIVITY else "mud"
+        depth0 = alt + model.sensor_depth_m
+        model = _rcal.noisy_model(cfg, raycast)
+        # the empirical correction layer (gates amendment 6b), applied after
+        # the cached PHYSICAL render: a corrected arm shares every render, and
+        # a renderer is built only when its ping is not cached yet
+        corr = _rcal.correction_for_rc(raycast)
+
+        def render(sd, ps):
+            # seabed-relative replay (2026-11-06; calib.expected_level): the
+            # replayed dz moves the seabed, never the transducer relative to
+            # this sensor's sea surface
+            d2 = depth0 + ps.z
+            return _rcal.cached_render(
+                lambda: _rcal.noisy_renderer(cfg, acq, d2, half, raycast,
+                                             material=mat)[0],
+                _rcal.noisy_key(acq, d2, half, raycast, mat), sd,
+                Pose3D(ps.x, ps.y, 0.0, ps.roll, ps.pitch, ps.yaw),
+                correction=corr)
+        if replay is not None:
+            # every ping of one depth in a row (one renderer at a time on the
+            # device), before the noise loop draws in ping order
+            sd0 = Side(side_name)
+            for dz in np.unique(np.asarray(replay[2], dtype=np.float64)):
+                for k in np.nonzero(np.asarray(replay[2]) == dz)[0]:
+                    render(sd0, Pose3D(-0.5 * n * step + k * step, 0.0,
+                                       float(replay[2][k]), float(replay[0][k]),
+                                       float(replay[1][k]), 0.0))
     else:
         scene = flat_scene(alt + model.sensor_depth_m, half,
                            reflectivity=reflectivity)
@@ -554,6 +581,26 @@ def _render_expected(cfg, acq, side_name: str, alt: float, gain: int,
                 fbr_alt=float("nan") if i is None else i * acq.bin_size_m)
 
 
+#: ray-cast only: an FBR detected farther than this fraction of the altitude
+#: (and 3 bins) from the target is not this altitude's first return
+ALT_MATCH_MAX_FRACTION = 0.25
+
+
+def _alt_match_ok(fbr_alt: float, target: float, bin_m: float, raycast) -> bool:
+    """Whether to move the rendered altitude so the simulated FBR lands on
+    the real one (``target + (target - fbr_alt)``). For the ray-cast sensor
+    (2026-11-06) only an FBR near the target qualifies: a sensor without a
+    first-return crest (the detector then fires on the far-range level, at
+    21.7 m for a 7.54 m harbour stratum) was moved to the 0.2 m clamp, the
+    seabed above its transducer. The geometric path is unchanged."""
+    if not np.isfinite(fbr_alt) or abs(fbr_alt - target) <= bin_m:
+        return False
+    if raycast is not None and abs(fbr_alt - target) > max(
+            ALT_MATCH_MAX_FRACTION * target, 3.0 * bin_m):
+        return False
+    return True
+
+
 def sim_job(job: Mapping[str, Any]) -> dict:
     """Render one stratum's simulated counterpart (module doc).
 
@@ -583,7 +630,7 @@ def sim_job(job: Mapping[str, Any]) -> dict:
             a = _render_noisy(cfg, acq, job["side"], target, job["step"], n,
                               seeds[0], rep, raycast=rc)
             used = target
-            if np.isfinite(a["fbr_alt"]) and abs(a["fbr_alt"] - target) > bin_m:
+            if _alt_match_ok(a["fbr_alt"], target, bin_m, rc):
                 used = max(target + (target - a["fbr_alt"]), 0.2)
                 a = _render_noisy(cfg, acq, job["side"], used, job["step"], n,
                                   seeds[0], rep, raycast=rc)
@@ -617,7 +664,7 @@ def sim_job(job: Mapping[str, Any]) -> dict:
             e = _render_expected(cfg, acq, job["side"], target, job["gain"], rep,
                                  raycast=rc)
             used = target
-            if np.isfinite(e["fbr_alt"]) and abs(e["fbr_alt"] - target) > bin_m:
+            if _alt_match_ok(e["fbr_alt"], target, bin_m, rc):
                 used = max(target + (target - e["fbr_alt"]), 0.2)
                 e = _render_expected(cfg, acq, job["side"], used, job["gain"],
                                      rep, raycast=rc)
@@ -952,21 +999,33 @@ class FitResult:
         return dataclasses.asdict(self)
 
 
+#: crest bins of the level_crest metric
+CREST_BINS = 8
+
+
 def _residual_selector(metric: str, st: Stratum, max_bins: int,
                        nadir_max_m: float = NADIR_MAX_M):
     """(indices into the level curve, the real values there)."""
     L_m = st.range_mm / 1000.0
     r = (np.arange(st.num_results) + 0.5) * L_m / st.num_results
     real_lin = power_average_db(st.rows)
-    if metric == "level":
-        m, _, _ = tail_mask(r, st.alt, L_m, st.rows.mean(0))
+    if metric in ("level", "level_crest"):
+        m, lo, _ = tail_mask(r, st.alt, L_m, st.rows.mean(0))
     elif metric == "nadir":
         m = r <= min(nadir_max_m, 0.7 * st.alt)
     else:
-        raise ValueError(f"metric {metric!r}: level | nadir")
+        raise ValueError(f"metric {metric!r}: level | level_crest | nadir")
     idx = np.flatnonzero(m)
     if idx.size > max_bins:
         idx = idx[np.linspace(0, idx.size - 1, max_bins).round().astype(int)]
+    if metric == "level_crest":
+        # + the first-return crest (2026-11-06, ray-cast Phase A attempt 2b):
+        # [0.9 alt, the tail's start), up to CREST_BINS bins. Neither other
+        # metric sees it, and NC #4 requires it to survive.
+        c = np.flatnonzero((r >= 0.9 * st.alt) & (r < lo))
+        if c.size > CREST_BINS:
+            c = c[np.linspace(0, c.size - 1, CREST_BINS).round().astype(int)]
+        idx = np.concatenate([c, idx])
     return idx, real_lin[idx]
 
 
@@ -1179,8 +1238,11 @@ ENVELOPE_REFLECTIVITIES = (SAND_REFLECTIVITY, 0.22)
 def _envelope_job(job: Mapping[str, Any]) -> tuple:
     cfg, (L, N, pu), alt = job["cfg"], job["acq"], job["alt"]
     acq = acquisition_for(cfg, L, N, pu, 4)
+    # a ray-cast config renders with the ray-cast sensor (before 2026-11-05 the
+    # section was not passed and the envelope silently used the geometric
+    # renderer: NC #4 of the fitted set read the geometric envelope twice)
     r = _render_noisy(cfg, acq, "port", alt, 0.05, job["n"], job["seed"], None,
-                      reflectivity=job["refl"])
+                      reflectivity=job["refl"], raycast=getattr(cfg, "raycast", None))
     return (L, N, pu), alt, job["refl"], float((r["fbr"] >= 0).mean())
 
 

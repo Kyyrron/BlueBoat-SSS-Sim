@@ -48,6 +48,13 @@ from .scene_mesh import KIND_APRON, KIND_ROUGH_OBJECT, KIND_SEABED, KIND_WALL
 LN10_OVER_20 = np.log(10.0) / 20.0
 
 
+def _cell_key(kx: np.ndarray, ky: np.ndarray) -> np.ndarray:
+    """One positive int64 per (kx, ky) neighbour cell (|k| < 2^30: cells
+    >= 1 mm over 1000 km; positive, so signed and unsigned orders agree), the
+    same packing as the GPU pipeline's."""
+    return ((np.asarray(kx, np.int64) + (1 << 30)) << 32) | (np.asarray(ky, np.int64) + (1 << 30))
+
+
 def po_pair(nrm, pu, pv, pa, pb, inc, out, k: float, refl=1.0,
             rms: float = 0.0) -> np.ndarray:
     """Bistatic Kirchhoff amplitude of planar patches (``facets.po_bistatic``
@@ -85,7 +92,8 @@ class Multipath:
                                   sc.window_n1, sc.window_n2,
                                   sc.patch_phase_rad, sc.patch_min_m,
                                   sc.patch_max_m,
-                                  sediments=getattr(rr.law, "sediments", None))
+                                  sediments=getattr(rr.law, "sediments", None),
+                                  lib=rr.lib)
         self.sheet = sheet
         self.surface = ch.SurfaceBoundary(rr.k, pc.surface_rms_m)
         self.floor = ch.FloorBoundary(sheet) if pc.floor_bounces else None
@@ -94,7 +102,12 @@ class Multipath:
         self.last_report: dict = {}
         dc = rr._rc.diffraction
         self.diffraction = None
-        if dc.enabled:
+        if dc.enabled and dc.method == "edge":
+            # the fast variant's closed-form straight edges (diffraction.py)
+            from .diffraction import EdgeDiffraction
+            self.diffraction = EdgeDiffraction(rr, self.lam, dc.window_n1, dc.window_n2,
+                                               dc.end_margin_m)
+        elif dc.enabled:
             from .diffraction import Diffraction, FresnelDisc
             self.diffraction = Diffraction(
                 rr.oracle, self.lam,
@@ -145,6 +158,7 @@ class Multipath:
                 faces.append(ch.FaceBoundary(
                     f"{wi}.{len(owner)}", c, n, u, v, 0.5 * (cu.max() - cu.min()),
                     0.5 * (z1 - z0), refl, rms, rr.k))
+                faces[-1].material = mi          # the interface, for the GPU tables
                 owner.append(wi)
         return faces, owner
 
@@ -158,7 +172,10 @@ class Multipath:
         from .scene_mesh import KIND_SMOOTH_OBJECT
         nrm_all = mesh.normals()
         faces = []
-        idx_of = {int(o.object_id): i for i, o in enumerate(rr._facet_objs)}
+        # an object that is one solid: a compound's many small faces are not
+        # tracked as bounce mirrors
+        idx_of = {int(o.object_id): i for i, o in enumerate(rr._facet_objs)
+                  if rr._facet_faces[i]}
         for oid in np.unique(mesh.object_id[mesh.kind == KIND_SMOOTH_OBJECT]):
             if int(oid) not in idx_of:
                 continue
@@ -191,6 +208,7 @@ class Multipath:
                     (lambda s_, _R=R: np.full(np.shape(s_), _R, dtype=complex)),
                     float(rr._facet_sigma[i]), rr.k, kind="O", poly=hull,
                     owner=int(oid)))
+                faces[-1].rconst = R             # the constant reflection, for the GPU tables
         return faces
 
     def boundaries(self, P: np.ndarray) -> list:
@@ -263,6 +281,15 @@ class Multipath:
         dif = self.diffraction
         if dif is None:
             return {"diffracted": 0}
+        from .diffraction import EdgeDiffraction
+        if isinstance(dif, EdgeDiffraction):
+            Tl = getattr(c, "T", None)
+            untouched = np.ones(n, dtype=bool) if Tl is None else (Tl == 1.0)
+            idx, D = dif.leg_factors(P, X, cand & ~c.visible, cand & c.visible & untouched)
+            c.D[idx] = D
+            c.visible[idx] = np.abs(D) > 0.0
+            return {"diffracted": int(idx.size), "edges": int(np.sum(
+                (np.abs(D) > 0) & (np.abs(D) != 1.0)))}
         blocked = np.flatnonzero(cand & ~c.visible)
         if blocked.size == 0:
             return {"diffracted": 0}
@@ -272,19 +299,28 @@ class Multipath:
                                    t_max=L - 1e-6, t_min=1e-6)
         t_hit = np.where(np.isfinite(h.t), h.t, 0.5 * L)
         frac_b = np.clip(t_hit / L, 0.02, 0.98)
-        # lit-side candidates: clear legs within a cell of a blocked one
+        # lit-side candidates: clear legs within a cell of a blocked one, each
+        # taking the nearest obstruction among those blocked neighbours (the
+        # smallest hit fraction: order-free, so the GPU pipeline draws the
+        # same set and planes)
         cell = float(self.rr._rc.diffraction.neighbour_cell_m)
         key_b = np.floor(X[blocked, :2] / cell).astype(np.int64)
-        lut = {}
-        for (kx, ky), f in zip(map(tuple, key_b), frac_b):
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    lut.setdefault((kx + dx, ky + dy), f)
+        off = np.array([(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)], np.int64)
+        k9 = (key_b[:, None, :] + off[None, :, :]).reshape(-1, 2)
+        lk = _cell_key(k9[:, 0], k9[:, 1])
+        f9 = np.repeat(frac_b, 9)
+        o = np.lexsort((f9, lk))
+        lk, f9 = lk[o], f9[o]
+        first = np.r_[True, lk[1:] != lk[:-1]]
+        uk, uf = lk[first], f9[first]                 # sorted keys, min fraction each
         Tl = getattr(c, "T", None)
         untouched = np.ones(n, dtype=bool) if Tl is None else (Tl == 1.0)
         clear = np.flatnonzero(cand & c.visible & untouched)
-        key_c = np.floor(X[clear, :2] / cell).astype(np.int64)
-        fr_c = np.array([lut.get(tuple(k), -1.0) for k in key_c])
+        kc = np.floor(X[clear, :2] / cell).astype(np.int64)
+        qk = _cell_key(kc[:, 0], kc[:, 1])
+        pos = np.clip(np.searchsorted(uk, qk), 0, max(uk.size - 1, 0))
+        hit = (uk.size > 0) & (uk[pos] == qk)
+        fr_c = np.where(hit, uf[pos], -1.0)
         lit = clear[fr_c > 0]
         idx = np.concatenate([blocked, lit])
         frac = np.concatenate([frac_b, fr_c[fr_c > 0]])
@@ -327,19 +363,21 @@ class Multipath:
         each with its pattern ``b``, report)."""
         rr = self.rr
         bnds = self.boundaries(P) + list(extra or [])
-        seqs = ch.sequences(bnds, int(self.pc.max_order),
-                            int(self.pc.max_wall_bounces), int(max_obj))
-        if seqs_filter is not None:
-            seqs = [s for s in seqs if seqs_filter(s)]
+        levels = ch.sequences_by_order(bnds, int(self.pc.max_order),
+                                       int(self.pc.max_wall_bounces), int(max_obj))
+        n_seq = 0
         kept = [(direct, [])]
         best = np.abs(direct.b) / np.maximum(direct.length, 1e-9)
         thr = self._threshold(grid, level)
         bound_sum = np.zeros(grid.n)
         order_reached = 0
         n_dropped = 0
-        for order in range(1, int(self.pc.max_order) + 1):
+        for order, level_seqs in enumerate(levels, start=1):
             any_kept = False
-            for seq in (s for s in seqs if len(s) == order):
+            if seqs_filter is not None:
+                level_seqs = [s for s in level_seqs if seqs_filter(s)]
+            n_seq += len(level_seqs)
+            for seq in level_seqs:
                 bad = self._own_mask(seq, on_floor, wall_of)
                 if bad.all():
                     n_dropped += 1
@@ -371,7 +409,7 @@ class Multipath:
                 break
             order_reached = order
             thr = self._threshold(grid, level + bound_sum)
-        return kept, dict(order_reached=order_reached, sequences=len(seqs),
+        return kept, dict(order_reached=order_reached, sequences=n_seq,
                           kept=len(kept) - 1, dropped=n_dropped,
                           via=[c.via for c, _ in kept[1:]])
 
@@ -622,6 +660,13 @@ class Multipath:
                         ch.check_visibility(P, Xv, cb2, rr.oracle, idx=sub)
                     vis = co2.visible & cb2.visible
                     if vis.any():
+                        # legs blocked only by flooded thin shells transmit
+                        # (check_visibility sets T): the amplitude carries
+                        # it, as in the diffuse and facet paths (2026-11-04;
+                        # before, a transmitting leg deposited unattenuated)
+                        for cc in (co2, cb2):
+                            if getattr(cc, "T", None) is not None:
+                                a = a * cc.T
                         grid.add(a[vis], tau[vis], diffuse=False)
                         n_dep += int(vis.sum())
                     pairs += 1

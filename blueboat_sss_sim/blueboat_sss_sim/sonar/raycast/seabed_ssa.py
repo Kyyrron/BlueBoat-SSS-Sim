@@ -222,12 +222,15 @@ SEDIMENTS = {
 #: mud (Key West, the only fine site besides Quinault): the whole table,
 #: 3.56e-7 .. 4.1e-3 (Quinault). gamma2: the table's 3.92 at most, and
 #: > 2 for the small-slope law's alpha = gamma2/2 - 1 in (0, 1) (and a finite
-#: coherent-sum RMS; Panama City 84's 1.89 is outside the law's range).
+#: coherent-sum RMS; Panama City 84's 1.89 is outside the law's range), and
+#: >= 2.6 where its I_K quadrature is computable: the range grows as
+#: (40/q)^(1/(gamma2 - 2)) -- 2.5 needs ~1.3 GB per call, 2.4 58 GB, below not
+#: at all (gates amendment 4, 2026-11-04).
 #: sigma2: J&R eq. 14.9, "typical values 0.0001 to 0.004".
 OVERRIDE_BOUNDS = {
-    "sand": {"w2": (3.56e-7, 1.475e-4), "gamma2": (2.0 + 1e-6, 3.92),
+    "sand": {"w2": (3.56e-7, 1.475e-4), "gamma2": (2.6, 3.92),
              "sigma2": (1e-4, 4e-3)},
-    "mud": {"w2": (3.56e-7, 4.1e-3), "gamma2": (2.0 + 1e-6, 3.92),
+    "mud": {"w2": (3.56e-7, 4.1e-3), "gamma2": (2.6, 3.92),
             "sigma2": (1e-4, 4e-3)},
 }
 
@@ -327,3 +330,63 @@ class SSALaw:
 
     def backscatter(self, sin_g) -> np.ndarray:
         return self.sigma(sin_g, sin_g, -np.ones_like(np.asarray(sin_g, float)))
+
+
+# ------------------------------------------------- validity diagnostic (2026-11-06)
+#: Gates amendment 6a: a roughness set is VALID when the normal-incidence energy
+#: ratio lies in [ENERGY_VALID_LO_DB, ENERGY_VALID_HI_DB] (pre-registered; a
+#: diagnostic that rejects sets, never a fitted quantity).
+ENERGY_VALID_LO_DB = -3.0
+ENERGY_VALID_HI_DB = 1.0
+
+
+def normal_incidence_energy(p: SedimentParams, k: float, frequency_hz: float,
+                            c_water: float, n0: int = 1024, tol_db: float = 0.01,
+                            n_max: int = 1 << 18) -> dict:
+    """JR07 eq. 13.18 as a validity diagnostic of the roughness law (the law is
+    unchanged): at normal incidence the incoherently scattered energy of the
+    interface, ``E = int sigma_rough(90 deg, theta_s) dOmega_s`` over the upper
+    hemisphere, against the flat-interface ``|V(90 deg)|^2`` (a power-law
+    spectrum has no coherent part: its RMS height is infinite). Exact in 13.18's
+    narrow-lobe limit (reproduced to -0.02 dB at 30 kHz on JR07 Fig. 13.2's
+    sand); only approximate when the lobe is broad, as at 450 kHz -- so it
+    REJECTS sets far outside the lowest-order SSA's domain (attempt 2's fitted
+    set: -32.8 dB), it does not certify the others. Normal incidence makes
+    sigma independent of the scattering azimuth (its cos(phi) term carries
+    cos(theta_i) = 0), so the integral is 1-D in the zenith angle t of the
+    scattered direction, on t = (pi/2) s^2 (refined near specular), the node
+    count doubled until the ratio moves by less than ``tol_db``. The volume
+    term is excluded (13.18 is the interface's statement).
+
+    Returns ratio (linear), ratio_db, E, V2 = |V(90)|^2, half_energy_cone_deg
+    (the zenith angle holding half of E), n (nodes used), converged."""
+    law = SSALaw(p, k, frequency_hz, c_water)
+    V2 = float(abs(reflection(p, np.array([1.0]))[0]) ** 2)
+
+    def integral(n):
+        s = (np.arange(n) + 0.5) / n
+        t = 0.5 * math.pi * s * s
+        dt = math.pi * s / n                     # dt/ds * ds
+        sin_s = np.cos(t)                        # scattered grazing = 90 deg - t
+        sig = law.roughness(np.ones_like(t), sin_s, np.zeros_like(t))
+        e = 2.0 * math.pi * sig * np.sin(t) * dt
+        return e, t
+
+    n, prev, e, t = n0, None, None, None
+    while n <= n_max:
+        e, t = integral(n)
+        E = float(e.sum())
+        if prev is not None and E > 0 and prev > 0 and abs(10 * math.log10(E / prev)) < tol_db:
+            break
+        prev, n = E, 2 * n
+    E = float(e.sum())
+    cum = np.cumsum(e)
+    half = float(np.degrees(t[min(int(np.searchsorted(cum, 0.5 * cum[-1])), t.size - 1)]))
+    ratio = E / V2
+    return dict(ratio=ratio, ratio_db=10 * math.log10(max(ratio, 1e-300)), E=E, V2=V2,
+                half_energy_cone_deg=half, n=int(min(n, n_max)), converged=bool(n <= n_max))
+
+
+def energy_valid(ratio_db: float) -> bool:
+    """Amendment 6a's acceptance band for :func:`normal_incidence_energy`."""
+    return ENERGY_VALID_LO_DB <= ratio_db <= ENERGY_VALID_HI_DB

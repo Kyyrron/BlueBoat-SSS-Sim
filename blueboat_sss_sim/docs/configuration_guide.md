@@ -453,6 +453,7 @@ water.
 | `draft_m` | 0.4 | pontoon only: how deep its floats reach |
 | `reflectivity` | 0.5 | energy fraction **per bounce**: concrete quay ≈ 0.65, fendered pontoon ≈ 0.3; mirror ghosts carry its square |
 | `roughness_m` | 0.003 | rms face roughness: at 450 kHz a few millimetres turn most of the mirror into faint diffuse scatter (Rayleigh law, `sonar_model.md` §11) |
+| `material` | `concrete` | what the face is built of: `concrete` (a gravity quay, caisson or block) or `metal` (steel sheet pile), the two usual kinds. The ray-cast sensor scatters from it like from any object surface (steel +2.5 dB over concrete) and does not read `reflectivity`; the geometric renderer does not read `material` |
 | `thickness` | 0.30 | Gazebo box thickness |
 | `ctrl` | absent | **builder only** (`builder_state.yaml`): the through point of a curved wall — the point the wall passes through at its middle, dragged in the World Builder. Never reaches the world config |
 
@@ -529,9 +530,10 @@ diagnostic run; every survey condition keeps the 20 m default).
 The shipped default profile is **20 m, gain −1 (device auto), 1200 bins,
 pulse 0.00125** — the device's best range resolution and, since 2026-09-28,
 exactly the real `sss_node.py`'s defaults; see `docs/topics.md §2`. A Gazebo run started from the Mission Control Station
-passes none, so it gets this profile. Four more profiles ship, each the
-default file with one idea changed (a sixth, the field-calibration
-candidate, is different in kind -- below):
+passes none, so with the Geometric sonar it gets this profile. With Ray-cast it gets `config/raycast_default_sonar.yaml`,
+unless Extra args name another (§2c). Eight `*_sonar.yaml` profiles ship. Four are the
+default file with one idea changed (below); the field-calibration candidate, the pool site overlay (§2a) and the
+ray-cast profile (§2c) are different in kind:
 
 | Profile | What differs | For |
 |---|---|---|
@@ -567,7 +569,7 @@ regenerate it, never hand-edit it. Evidence:
 | Multipath | `multipath_enabled` (false), `multipath_gain` (0.12) | optional second-bottom-echo ghost, +altitude in slant range |
 | Wall multipath | `wall_multipath_enabled` (true), `wall_multipath_gain` (1.0), `wall_diffuse_fraction` (0.04), `wall_corner_gain` (1.0), `surface_mirror_enabled` (false), `surface_reflectivity` (0.9), `ghost_beam_lines` (1) | mirror-source ghosts off the world's `walls:` at `reflectivity²` × the Rayleigh roughness law (+ the lumped diffuse share) and the single-bounce band just beyond a quay — `sonar_model.md` §10–11, anchored on the corpus quay. ×1.25 per ping-side with one wall in range, ×1.50 with three, ×1.00 all culled |
 | Calibration | `calibration_db_offset` (**81.1**), `max_span_db` (90) | the only level constant — fit against the reported `max_pwr_db`, never a count histogram (NC #6). Re-fitted with the range law on 2026-09-18 (was 97.2, which was right at the harbour's altitude and 18 dB hot at the beach's). See `sonar_model.md` §6 |
-| Noise | `speckle` (true), `speckle_looks` (1), `coherent_scatterers` (true), `scatterer_cell_m` (0.01), `scatterer_seed` (0), `filter_duration_percent` (0.0015, the receive filter: range envelope = pulse/Ts + this·N + 1 bins; the deprecated `range_filter_bins` > 0 restores the old fixed floor), `noise_floor` (**3.39e-09**, measured receiver floor), `watercolumn_noise` (**4.68e-06**, measured 1–3 m water column), `reverberation_db` (**18.0**, a shadow's floor under the lit seabed), `gain_drift_amp` (0 — augmentation-stage concern), `dropped_ping_prob` (0 — same) | zero everything for "clean physics" ablation images; `coherent_scatterers: false` restores the uncorrelated per-bin speckle. The two floor constants encode *levels* (−3.6 and +27.8 dB reported) and moved with `calibration_db_offset` on 2026-09-18 without changing them. `reverberation_db: 0` restores the pre-2026-09-18 white floor, i.e. shadows 30 dB too deep |
+| Noise | `speckle` (true), `speckle_looks` (1), `coherent_scatterers` (true), `scatterer_cell_m` (0.01), `scatterer_seed` (0), `scatterer_anchoring` (`line`; `ground` since 2026-11-10 reads every cell of each azimuth line's footprint strip so yaw / sway do not re-draw the speckle -- one-idea profile `config/ground_anchored_sonar.yaml`), `filter_duration_percent` (0.0015, the receive filter: range envelope = pulse/Ts + this·N + 1 bins; the deprecated `range_filter_bins` > 0 restores the old fixed floor), `noise_floor` (**3.39e-09**, measured receiver floor), `watercolumn_noise` (**4.68e-06**, measured 1–3 m water column), `reverberation_db` (**18.0**, a shadow's floor under the lit seabed), `gain_drift_amp` (0 — augmentation-stage concern), `dropped_ping_prob` (0 — same) | zero everything for "clean physics" ablation images; `coherent_scatterers: false` restores the uncorrelated per-bin speckle. The two floor constants encode *levels* (−3.6 and +27.8 dB reported) and moved with `calibration_db_offset` on 2026-09-18 without changing them. `reverberation_db: 0` restores the pre-2026-09-18 white floor, i.e. shadows 30 dB too deep |
 | Field-calibration terms (pass 2) | `pulse_level_exponent` (0), `specular_pulse_exponent` (0), `pulse_level_reference_s` (6.65e-05, structural), `receiver_ceiling` (**true** since 2026-10-30), `receiver_ceiling_db` (**67.9**, measured), `receiver_ceiling_pulse_exponent` (1.0), `receiver_ceiling_knee_db` (1.0, structural), `texture_k_inv_shape` (0), `texture_k_cell_m` (0.5), `ping_level_jitter_db` (0) | each off value reproduces the model without the term bit for bit (smoke `[17]`). The receiver ceiling is a C¹ soft knee on reported dB that keeps one full-scale bin; `texture_k_inv_shape` 1/ν > 0 adds a ground-fixed Gamma (K-distribution) intensity field; the pulse exponents scale the diffuse / coherent level by (τ/66.5 µs)^k. `sonar_model.md` §13 |
 | Fault injection | `fault_gain_walk_pings` (0), `fault_counter_reset_pings` (0), `fault_counter_offset` (0), `fault_channel_255` (false) | **test knobs, not fidelity**: the downstream paths a clean simulation never takes (gain compensation, counter re-base, channel-255 side fallback, one-sided rows). `config/fault_injection_sonar.yaml` turns them on together |
 | Wall echo | `wall_echo_enabled` (true), `wall_echo_strength` (30), `wall_echo_obliquity_floor` (0.1), `wall_face_diffuse` (0.5), `wall_pontoon_specular` (0.15) | direct face return (specular lobe + Lambert over the wet face, range law floored at the altitude) + occlusion by the face band, per wall `kind` — `sonar_model.md` §11; strict no-op without walls |
@@ -599,16 +601,91 @@ painted-concrete floor at 1e-5 m and −16.4 dB, and all three combs. It is gene
 field calibration: on the NC #4 envelope (flat sand, field acquisitions) it loses the first bottom return in
 11 of 82 cases.
 
+### 2c. The ray-cast sensor's profile (`renderer: raycast`, 2026-11)
+
+The second sonar model (`sonar/raycast/`, design `docs/engineering/raycast_design.md`) is configured by a
+profile with three parts.
+
+**The parts**
+- A top-level `renderer: raycast`.
+- `acquisition:` and `model:` as above. `model:` feeds only the shared encoder and noise stage, and the
+  mounting keys.
+- A strict `raycast:` section. Unknown keys raise by name, in every subsection: `water`, `beam`,
+  `sampling`, `seabed`, `receiver`, `po`, `specular`, `paths`, `diffraction`, `correction`, `floor`,
+  `near_range`, `labels`, `objects`. The top-level keys are `system_gain_db`, `backend`, `precision`,
+  `seed` and `seed_per_run`.
+- The keys the two harbour profiles add (`.claude/raycast-live.md` has the evidence):
+  `objects.mode: solid` (every object meshed as its parts, one surface rule for objects and walls),
+  `objects.fouling` (0..1, the fouled fraction of object and wall surfaces; 0 in every profile, set per
+  run with `sonar_fouling:=`), `labels.enabled`, `floor.reverberation_db` + `floor.addition: field`,
+  `correction.altitude_hold_m` and `correction.onset_fade_m` (the empirical table fades in over this
+  distance after the first seabed echo), `near_range`, `seed_per_run`.
+
+**How it is selected**
+- The node's `renderer` parameter / the launch's `sonar_renderer:=raycast` selects it.
+- The launch's `real_time_factor:=` slows the whole simulation, because the ray-cast is far slower than the 50 ms
+  ping period. `integration_guide.md` §2b describes this.
+- `sonar_hold_sim:=` (default `auto`, 2026-11-09) also pauses Gazebo while a ping cycle overruns its wall budget
+  (a quay in range costs 1–16 s a ping), so no ping is lost (`core/sim_hold.py`).
+- `sonar_renderer:=raycast` without `sonar_config:=` resolves `config/raycast_default_sonar.yaml`.
+
+**The profiles**
+
+| Profile | What it is |
+|---|---|
+| `config/raycast_default_sonar.yaml` | The packaged profile: the **provisional** physical section (`PROVISIONAL_RAYCAST`: J&R spectra at 1/100, system gain 143.7 dB, TVG k 12), generated by `sonar.raycast.config.write_default_profile`. Regenerate it, never hand-edit it. |
+| `config/raycast_live_sonar.yaml` | A **live variant** (2026-11-09): the default plus `raycast.paths.max_order: 1`. Bit-identical to the default on the harbour lawnmower route and over objects, and the pier-corner ping drops from 15.9 to 7.4 s. Generated by `sonar.raycast.config.write_variant_profiles` (`RAYCAST_VARIANTS`); its top-level `variant:` block (label, order, description) is what MCS lists in the Sonar model menu. Not for the pool, whose multipath comb needs higher orders. |
+| `config/raycast_fast_sonar.yaml` | The **fast variant** (2026-11-10): the live one plus every fast-variant engine path below turned on, and scatterers every 10 mm (phase 2, owner's choice). A harbour mode (first-order multipath, not for the pool). Generated like the live variant; its look against the full model is judged live by the owner, not claimed here. |
+| `~/calib/raycast/correction/raycast_harbour_hybrid_v2_sonar.yaml` | **Outside the repository.** The harbour-first hybrid (`raycast_assessment.md` §13): the physical core (SAX99 sand, f_v 0.217, gain 126.9 dB / TVG k 3.76 fitted on the harbour calibration tails) plus the empirical first-return correction v2. Generated by `correction_fit.py fit --v2`. It is selected with `sonar_config:=<path>`, for example in the MCS **Extra args**. |
+
+**Fast-variant engine paths** (2026-11-10, `config.ENGINE_KNOBS`, `docs/engineering/raycast_fast_optimize_plan.md`).
+Each defaults to today's renderer, so the default and live profiles render as before; only the fast profile
+turns them on. A correction artifact's fingerprint leaves them out at their default.
+
+| Key | Default (fast) | What it does |
+|---|---|---|
+| `sampling.cull_unreachable` | false (true) | No scatterers where no sound can reach: above the still waterline (dry land, wall tops), wall points buried below the seabed, quay faces turned away from the transducer. Pontoons keep every face. CPU and GPU. |
+| `paths.reselect_every` | 1 (10) | Reuse a side's echo-path selection for up to this many pings; the kept paths are still evaluated exactly every ping. GPU pipeline only (the CPU reference raises). |
+| `paths.reselect_move_m` | 0.0 (0.3) | …while the transducer moved less than this, turned < 2°, and the boundaries in range are unchanged. |
+| `diffraction.method` | `sampled` (`edge`) | `edge`: the closed form F(v) of the nearest free straight edge of a wall box (vertical corners in the water, submerged tops, pontoon bottoms), with the same window; no ray casts. Objects and seabed relief get no factor. CPU and GPU. |
+| `precision` | `fp64` (`fp32`) | The GPU's per-triangle visibility test in float32 (`seg_blocked32`). GPU only; the CPU reference stays float64. |
+
+`raycast.correction` sets the **empirical correction layer** (`sonar/raycast/correction.py`; it is *not*
+physics).
+
+- `enabled` defaults to **false**. Off, the output is bit-identical to the physical renderer.
+- `artifact` is the path of a `blueboat_raycast_correction/1` YAML.
+- The artifact carries:
+  - its validity domain: true nadir altitude, acquisition envelopes, nadir material;
+  - a fingerprint of the physical core it was fitted on. Any other core refuses to build.
+- Per ping, outside the domain, the factor is exactly 1. The status (`ping.correction_status`, `off:<reason>`) is
+  logged once per reason.
+- The harbour v2 artifact applies only at **5.55–11.3 m** nadir altitude, over sand, and at the recorded harbour
+  acquisitions. Under its pre-registered acceptance rule both acquisition groups were EXCLUDED: it is a testable
+  version with known limitations (`raycast_assessment.md` §13.5–13.6).
+
+**Range on the GPU.** The ray-cast's per-ping working set grows with the range: in the harbour world on an 8 GB
+GPU it peaks at 2.3 GB at 20 m, 3.6 GB at 30 m and 6.3 GB at 40 m. At 50 m it runs out of device memory (CUDA
+error 101). Keep `range_length_mm` ≤ 30000 for the ray-cast; 20000 is the survey setting. The measurements are in
+`integration_guide.md` §2b.
+
 ## 2b. Sea state (current + waves)
 
 `config/sea_states.yaml` (`format: blueboat_sea_state_presets/1`) is the
 single source of truth for the presets (`current: none | weak | moderate |
-strong | very_strong`, `waves: calm | rippled | smooth | slight | rough`,
+strong | very_strong`, `waves: calm | rippled | harbour_chop | smooth | slight | rough`
+-- since 2026-11-10 every level has Tp = 3.6 √Hs, the fetch-limited young sea,
+and `harbour_chop` (0.07 m) is the site's inverse estimate --
 each with `label`, `description`, `reference`, and for waves `gamma`,
 `spread_s` and an `events: {rate_per_hour, hs_m, tp_s, duration_s,
 from_spread_deg}` block of random wake / swell groups — `docs/sea_state_model.md`
 §4.1b) and the two hulls the wave force uses; directions are chosen per
-run. A keyframe or command may give explicit wave fields instead of a
+run. `hull.wave_response: {discretisation: hybrid | equal_energy, f_max_hz,
+draft_decay}` (2026-11-10; unknown keys raise) sets how the field is built
+for the hull -- `hybrid` resolves the wave-slope spectrum up to `f_max_hz`
+(3 Hz), `draft_decay` reads the Froude–Krylov pressure at the hull's draft;
+without the block the pre-2026-11-10 field (16 equal-energy bins, surface
+pressure) is rebuilt bit for bit. A keyframe or command may give explicit wave fields instead of a
 preset (`waves: {hs_m, tp_s, gamma, from_deg, events: {...}}`) — what the
 MCS "Custom" wave entry writes. A timeline is a
 `config/sea_schedule_example.yaml`-shaped file
@@ -635,7 +712,7 @@ installed share directory and writes timelines under
   `spawn{x: 0, y: 0, lat, lon}`, `limits{local{x_min…y_max},
   corners_gps[SW,SE,NE,NW]}`, `walls[{name, local[[x0,y0],[x1,y1]],
   gps[[lat,lon]×2], top_z, reflectivity, thickness, kind, draft_m,
-  roughness_m, curve}]` (`curve` = the builder wall a curved wall's chord
+  roughness_m, material, curve}]` (`curve` = the builder wall a curved wall's chord
   came from), `objects[{object_id, type, x, y, lat, lon, yaw, yaw_deg,
   roll_deg, pitch_deg, rest, orientation{mode, heading_deg, jitter_deg},
   length, width,

@@ -137,6 +137,9 @@ class _PingGeometry:
     out_of_map_m: float | None = None    # ground distance where the line
                                          # leaves the scene grid (direct
                                          # pass only); None = stays inside
+    along_xy: tuple = (1.0, 0.0)         # the line's along-track unit vector
+                                         # (world); the strip a "ground"-
+                                         # anchored line reads lies along it
 
 
 @dataclass
@@ -293,6 +296,10 @@ class GeometricRenderer(SonarRenderer):
         _rho = getattr(scene, "reflectivity", None)
         self._median_rho = (float(np.median(_rho)) if _rho is not None
                             else 0.5)
+        self._anchoring = str(getattr(model, "scatterer_anchoring", "line")).lower()
+        if self._anchoring not in ("line", "ground"):
+            raise ValueError(f"scatterer_anchoring '{model.scatterer_anchoring}' "
+                             "(line | ground)")
         self._energy = str(model.image_formation).lower() == "energy"
         if str(model.image_formation).lower() not in ("mean", "energy"):
             raise ValueError(
@@ -430,6 +437,65 @@ class GeometricRenderer(SonarRenderer):
             h ^= h >> np.uint64(32)
         idx = (h >> np.uint64(52)).astype(np.int64) % self._k_lut.size
         return self._k_lut[idx]
+
+    def _cell_phase(self, ix: np.ndarray, iy: np.ndarray) -> np.ndarray:
+        """Ground-fixed random phase of integer cells (ix, iy) -- the same
+        hash and salt as :meth:`_scatter_phase`."""
+        with np.errstate(over="ignore"):
+            h = ((ix.astype(np.uint64) * _K1) ^ (iy.astype(np.uint64) * _K2)
+                 ^ self._salt)
+            h ^= h >> np.uint64(31)
+            h *= _K3
+            h ^= h >> np.uint64(29)
+            h *= _K4
+            h ^= h >> np.uint64(32)
+        return (h >> np.uint64(40)).astype(np.float64) * (2.0 * np.pi / 2.0 ** 24)
+
+    def _ground_cells_into(self, g: _PingGeometry, ok: np.ndarray,
+                           idx: np.ndarray, wd: np.ndarray, n: int,
+                           acc: _Acc) -> None:
+        """``scatterer_anchoring: ground`` (2026-11-10). A line stands for
+        the along-track strip of the footprint between it and its
+        neighbours (one line pitch wide); every ground cell of that strip
+        along the line is a scatterer of the bin it falls in, its
+        amplitude the line's (beam-weighted) sample amplitude shared over
+        the strip. Cells are world-fixed, so a small rotation or sideways
+        step of the line keeps most of them -- the footprint overlap a
+        real beam has -- where the one-row "line" field swaps its whole
+        population (0.1 deg of yaw moves a 10 m sample across a 1 cm row).
+        Same normalisation as the line field (per-bin energy, same-cell
+        cross terms), so the texture stays unit-mean."""
+        cell = 1.0 / self._cell_inv
+        pitch = self._line_pitch if self._line_pitch > 0 else cell
+        m = max(int(round(pitch / cell)), 1)
+        offs = ((np.arange(m) + 0.5) / m - 0.5) * pitch
+        fx, fy = g.along_xy
+        qx = g.px[ok][:, None] + fx * offs[None, :]
+        qy = g.py[ok][:, None] + fy * offs[None, :]
+        ix = np.floor(qx * self._cell_inv).astype(np.int64).ravel()
+        iy = np.floor(qy * self._cell_inv).astype(np.int64).ravel()
+        b = np.repeat(idx[ok], m)
+        amp = np.repeat(np.sqrt(np.maximum(wd, 0.0) / m), m)
+        x0, y0 = ix.min(), iy.min()
+        span_y = int(iy.max() - y0) + 1
+        cid = (ix - x0) * span_y + (iy - y0)
+        key = cid * n + b
+        keys, first, inv = np.unique(key, return_index=True, return_inverse=True)
+        a_cell = np.bincount(inv.ravel(), weights=amp, minlength=keys.size)
+        b_cell = keys % n
+        c_cell = keys // n
+        ph = self._cell_phase(ix[first], iy[first])
+        acc.re += np.bincount(b_cell, weights=a_cell * np.cos(ph), minlength=n)
+        acc.im += np.bincount(b_cell, weights=a_cell * np.sin(ph), minlength=n)
+        acc.energy += np.bincount(b_cell, weights=a_cell ** 2, minlength=n)
+        if acc.k_num is not None:
+            gam = self._k_gamma((ix[first] + 0.5) * cell, (iy[first] + 0.5) * cell)
+            acc.k_num += np.bincount(b_cell, weights=gam * a_cell ** 2, minlength=n)
+        straddle = (c_cell[1:] == c_cell[:-1]) & (b_cell[1:] == b_cell[:-1] + 1)
+        if straddle.any():
+            acc.cross += np.bincount(
+                b_cell[:-1][straddle],
+                weights=(a_cell[:-1] * a_cell[1:])[straddle], minlength=n)
 
     def _scatter_phase(self, px: np.ndarray, py: np.ndarray) -> np.ndarray:
         """Ground-fixed random phase per sample (hash of its ground cell)."""
@@ -1008,7 +1074,7 @@ class GeometricRenderer(SonarRenderer):
                              horizon=horizon, wall_hits=hits,
                              roughness=rough, jacobian=jac,
                              slant_lo=lo, slant_hi=hi, occ_lit=occ_lit,
-                             out_of_map_m=out_of_map)
+                             out_of_map_m=out_of_map, along_xy=(fx, fy))
 
     # ----------------------------------------------------------- shading pass
     def _shade_into(self, g: _PingGeometry, origin: Pose3D,
@@ -1188,7 +1254,9 @@ class GeometricRenderer(SonarRenderer):
         # energy sum is kept so the field can be normalised to the
         # incoherent mean exactly, and the same-cell product across a bin
         # boundary so the pulse convolution's expectation is exact too.
-        if acc.re is not None and ok.any():
+        if acc.re is not None and ok.any() and self._anchoring == "ground":
+            self._ground_cells_into(g, ok, idx, wd, n, acc)
+        elif acc.re is not None and ok.any():
             phase, grp = self._scatter_phase(g.px[ok], g.py[ok])
             amp = np.sqrt(np.maximum(wd, 0.0))
             key = grp * n + idx[ok]

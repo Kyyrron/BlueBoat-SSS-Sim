@@ -212,6 +212,12 @@ class Wall:
     ``roughness_m`` is the rms height roughness of the face, which at
     450 kHz (3.3 mm wavelength) decides how much of a bounce stays coherent
     (Rayleigh parameter, docs/sonar_model.md section 11).
+
+    ``material`` is what the face is built of: ``concrete`` (a gravity quay,
+    caisson or block) or ``metal`` (steel sheet pile) -- the two usual kinds
+    (``worldgen.scene.WALL_MATERIALS``). The ray-cast sensor scatters from it
+    like from any object surface (NC #17) and does not read ``reflectivity``,
+    which stays the geometric renderer's input.
     """
 
     name: str
@@ -225,6 +231,7 @@ class Wall:
     kind: str = "quay"            # quay | pontoon
     draft_m: float = 0.4          # pontoon only: wet depth of the floating face
     roughness_m: float = 0.003    # rms face roughness [m] (concrete ~3 mm)
+    material: str = "concrete"    # concrete | metal (steel sheet pile)
 
     @property
     def z_bottom(self) -> float:

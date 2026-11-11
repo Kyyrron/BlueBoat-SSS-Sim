@@ -126,6 +126,7 @@ _ROUGHNESS_M: dict[str, float] = {
     # layer (NC #17), i.e. invisible, which no SSS image of a tyre shows.
     # Rough, it stays on the raster Lambert path it has always been on.
     "rubber": 3.0e-3,      # tread
+    "tyre_tread": 3.0e-3,  # the same tread, over a steel belt (below)
     "pvc": 1.0e-4,         # extruded
     "plastic": 1.0e-4,     # injection-moulded
     "metal": 5.0e-5,       # rolled sheet
@@ -153,6 +154,7 @@ _ROUGHNESS_M: dict[str, float] = {
 
 _OBJECT_DEFAULTS: dict[str, Material] = {
     "rubber":   Material("rubber",   0.45, 0.05, 0, 0.0, (0.10, 0.10, 0.10)),
+    "tyre_tread": Material("tyre_tread", 0.45, 0.05, 0, 0.0, (0.10, 0.10, 0.10)),
     "pvc":      Material("pvc",      0.50, 0.05, 0, 0.0, (0.85, 0.85, 0.80)),
     "plastic":  Material("plastic",  0.40, 0.05, 0, 0.0, (0.90, 0.90, 0.95)),
     "metal":    Material("metal",    0.95, 0.05, 0, 0.0, (0.60, 0.62, 0.65)),
@@ -250,6 +252,17 @@ _ACOUSTIC: dict[str, tuple[float, float, str, float]] = {
     # result moves only between the quarter-wave value (|R| 0.44) and the
     # bare concrete one (0.71), i.e. -7.2 to -3.0 dB.
     "pe_cement": (950.0, 2430.0, "concrete", 6.0e-3),
+    # The tread band of a radial car tyre: rubber [K] over its steel belts
+    # (two crossed plies of steel cord under the tread; backing "metal", a
+    # layer on the steel half-space [K]). 12 mm = an 8 mm tread plus the
+    # undertread, a judged thickness; the result barely depends on it (|R|
+    # 0.92-0.94 over the band), because rubber's impedance is within 15 % of
+    # water's and the wave reaches the steel. Absorption in the rubber is NOT
+    # modelled (no value was read at a source), so this is the UPPER bound of
+    # a belted tread's echo. The part that carries it is
+    # ``worldgen.compounds._tyre_car``; a tyre's sidewalls and a bicycle
+    # tyre have no steel and stay ``rubber``.
+    "tyre_tread": (1100.0, 1600.0, "metal", 12.0e-3),
 }
 
 #: A layer on a solid backing whose thickness is only bounded (``pe_cement``)

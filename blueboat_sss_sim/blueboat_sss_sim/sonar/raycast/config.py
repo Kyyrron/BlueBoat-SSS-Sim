@@ -64,12 +64,33 @@ class SamplingConfig:
     #: World lattice spacing of the diffuse scatterers [m]. Provisional,
     #: from the Phase-2 S1 sweep (flat sand, mean vs quadrature: rms 0.10 /
     #: 0.025 / 0.006 dB at 10 / 5 / 2.5 mm, ~spacing^2); final value by the
-    #: Phase-5 convergence study, never relaxed for speed.
+    #: Phase-5 convergence study, never relaxed for speed -- except the
+    #: ``fast`` variant (owner, 2026-11-10: 10 mm; the flat-sand density sweep
+    #: gives eps_mu p95 0.035 / 0.023 there, about 0.15 dB of mean level, and
+    #: a redrawn speckle realisation; raycast_fast_optimize_plan.md phase 2).
     scatterer_spacing_m: float = 0.005
-    #: Maximum refinement per lattice cell on steep sheet cells (n^2 points).
+    #: Maximum refinement per axis of a steep sheet cell (a stratified
+    #: n_x x n_y sub-grid, n = ceil of the surface stretch along that axis).
     max_refine: int = 8
     #: Offset of a visibility ray's end off the surface [m].
     surface_offset_m: float = 1e-3
+    #: FAST-VARIANT ENGINE PATH (2026-11-10; ``ENGINE_KNOBS``): do not create
+    #: scatterers no sound can reach -- any point above the still waterline
+    #: (z > 0: dry land, wall tops), wall points buried below the local
+    #: seabed by more than ``surface_offset_m``, and whole faces of a
+    #: ``kind: quay`` wall turned away from the transducer (a quay is backed
+    #: by land; pontoons keep every face). Off = today's sampling, exactly.
+    cull_unreachable: bool = False
+    #: FAST-VARIANT ENGINE PATH (2026-11-10, phase 2; ``ENGINE_KNOBS``): emit
+    #: only the seabed-sheet points inside the beam band at their own range
+    #: (``R <= r_max`` and ``|(X - P) . e_a| <= w(R)``, the band the walls
+    #: already use) instead of the band's widest parallelogram everywhere. An
+    #: out-of-band point is never a direct candidate (its two-way pattern is
+    #: below the floor), so a ping that keeps no multipath sequence renders
+    #: exactly as without it; with a kept wall / surface sequence such a
+    #: point could still be lit through the bounce, so there it is
+    #: near-exact. Off = today's sampling, exactly.
+    band_cull: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +192,20 @@ class PathsConfig:
     #: (corner paths: dihedral, trihedral; O4/O5), at most this many.
     object_faces: bool = True
     max_object_bounces: int = 2
+    #: FAST-VARIANT ENGINE PATH (2026-11-10; ``ENGINE_KNOBS``): reuse a
+    #: side's echo-path selection (which sequences to evaluate) for up to
+    #: this many pings while the transducer moved < ``reselect_move_m``,
+    #: turned < 2 deg and the set of boundaries in range is unchanged. The
+    #: kept sequences are still evaluated exactly every ping. 1 = select
+    #: every ping (today). GPU pipeline only.
+    reselect_every: int = 1
+    reselect_move_m: float = 0.0
+
+    def __post_init__(self) -> None:
+        if int(self.reselect_every) < 1:
+            raise ValueError(f"raycast.paths.reselect_every {self.reselect_every} < 1")
+        if float(self.reselect_move_m) < 0.0:
+            raise ValueError(f"raycast.paths.reselect_move_m {self.reselect_move_m} < 0")
 
 
 @dataclass(frozen=True)
@@ -190,6 +225,226 @@ class DiffractionConfig:
     #: clear legs whose contributor lies within this cell of a blocked one
     #: are tested for the lit side of a shadow edge [m]
     neighbour_cell_m: float = 0.25
+    #: FAST-VARIANT ENGINE PATH (2026-11-10; ``ENGINE_KNOBS``): "sampled" =
+    #: the ray-traced Fresnel-Kirchhoff disc (today); "edge" = the closed
+    #: form F(v) of the nearest free straight edge of a wall box
+    #: (``diffraction.EdgeDiffraction``: same per-leg ratio, same window,
+    #: no ray casts; objects and seabed relief get no factor).
+    method: str = "sampled"
+
+    def __post_init__(self) -> None:
+        if self.method not in ("sampled", "edge"):
+            raise ValueError(f"raycast.diffraction.method {self.method!r}: 'sampled' or 'edge'")
+
+
+@dataclass(frozen=True)
+class CorrectionConfig:
+    """The EMPIRICAL correction layer (``correction.py``; NOT physics),
+    separately switchable. Off by default: the physical renderer's output is
+    then bit-identical. ``artifact``: a ``blueboat_raycast_correction/1`` YAML
+    fitted on calibration sessions only (gates amendment 6b)."""
+    enabled: bool = False
+    artifact: str = ""
+    #: EDGE-HOLD (2026-11-10, harbour patch): ``[low, high]`` nadir altitudes
+    #: [m] outside the artifact's fitted domain where its table is still
+    #: applied, at the altitude clamped to its knots (``Correction.db_at``),
+    #: status ``applied:held``; below ``low`` it fades linearly to 0 over
+    #: ``altitude_taper_m`` (``applied:taper``) instead of a cliff. ``None``:
+    #: off outside the domain, as the artifact states. A profile-level
+    #: extension, never an edit of the artifact; evidence in
+    #: ``.claude/raycast-live.md`` (harbour profiles).
+    altitude_hold_m: Any = None
+    altitude_taper_m: float = 1.0
+    #: Fade the table in over this slant distance after the first seabed
+    #: echo [m] (0 = the table as fitted). The real first return climbs from
+    #: the physical model's own level; the table's maximum on the first bin
+    #: made a hard nadir edge (``correction.py``; harbour profiles).
+    onset_fade_m: float = 0.0
+    #: Accept the artifact under the performance-only engine keys
+    #: (``PERFORMANCE_KEYS``): the core check then compares the physics
+    #: only. Off: strict (a fast render is refused), as before.
+    accept_engine_knobs: bool = False
+
+    def __post_init__(self) -> None:
+        h = self.altitude_hold_m
+        if h is not None:
+            if not (isinstance(h, (list, tuple)) and len(h) == 2
+                    and 0.0 < float(h[0]) < float(h[1])):
+                raise ValueError(f"raycast.correction.altitude_hold_m {h!r}: [low, high], 0 < low < high")
+            object.__setattr__(self, "altitude_hold_m", (float(h[0]), float(h[1])))
+        if not float(self.altitude_taper_m) >= 0.0:
+            raise ValueError(f"raycast.correction.altitude_taper_m {self.altitude_taper_m}: >= 0")
+        if not 0.0 <= float(self.onset_fade_m) <= 5.0:
+            raise ValueError(f"raycast.correction.onset_fade_m {self.onset_fade_m}: [0, 5] m")
+
+
+@dataclass(frozen=True)
+class NearRangeConfig:
+    """The device's MEASURED near-range response for ONE acquisition mode
+    (harbour patch v2, 2026-11-10): the transmit ringing (the coherent
+    channel, ``Ping.specular``) and the water-column level (the noise
+    stage's Exp(1) ``watercolumn_noise``), in reported dB at gain 4. The
+    shared model's values (55 dB decaying 22 dB/m, water column 27.8 dB)
+    were measured on 600-bin recordings; at 1200 bins / 44.3 us the device
+    rings 3x shorter and its water column is ~12 dB quieter, which put the
+    processor's FBR threshold (its noise estimate right after the ringing
+    + 8 dB) above a correctly levelled seabed. Off (``ringing_db`` None):
+    the shared model's, bit-identical. Applies only to the acquisition it
+    was measured at (``num_results``, ``pulse_us``); elsewhere the shared
+    model's, logged once."""
+    #: ``[[r_m, dB], ...]`` piecewise linear in device range, 0 beyond the last point
+    ringing_db: Any = None
+    #: the Exp(1) water column's linear mean [reported dB]
+    watercolumn_db: float = 0.0
+    num_results: int = 0
+    pulse_us: Any = None
+
+    def __post_init__(self) -> None:
+        t = self.ringing_db
+        if t is None:
+            return
+        rr = [float(a) for a, _ in t]
+        if len(rr) < 2 or any(b <= a for a, b in zip(rr, rr[1:])) or rr[0] < 0.0:
+            raise ValueError("raycast.near_range.ringing_db: >= 2 [r_m, dB] rows, r increasing from >= 0")
+        object.__setattr__(self, "ringing_db", tuple((float(a), float(b)) for a, b in t))
+        pu = self.pulse_us
+        if pu is not None:
+            if not (isinstance(pu, (list, tuple)) and len(pu) == 2 and float(pu[0]) <= float(pu[1])):
+                raise ValueError(f"raycast.near_range.pulse_us {pu!r}: [low, high]")
+            object.__setattr__(self, "pulse_us", (float(pu[0]), float(pu[1])))
+
+    def applies(self, acq, max_ping_rate_hz: float = 0.0) -> bool:
+        """On, and ``acq`` is the acquisition it was measured at."""
+        if self.ringing_db is None:
+            return False
+        if self.num_results and int(acq.num_results) != int(self.num_results):
+            return False
+        if self.pulse_us is not None:
+            pulse = float(acq.pulse_duration_s(max_ping_rate_hz)) * 1e6
+            if not (self.pulse_us[0] - 0.5 <= pulse <= self.pulse_us[1] + 0.5):
+                return False
+        return True
+
+    def ringing_at(self, r_m) -> "Any":
+        """The ringing [reported dB] at device ranges ``r_m``; -inf beyond the table."""
+        import numpy as np
+        r = np.asarray(r_m, dtype=np.float64)
+        t = np.asarray(self.ringing_db, dtype=np.float64)
+        out = np.interp(r, t[:, 0], t[:, 1])
+        return np.where(r <= t[-1, 0], out, -np.inf)
+
+
+@dataclass(frozen=True)
+class FloorConfig:
+    """The shadow (reverberation) floor of the shared noise stage, NC #15
+    (``sonar/noise.py``). ``reverberation_db`` 0 (default): the shadow
+    floor comes from the renderer's physics only (raycast_design §3), the
+    output bit-identical. ``> 0`` (harbour profiles, 2026-11-10): a culled
+    bin holds the seabed's own speckle this many dB under the lit seabed at
+    that range, the ping's ambient reference (``floor.ambient_reference``)
+    -- the geometric sensor's MEASURED stand-in (the corpus quay, 17-25 dB;
+    18) for the fill this sensor does not model yet: volume and incoherent
+    surface reverberation, higher-order multipath (test D3 never ran)."""
+    reverberation_db: float = 0.0
+    #: How the floor meets the echo in a LIT bin (review of 2026-11-11).
+    #: "power" (default, as before): an independent Exp(1) floor is added to
+    #: the intensity, which fills the speckle's deep nulls -- measured: the
+    #: 1st percentile of the plain seabed rises from -20.0 to -16.7 dB re
+    #: the mean (real harbour -20.5). "field": the floor is an independent
+    #: complex Gaussian FIELD added before detection (``noise.py``), so a lit
+    #: bin stays exactly exponential at the summed mean; a shadow is filled
+    #: as before. Harbour profiles: field.
+    addition: str = "power"
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= float(self.reverberation_db) <= 60.0:
+            raise ValueError(f"raycast.floor.reverberation_db {self.reverberation_db}: [0, 60]")
+        if self.addition not in ("power", "field"):
+            raise ValueError(f"raycast.floor.addition {self.addition!r}: 'power' or 'field'")
+
+
+@dataclass(frozen=True)
+class ObjectsConfig:
+    """How scene objects reach this sensor's triangle scene (review of
+    2026-11-11, ``object_mesh.py``).
+
+    ``raster`` (default, as before): rough and aggregate objects are the
+    bumps the world builder stamped into the height raster, at the WORLD's
+    resolution -- in a 0.2 m harbour world a pallet is ~20 raised vertices
+    and a small weight one; smooth primitives are watertight meshes that
+    only mirror.
+
+    ``solid``: the seabed sheet is the terrain alone (the world folder's
+    ``depth.npz``, written before any object was stamped) and EVERY object is
+    meshed at load from the manifest as its parts (``worldgen.compounds``:
+    one primitive, or a pallet's boards, a bicycle's tubes, ...), each with
+    its material. Every part scatters diffusely; a smooth one also mirrors,
+    and the two shares add up (``scattering.DiffuseLaw``). A world without
+    ``depth.npz`` (a legacy bundle) stays ``raster``, said once. Nothing is
+    written into a world folder (NC #10). Harbour profiles: solid.
+
+    ``fouling``: the fraction of every object and wall surface covered by
+    sediment and growth; it scatters like the seabed and does not mirror.
+    0 = clean. Not calibrated (no measurement at 450 kHz was found): the
+    sensitivity axis of the aspect response, set per run with the node's
+    ``fouling`` parameter."""
+    mode: str = "raster"
+    fouling: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("raster", "solid"):
+            raise ValueError(f"raycast.objects.mode {self.mode!r}: 'raster' or 'solid'")
+        if not 0.0 <= float(self.fouling) <= 1.0:
+            raise ValueError(f"raycast.objects.fouling {self.fouling}: [0, 1]")
+
+
+@dataclass(frozen=True)
+class LabelsConfig:
+    """Ground-truth contacts of this sensor (``labels.py``, review of
+    2026-11-11): which scene objects a ping insonifies, whether they are
+    visible, and the shadow each one casts, read off the renderer's own mesh
+    by its own visibility oracle. Off (default): ``RenderedPing.contacts``
+    stays empty, as before. Never changes ``Ping.power`` or ``Ping.texture``.
+    Harbour profiles: on."""
+    enabled: bool = False
+    #: surface points per object the visibility test samples at most
+    max_points: int = 512
+
+    def __post_init__(self) -> None:
+        if not 16 <= int(self.max_points) <= 8192:
+            raise ValueError(f"raycast.labels.max_points {self.max_points}: [16, 8192]")
+
+
+#: The fast variant's engine paths (2026-11-10, docs/engineering/
+#: raycast_fast_optimize_plan.md): dotted ``raycast`` key -> the default that
+#: reproduces today's renderer exactly. The one list the correction
+#: fingerprint (left out at their default), the smoke test and the docs use.
+ENGINE_KNOBS: dict[str, Any] = {
+    "sampling.cull_unreachable": False,
+    "sampling.band_cull": False,
+    "paths.reselect_every": 1,
+    "paths.reselect_move_m": 0.0,
+    "diffraction.method": "sampled",
+    "precision": "fp64",
+}
+
+#: The keys that change only how fast a ping renders, not the physics a
+#: correction artifact was fitted on: ``ENGINE_KNOBS`` plus the path-order
+#: cap and the scatterer spacing of the live / fast variants (evidence:
+#: live bit-identical on the harbour route 176/176 pings and over objects;
+#: fast identical by eye, ``[F1]``-``[F7]``; ``raycast_fast_optimize_plan.md``).
+#: A harbour statement -- the pool's multipath comb needs orders >= 2.
+#: ``Correction.check_core(accept_engine=True)`` compares everything else.
+PERFORMANCE_KEYS: tuple[str, ...] = tuple(ENGINE_KNOBS) + (
+    "paths.max_order", "sampling.scatterer_spacing_m")
+
+
+def engine_knob(rc, key: str):
+    """The value of the ``ENGINE_KNOBS`` entry ``key`` in ``rc``."""
+    obj = rc
+    for part in key.split("."):
+        obj = getattr(obj, part)
+    return obj
 
 
 @dataclass(frozen=True)
@@ -208,6 +463,12 @@ class RaycastConfig:
     #: The visibility oracle: "cpu" (the numpy BVH, the reference) or
     #: "warp" (the GPU oracle, gpu_warp.py; gate G1 holds it to the CPU).
     backend: str = "cpu"
+    #: FAST-VARIANT ENGINE PATH (2026-11-10; ``ENGINE_KNOBS``): the GPU's
+    #: per-triangle visibility test, "fp64" (today) or "fp32" (the float32
+    #: watertight test in the BVH's local frame, ``gpu_render.seg_blocked32``,
+    #: which the default diffraction already uses). GPU only by definition:
+    #: the CPU reference stays float64.
+    precision: str = "fp64"
     water: WaterConfig = field(default_factory=WaterConfig)
     beam: BeamConfig = field(default_factory=BeamConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
@@ -217,18 +478,38 @@ class RaycastConfig:
     specular: SpecularConfig = field(default_factory=SpecularConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     diffraction: DiffractionConfig = field(default_factory=DiffractionConfig)
+    correction: CorrectionConfig = field(default_factory=CorrectionConfig)
+    floor: FloorConfig = field(default_factory=FloorConfig)
+    near_range: NearRangeConfig = field(default_factory=NearRangeConfig)
+    labels: LabelsConfig = field(default_factory=LabelsConfig)
+    objects: ObjectsConfig = field(default_factory=ObjectsConfig)
+    #: The scatterer lattice (speckle realisation) follows the RUN's noise
+    #: seed instead of the world seed alone (review of 2026-11-11): the node
+    #: sets ``seed`` from its ``seed`` parameter before building the
+    #: renderer, so two runs of one world draw two speckle fields (dataset
+    #: diversity) and ``seed:=<noise_seed>`` replays one exactly. Off
+    #: (default): ``seed`` as written, every run of a world alike.
+    seed_per_run: bool = False
+
+    def __post_init__(self) -> None:
+        if self.precision not in ("fp64", "fp32"):
+            raise ValueError(f"raycast.precision {self.precision!r}: 'fp64' or 'fp32'")
+        if not 105.0 <= float(self.system_gain_db) <= 165.0:
+            raise ValueError(f"raycast.system_gain_db {self.system_gain_db}: [105, 165] dB")
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any] | None) -> "RaycastConfig":
         d = dict(d or {})
-        top = {"seed", "system_gain_db", "backend", "water", "beam", "sampling", "seabed",
-               "receiver", "po", "specular", "paths", "diffraction"}
+        top = {"seed", "system_gain_db", "backend", "precision", "water", "beam", "sampling",
+               "seabed", "receiver", "po", "specular", "paths", "diffraction", "correction",
+               "floor", "near_range", "labels", "objects", "seed_per_run"}
         bad = set(d) - top
         if bad:
             raise KeyError(f"Unknown raycast keys: {sorted(bad)}")
         return cls(seed=int(d.get("seed", 0)),
                    system_gain_db=float(d.get("system_gain_db", 126.6)),
                    backend=str(d.get("backend", "cpu")),
+                   precision=str(d.get("precision", "fp64")),
                    water=_strict(WaterConfig, d.get("water"), "water"),
                    beam=_strict(BeamConfig, d.get("beam"), "beam"),
                    sampling=_strict(SamplingConfig, d.get("sampling"),
@@ -241,17 +522,26 @@ class RaycastConfig:
                                     "specular"),
                    paths=_strict(PathsConfig, d.get("paths"), "paths"),
                    diffraction=_strict(DiffractionConfig, d.get("diffraction"),
-                                       "diffraction"))
+                                       "diffraction"),
+                   correction=_strict(CorrectionConfig, d.get("correction"),
+                                      "correction"),
+                   floor=_strict(FloorConfig, d.get("floor"), "floor"),
+                   near_range=_strict(NearRangeConfig, d.get("near_range"), "near_range"),
+                   labels=_strict(LabelsConfig, d.get("labels"), "labels"),
+                   objects=_strict(ObjectsConfig, d.get("objects"), "objects"),
+                   seed_per_run=bool(d.get("seed_per_run", False)))
 
 
-def shared_stage_model(base, system_gain_db: float):
+def shared_stage_model(base, system_gain_db: float, reverberation_db: float = 0.0):
     """The ``SonarModelConfig`` the shared noise / encoder stages use with
     this sensor: ``calibration_db_offset`` = the ray-cast system gain, and
     the linear level constants that encode MEASURED reported levels
     (``noise_floor``, ``watercolumn_noise``; geometric units, paired with
     the geometric offset) rescaled by ``10^((offset_geo - gain)/10)`` so
     their reported dB are unchanged. ``reverberation_db`` 0: the shadow
-    floor comes from physics (raycast_design §3). Found 2026-11-03 (NC #4
+    floor comes from physics (raycast_design §3) unless ``reverberation_db``
+    is given (``raycast.floor``, the noise stage only: the node never hands
+    it to the renderer's model). Found 2026-11-03 (NC #4
     step): without the rescaling the water column read 45 dB too loud."""
     import dataclasses
     scale = 10.0 ** ((float(base.calibration_db_offset) - float(system_gain_db))
@@ -260,7 +550,22 @@ def shared_stage_model(base, system_gain_db: float):
         base, calibration_db_offset=float(system_gain_db),
         noise_floor=float(base.noise_floor) * scale,
         watercolumn_noise=float(base.watercolumn_noise) * scale,
-        reverberation_db=0.0)
+        reverberation_db=float(reverberation_db))
+
+
+def noise_stage_model(base, rc: "RaycastConfig", acq, max_ping_rate_hz: float = 0.0):
+    """The shared NOISE stage's model for this sensor at ``acq``: the shared
+    stage (:func:`shared_stage_model`) plus what only the noise stage reads
+    -- the shadow floor (``rc.floor``) and, when ``rc.near_range`` applies
+    to ``acq``, its measured water column. The renderer keeps
+    :func:`shared_stage`'s model, so neither can move its physics."""
+    import dataclasses
+    m = shared_stage_model(base, float(rc.system_gain_db),
+                           reverberation_db=float(rc.floor.reverberation_db))
+    if rc.near_range.applies(acq, max_ping_rate_hz):
+        m = dataclasses.replace(m, watercolumn_noise=10.0 ** (
+            (float(rc.near_range.watercolumn_db) - float(rc.system_gain_db)) / 10.0))
+    return m
 
 
 def shared_stage(model, rc: "RaycastConfig"):
@@ -360,18 +665,25 @@ PROVISIONAL_RAYCAST = {
 }
 
 
-def write_default_profile(path, base_yaml=None) -> None:
-    """Generate ``config/raycast_default_sonar.yaml``: ``acquisition`` and
-    ``model`` copied from the geometric comparison profile (so the shared
-    stage never drifts from it), ``renderer: raycast`` and
-    :data:`PROVISIONAL_RAYCAST`. Regenerate, never hand-edit."""
+def default_profile_doc(base_yaml=None) -> dict:
+    """The document of ``config/raycast_default_sonar.yaml``:
+    ``acquisition`` and ``model`` copied from the geometric comparison
+    profile (so the shared stage never drifts from it), ``renderer:
+    raycast`` and :data:`PROVISIONAL_RAYCAST`."""
     import yaml
     from ..config import find_default_sonar_yaml
-    base = yaml.safe_load(open(base_yaml or find_default_sonar_yaml(),
-                               encoding="utf-8"))
+    with open(base_yaml or find_default_sonar_yaml(), encoding="utf-8") as f:
+        base = yaml.safe_load(f)
     RaycastConfig.from_dict(PROVISIONAL_RAYCAST)
-    doc = {"renderer": "raycast", "acquisition": base["acquisition"],
-           "model": base["model"], "raycast": PROVISIONAL_RAYCAST}
+    return {"renderer": "raycast", "acquisition": base["acquisition"],
+            "model": base["model"], "raycast": _deepcopy(PROVISIONAL_RAYCAST)}
+
+
+def write_default_profile(path, base_yaml=None) -> None:
+    """Generate ``config/raycast_default_sonar.yaml``
+    (:func:`default_profile_doc`). Regenerate, never hand-edit."""
+    import yaml
+    doc = default_profile_doc(base_yaml)
     head = ("# GENERATED by blueboat_sss_sim.sonar.raycast.config."
             "write_default_profile -- regenerate, never hand-edit.\n"
             "# The ray-cast sensor's profile (renderer: raycast). acquisition"
@@ -385,3 +697,220 @@ def write_default_profile(path, base_yaml=None) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(head)
         yaml.safe_dump(doc, f, sort_keys=False)
+
+
+#: Live-run variants of the default ray-cast profile (owner, 2026-11-09):
+#: each switches off only parts that cost GPU time without changing how the
+#: image looks (measured, ``~/ros2_ws/sim_runs/raycast/live_opt/``: the
+#: 2026-11-09 harbour session's poses, the whole Shiraishijima lawnmower
+#: route, a 122-ping waterfall past the pier, and a pass over a tyre, a box
+#: and a pipe on flat sand at 5 m). The full model stays
+#: ``raycast_default_sonar.yaml`` (the pool's multipath comb needs orders
+#: >= 2; the fit and validation used it). The top-level ``variant:`` block
+#: is what MCS lists in its Sonar model menu; ``SonarConfig.from_yaml`` and
+#: the node ignore it.
+#: The harbour site calibration of this sensor (2026-11-07, "hybrid v2",
+#: gates amendments 6b-6d; ``docs/engineering/raycast_assessment.md``): the
+#: ray-cast deltas of ``~/calib/raycast/correction/
+#: raycast_harbour_hybrid_v2_sonar.yaml`` (sha256 22c9c500...) over the
+#: default profile -- gain and TVG refitted on the harbour calibration
+#: session (PM-cal), SAX99 sand spectrum, the large-angle vertical floor
+#: f_v 0.217, the beam height and a calm-harbour surface. On the validation
+#: sessions it puts the far-field seabed at real - sim = -0.3..+1.6 dB at
+#: the sim's acquisition (toOptimize, 18 m / 1200 / 44.3 us), where the
+#: provisional core reads +11 dB. Harbour only: the core was never fitted
+#: on the beach or the pool.
+HARBOUR_V2_CORE: dict[str, Any] = {
+    "system_gain_db": 126.91092351562708,
+    "receiver": {"tvg_k": 3.761531248098334},
+    "seabed": {"sediments": {"sand": {"w2": 4.33e-05, "gamma2": 3.04}}},
+    "beam": {"vertical_floor_amp": 0.217, "height_deg": 47.11664876755567},
+    "paths": {"surface_rms_m": 0.001},
+}
+#: Its EMPIRICAL near-nadir table (``correction.py``), a byte-identical copy
+#: of ``~/calib/raycast/correction/blueboat_raycast_correction_2.yaml``
+#: (sha256 9557a8a1...): fitted on PM-cal, the first-bottom-return crest
+#: the core leaves 5-10 dB cold; status "failed" on its strict gates (P2:
+#: 9-10 m still 3.3-3.7 dB cold; P3; S6) while improving every altitude
+#: band (|M1| 7-12 -> <= 3.7 dB). Resolved against the package config dir.
+HARBOUR_V2_CORRECTION = "raycast_correction_harbour_v2.yaml"
+#: The device's near range at the sim's acquisition (1200 bins, 44.3 us,
+#: gain 4), MEASURED on harbour_A-2026-07-22-AM (toOptimize, 8372 pings
+#: at 18-27 m; the only 1200-bin / 44.3 us harbour data outside the
+#: hold-out, so that session no longer validates this table):
+#: ``~/ros2_ws/sim_runs/raycast/harbour_patch/near_range/`` (real profile,
+#: generator ``make_table.py``). The ringing solves E[10 log10(R G + W E)]
+#: = the real mean-of-dB at every range (G Gamma(25), the coherent channel;
+#: E Exp(1), the water column), reproducing it to 0.01 dB; the processor's
+#: rule then finds the real ringing end (0.14 m) and noise estimate
+#: (28.5 dB) instead of 0.47 m / 41 dB.
+HARBOUR_NEAR_RANGE: dict[str, Any] = {
+    "ringing_db": [[0.0, 52.15], [0.025, 53.76], [0.05, 55.33], [0.075, 50.91],
+                   [0.1, 49.49], [0.125, 48.34], [0.15, 36.7], [0.175, 30.77],
+                   [0.2, 29.42], [0.25, 27.5], [0.3, 27.79], [0.4, 28.23],
+                   [0.5, 27.81], [0.6, 23.53], [0.75, 19.96], [1.0, 17.37],
+                   [1.25, 14.81], [1.5, 11.75], [2.0, 4.46]],
+    "watercolumn_db": 17.04,
+    "num_results": 1200,
+    "pulse_us": [44.3, 50.0],
+}
+HARBOUR_V2_CORRECTION_SHA256 = "9557a8a123635e0c090b136bc7642d8f91b20073c8ca9ee769b6f96af3e2d509"
+
+
+def _deep_merge(*parts: Mapping[str, Any]) -> dict:
+    out: dict = {}
+    for part in parts:
+        for k, v in part.items():
+            if isinstance(v, Mapping) and isinstance(out.get(k), Mapping):
+                out[k] = _deep_merge(out[k], v)
+            else:
+                out[k] = _deepcopy(dict(v)) if isinstance(v, Mapping) else v
+    return out
+
+
+def _harbour(engine: Mapping[str, Any]) -> dict:
+    """``engine`` deltas + the harbour patch (2026-11-10): the v2 core, its
+    near-nadir table held down to 4.5 m (fading to 0 at 3.5 m) and accepted
+    under the performance keys, the NC #15 shadow floor (18 dB) and the
+    measured near range of the 1200-bin / 44.3 us mode. Since the review of
+    2026-11-11 also: the floor added in the field domain (the speckle's dark
+    tail stays exponential), ground-truth contacts (``labels.py``), every
+    object as its own mesh on the terrain (``objects.mode: solid``), and the
+    speckle realisation of each run from its own noise seed."""
+    return _deep_merge(engine, HARBOUR_V2_CORE, {
+        "correction": {"enabled": True, "artifact": HARBOUR_V2_CORRECTION,
+                       "altitude_hold_m": [4.5, 11.3],      # taper: the 1.0 m default
+                       "onset_fade_m": 0.8,
+                       "accept_engine_knobs": True},
+        "floor": {"reverberation_db": 18.0, "addition": "field"},
+        "near_range": _deepcopy(HARBOUR_NEAR_RANGE),
+        "labels": {"enabled": True},
+        "objects": {"mode": "solid"},
+        "seed_per_run": True})
+
+
+_LIVE_ENGINE = {"paths": {"max_order": 1}}
+_FAST_ENGINE = {"paths": {"max_order": 1, "reselect_every": 10, "reselect_move_m": 0.3},
+                "sampling": {"cull_unreachable": True, "band_cull": True,
+                             "scatterer_spacing_m": 0.010},
+                "diffraction": {"method": "edge"},
+                "precision": "fp32"}
+_HARBOUR_NOTE = (
+    " HARBOUR SITE CALIBRATION, provisional (2026-11-10): the harbour-fitted core "
+    "(seabed level within ~2 dB of the real harbour, was +11 dB), its empirical "
+    "first-return table, and a textured shadow floor 18 dB under the seabed "
+    "(measured at the quay). Publishes ground-truth contacts (labelled datasets), "
+    "renders every object as its own 3-D mesh instead of a bump of the world raster, "
+    "and each run draws its own speckle from its noise seed (2026-11-11). Harbour "
+    "worlds only; never the sim-to-real comparison profile.")
+
+RAYCAST_VARIANTS: dict[str, dict] = {
+    "raycast_live_sonar.yaml": {
+        "label": "Ray-cast \u2014 live (first-order multipath)",
+        "order": 10,
+        "description": (
+            "The full ray-cast model with first-order multipath only "
+            "(paths.max_order 1). Bit-identical to 'Ray-cast' on the harbour "
+            "lawnmower route (176/176 pings) and over objects (tyre, box, pipe); "
+            "caps the 16 s pier-corner ping at 7.4 s. Not for the pool, whose "
+            "multipath comb needs higher orders."),
+        "raycast": _deepcopy(_LIVE_ENGINE),
+    },
+    # The fast variant (owner, 2026-11-10; docs/engineering/
+    # raycast_fast_optimize_plan.md): live + the engine paths of ENGINE_KNOBS.
+    # Its look against 'Ray-cast' is the owner's live test, not a claim here.
+    "raycast_fast_sonar.yaml": {
+        "label": "Ray-cast \u2014 fast",
+        "order": 20,
+        "description": (
+            "Live (first-order multipath) + the fast engine paths: no scatterers "
+            "where no sound can reach (above the waterline, buried, the land side "
+            "of quays); the echo-path choice reused for up to 10 pings / 0.3 m / "
+            "2 deg; shadow-edge diffraction by the closed form of the nearest "
+            "straight wall edge; float32 visibility tests; scatterers every "
+            "10 mm instead of 5 mm, and only inside the beam band at their own "
+            "range. A harbour mode: not for the pool, whose multipath comb needs "
+            "higher orders."),
+        "raycast": _deepcopy(_FAST_ENGINE),
+    },
+    # The harbour patch (owner, 2026-11-10; plan "Ray-cast harbour realism
+    # patch"; .claude/raycast-live.md): the same engines with the harbour
+    # site calibration -- level, first return, shadow floor.
+    "raycast_harbour_live_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, live",
+        "order": 30,
+        "description": "Live (first-order multipath)." + _HARBOUR_NOTE,
+        "raycast": _harbour(_LIVE_ENGINE),
+        "header": "harbour site calibration (HARBOUR_V2_CORE + its correction + floor)",
+    },
+    "raycast_harbour_fast_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast",
+        "order": 40,
+        "description": "Fast (the fast engine paths)." + _HARBOUR_NOTE,
+        "raycast": _harbour(_FAST_ENGINE),
+        "header": "harbour site calibration (HARBOUR_V2_CORE + its correction + floor)",
+    },
+}
+
+
+def flat_deltas(delta: Mapping[str, Any], pre: str = "") -> dict:
+    """A variant's ``raycast`` deltas as ``{dotted key: value}``, any depth."""
+    out = {}
+    for k, v in delta.items():
+        if isinstance(v, Mapping):
+            out.update(flat_deltas(v, f"{pre}{k}."))
+        else:
+            out[f"{pre}{k}"] = v
+    return out
+
+
+def _merged(base: Mapping[str, Any], delta: Mapping[str, Any]) -> dict:
+    out = _deepcopy(dict(base))
+    for k, v in delta.items():
+        if isinstance(v, Mapping) and isinstance(out.get(k), Mapping):
+            out[k] = _merged(out[k], v)
+        else:
+            out[k] = _deepcopy(v)
+    return out
+
+
+def variant_profile_doc(name: str, base_yaml=None) -> dict:
+    """The document of the live variant ``name`` (a key of
+    :data:`RAYCAST_VARIANTS`): the default profile with the variant's
+    ``raycast`` deltas, and its ``variant`` block (label, order,
+    description) for MCS."""
+    v = RAYCAST_VARIANTS[name]
+    doc = default_profile_doc(base_yaml)
+    rc = _merged(doc["raycast"], v["raycast"])
+    RaycastConfig.from_dict(rc)                 # raises on unknown keys
+    return {"renderer": "raycast",
+            "variant": {"label": v["label"], "order": int(v["order"]),
+                        "description": v["description"]},
+            "acquisition": doc["acquisition"], "model": doc["model"],
+            "raycast": rc}
+
+
+def write_variant_profiles(config_dir, base_yaml=None) -> list:
+    """Generate every :data:`RAYCAST_VARIANTS` profile into ``config_dir``
+    (``config/raycast_<variant>_sonar.yaml``). Regenerate, never
+    hand-edit. Returns the written paths."""
+    import yaml
+    from pathlib import Path
+    out = []
+    for name, v in RAYCAST_VARIANTS.items():
+        path = Path(config_dir) / name
+        deltas = ", ".join(f"{k}: {vv}" for k, vv in flat_deltas(v["raycast"]).items())
+        head = ("# GENERATED by blueboat_sss_sim.sonar.raycast.config."
+                "write_variant_profiles -- regenerate, never hand-edit.\n"
+                "# A live-run variant of config/raycast_default_sonar.yaml "
+                f"(RAYCAST_VARIANTS): raycast {deltas}.\n"
+                + (f"# {v['header']}: a provisional site calibration, never the "
+                   "sim-to-real comparison profile.\n" if v.get("header") else "")
+                + "# Everything else is the default profile. Evidence: "
+                "~/ros2_ws/sim_runs/raycast/live_opt/ and .claude/raycast-live.md.\n")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(head)
+            yaml.safe_dump(variant_profile_doc(name, base_yaml), f,
+                           sort_keys=False, allow_unicode=True)
+        out.append(path)
+    return out

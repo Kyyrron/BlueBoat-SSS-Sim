@@ -36,11 +36,26 @@ import warp as wp
 from .bvh_cpu import Hits
 
 BOX_PAD_M = 1.0e-5        # AABB padding: float32 traversal never misses a triangle
+#: The traversal's distance cutoff past a query's last accepted hit distance
+#: (``bvh_query_next``'s ``max_dist``): a node is skipped only when its float32
+#: slab entry lies beyond t_max (1 + CUT_REL) + CUT_ABS_M. The traversal ray
+#: is inside every padded box that holds an accepted hit at the hit distance
+#: (the BOX_PAD_M premise), so its exact entry is <= t_hit; the float32 entry
+#: carries ~3 roundings relative (2e-7) and the float32 ray's origin and
+#: direction differ from the float64 test's by ~1e-5 m + 6e-8 t. Hit decisions
+#: are therefore those of the full traversal; the cutoff only stops it at the
+#: segment's end instead of the scene's (2026-11-04).
+CUT_REL = 1.0e-6
+CUT_ABS_M = 1.0e-3
+_CUT_K64 = wp.constant(wp.float64(1.0 + CUT_REL))
+_CUT_A64 = wp.constant(wp.float64(CUT_ABS_M))
+_CUT_K32 = wp.constant(wp.float32(1.0 + CUT_REL))
+_CUT_A32 = wp.constant(wp.float32(CUT_ABS_M))
 _CHUNK = 4_000_000
 
 wp.config.quiet = True
 wp.init()
-wp.set_module_options({"fuse_fp": False})   # watertightness: see the docstring
+wp.set_module_options({"fuse_fp": False, "enable_backward": False})   # watertightness: see the docstring; no adjoints
 
 _INF = wp.constant(wp.float64(1.0e300))
 
@@ -95,6 +110,54 @@ def _watertight(o: wp.vec3d, d: wp.vec3d, p0: wp.vec3d, p1: wp.vec3d,
     return wp.vec3d(t, V * inv, W * inv)
 
 
+@wp.func
+def _watertight32(o: wp.vec3, d: wp.vec3, p0: wp.vec3, p1: wp.vec3, p2: wp.vec3) -> wp.vec3:
+    """The same test in float32 (watertight too: unfused arithmetic, shared
+    vertex coordinates); for sampling uses that need no reference-exact hit
+    decisions (diffraction's visibility samples). (t, u, v); t = 1e30 on a
+    miss."""
+    ax = wp.abs(d[0])
+    ay = wp.abs(d[1])
+    az = wp.abs(d[2])
+    kz = int(0)
+    if ay > ax and ay >= az:
+        kz = 1
+    elif az > ax and az > ay:
+        kz = 2
+    if ax >= ay and ax >= az:
+        kz = 0
+    kx = int((kz + 1) % 3)
+    ky = int((kz + 2) % 3)
+    if d[kz] < 0.0:
+        tmp = int(kx)
+        kx = ky
+        ky = tmp
+    dz = d[kz]
+    sx = d[kx] / dz
+    sy = d[ky] / dz
+    sz = 1.0 / dz
+    a = p0 - o
+    b = p1 - o
+    c = p2 - o
+    Ax = a[kx] - sx * a[kz]
+    Ay = a[ky] - sy * a[kz]
+    Bx = b[kx] - sx * b[kz]
+    By = b[ky] - sy * b[kz]
+    Cx = c[kx] - sx * c[kz]
+    Cy = c[ky] - sy * c[kz]
+    U = Cx * By - Cy * Bx
+    V = Ax * Cy - Ay * Cx
+    W = Bx * Ay - By * Ax
+    neg = (U < 0.0) or (V < 0.0) or (W < 0.0)
+    pos = (U > 0.0) or (V > 0.0) or (W > 0.0)
+    det = U + V + W
+    if (neg and pos) or det == 0.0:
+        return wp.vec3(1.0e30, 0.0, 0.0)
+    inv = 1.0 / det
+    t = (U * (sz * a[kz]) + V * (sz * b[kz]) + W * (sz * c[kz])) * inv
+    return wp.vec3(t, V * inv, W * inv)
+
+
 @wp.kernel
 def _closest_k(bvh: wp.uint64, V: wp.array(dtype=wp.vec3d),
                T: wp.array(dtype=wp.vec3i), orig: wp.array(dtype=wp.vec3d),
@@ -110,7 +173,9 @@ def _closest_k(bvh: wp.uint64, V: wp.array(dtype=wp.vec3d),
     best_f = int(-1)
     bu = wp.float64(0.0)
     bv = wp.float64(0.0)
-    while wp.bvh_query_next(q, idx):
+    dl = wp.length(dirs[i])                 # t is in units of dirs; traversal in metres
+    cut = wp.float32(best_t * dl * _CUT_K64 + _CUT_A64)
+    while wp.bvh_query_next(q, idx, cut):
         tri = T[idx]
         r = _watertight(orig[i], dirs[i], V[tri[0]], V[tri[1]], V[tri[2]])
         t = r[0]
@@ -120,6 +185,7 @@ def _closest_k(bvh: wp.uint64, V: wp.array(dtype=wp.vec3d),
                 best_f = idx
                 bu = r[1]
                 bv = r[2]
+                cut = wp.float32(best_t * dl * _CUT_K64 + _CUT_A64)
     out_f[i] = best_f
     out_t[i] = best_t
     out_u[i] = bu
@@ -136,7 +202,8 @@ def _occluded_k(bvh: wp.uint64, V: wp.array(dtype=wp.vec3d),
     out[i] = 0
     q = wp.bvh_query_ray(bvh, o32[i], d32[i])
     idx = int(0)
-    while wp.bvh_query_next(q, idx):
+    cut = wp.float32(tmax[i] * _CUT_K64 + _CUT_A64)   # unit dirs
+    while wp.bvh_query_next(q, idx, cut):
         tri = T[idx]
         r = _watertight(a[i], dirs[i], V[tri[0]], V[tri[1]], V[tri[2]])
         if r[0] > tmin and r[0] <= tmax[i]:
@@ -166,6 +233,8 @@ class WarpBVH:
         # plane (56 leak probes on a cone's base rim, G1 2026-11-04); only
         # the float32 traversal boxes use the local frame
         self._V = wp.array(v, dtype=wp.vec3d, device=device)
+        #: float32 vertices in the local frame (``_watertight32`` users)
+        self._V32 = wp.array(vl.astype(np.float32), dtype=wp.vec3, device=device)
         self._T = wp.array(self.triangles.astype(np.int32), dtype=wp.vec3i,
                            device=device)
         self._lo = wp.array(lo.astype(np.float32), dtype=wp.vec3, device=device)

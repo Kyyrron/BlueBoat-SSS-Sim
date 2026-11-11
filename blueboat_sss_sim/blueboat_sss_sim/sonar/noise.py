@@ -46,7 +46,8 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
                      texture: np.ndarray | None = None,
                      unoccluded: np.ndarray | None = None,
                      ambient: np.ndarray | None = None,
-                     speckle_fill: np.ndarray | None = None) -> np.ndarray:
+                     speckle_fill: np.ndarray | None = None,
+                     floor_addition: str = "power") -> np.ndarray:
     """Return the noisy linear power vector (does not modify inputs).
 
     Speckle statistics, per component:
@@ -76,7 +77,23 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
     coherent) by one unit-mean log-normal factor per call -- per side per
     ping, as the corpus's uncorrelated port/starboard anomalies say. Both
     draw from ``rng`` only when active, so a wall-free scene at zero jitter
-    consumes exactly the stream it always did."""
+    consumes exactly the stream it always did.
+
+    ``floor_addition`` (2026-11-11; ``raycast.floor.addition``): how the
+    reverberation floor meets the diffuse echo in a LIT bin. ``"power"``
+    (default, the behaviour of every profile before): the floor's own Exp(1)
+    intensity is added, which fills the speckle's deep nulls (the plain
+    seabed's 1st percentile rises from -20.0 to -16.7 dB re the mean with an
+    18 dB floor; the real harbour reads -20.5). ``"field"``: the floor is an
+    independent complex Gaussian FIELD added before detection, i.e. the
+    intensity gains the interference term ``2 sqrt(I_diffuse I_floor) cos(phi)``
+    with ``phi`` uniform, so a lit bin stays exponential at the summed mean
+    and a shadow (``I_diffuse = 0``) is filled exactly as before. Only bins
+    where the reverberation IS the floor change; receiver noise and the water
+    column stay power additions. ``phi`` is drawn last, so every other draw
+    is the one ``"power"`` makes."""
+    if floor_addition not in ("power", "field"):
+        raise ValueError(f"floor_addition {floor_addition!r}: 'power' or 'field'")
     out = power.astype(np.float64, copy=True)
     if cfg.speckle:
         looks = max(int(cfg.speckle_looks), 1)
@@ -90,6 +107,8 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
                 out *= rng.exponential(1.0, size=out.shape)
         else:
             out *= rng.gamma(looks, 1.0 / looks, size=out.shape)
+    # the diffuse intensity alone (the field the floor interferes with)
+    diffuse = out.copy() if floor_addition == "field" else None
     if specular is not None:
         spec = specular.astype(np.float64, copy=True)
         if cfg.speckle:
@@ -99,7 +118,10 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
     sigma_db = float(cfg.ping_level_jitter_db)
     if sigma_db > 0.0:
         s = sigma_db * np.log(10.0) / 10.0
-        out *= float(np.exp(s * rng.standard_normal() - 0.5 * s * s))
+        jitter = float(np.exp(s * rng.standard_normal() - 0.5 * s * s))
+        out *= jitter
+        if diffuse is not None:
+            diffuse *= jitter
     # Reverberation floor: a shadow is dark, not empty. What the receiver
     # hears where the main lobe is blocked is the same seabed at the same
     # range through the beam's sidelobes, plus the water volume -- so the
@@ -124,14 +146,20 @@ def apply_ping_noise(power: np.ndarray, watercolumn_mask: np.ndarray,
         # taking the max of the two can only lighten a shadow.
         amb = np.asarray(ambient, dtype=np.float64)
         ref = amb if ref is None else np.maximum(ref, amb)
+    cross = None
     if ref is not None and cfg.reverberation_db > 0.0:
         rev = 10.0 ** (-cfg.reverberation_db / 10.0) * ref
-        floor = np.maximum(floor,
-                           rev * rng.exponential(1.0, size=out.shape))
+        rev_i = rev * rng.exponential(1.0, size=out.shape)
+        if diffuse is not None:
+            # where the reverberation is the floor, its field meets the echo's
+            cross = np.where(rev_i > floor, np.sqrt(diffuse * rev_i), 0.0)
+        floor = np.maximum(floor, rev_i)
     out += floor
     if watercolumn_mask.any():
         out[watercolumn_mask] += cfg.watercolumn_noise * \
             rng.exponential(1.0, size=int(watercolumn_mask.sum()))
+    if cross is not None:
+        out += 2.0 * cross * np.cos(rng.uniform(0.0, 2.0 * np.pi, size=out.shape))
     return out * gain
 
 

@@ -25,6 +25,7 @@ renderer's FLU frame (MAVLink FRD attitude: ``roll = roll, pitch = -pitch``,
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 from dataclasses import dataclass
 from typing import Sequence
@@ -55,7 +56,7 @@ def _acq(cfg, p: ReplayPose):
 
 
 def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
-                seed: int = 0, world_dir=None) -> dict:
+                seed: int = 0, world_dir=None, cache: dict | None = None) -> dict:
     """Render ``poses`` in ``scene`` with the sonar config ``cfg``.
 
     Returns ``rows`` (n, N) reported dB (float32; NaN-padded if the bin count
@@ -70,6 +71,12 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
     every renderer of the call; ``world_dir`` (that sensor only) gives its
     mesh the world's terrain-only raster. Otherwise the geometric renderer,
     unchanged.
+
+    ``cache`` (optional, one dict per scene and config, reused across calls)
+    keeps the renderers and a copy of every rendered ping keyed by its
+    acquisition and pose. A render is deterministic per pose; the noise is
+    drawn per call, after it, in the same order, so the rows equal those of
+    an uncached call. Without it nothing changes.
     """
     from ..analysis.calibration import fbr_bin, scale_to_db
     from ..core.types import Pose3D, Side
@@ -80,12 +87,19 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
     if mode not in ("noisy", "expected"):
         raise ValueError(f"mode {mode!r} (noisy | expected)")
     model = cfg.model
+    noise_model = None                       # the noise stage's, when it differs
+    floor_addition = "power"                 # raycast.floor.addition, as in the node
     rc = getattr(cfg, "raycast", None)       # None: the geometric renderer
     if rc is not None:
         from ..sonar.raycast.config import RaycastConfig, shared_stage_model
         from ..sonar.raycast.renderer import RaycastRenderer
         rcfg = RaycastConfig.from_dict(rc)
+        floor_addition = str(rcfg.floor.addition)
         model = shared_stage_model(cfg.model, rcfg.system_gain_db)
+        from ..sonar.raycast.config import noise_stage_model
+        # raycast.floor / near_range: the noise stage only, as in the node
+        noise_model = (lambda acq_: noise_stage_model(cfg.model, rcfg, acq_,
+                                                      float(cfg.model.max_ping_rate_hz)))
         shared: dict = {}
 
         def make(acq):
@@ -96,8 +110,24 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
     else:
         def make(acq):
             return GeometricRenderer(scene, acq, model)
+    if rc is not None:
+        # the ray-cast sensor on the GPU: a render waits and retries when the
+        # device is momentarily full (another GPU process), never fails a
+        # multi-hour scoring run on a transient allocation
+        from ..sonar.raycast.calib import _build_retrying
+
+        def render(r, sd, ps):
+            return _build_retrying(lambda: r.render(sd, ps, 0.0).ping, r.release_device)
+    else:
+        def render(r, sd, ps):
+            return r.render(sd, ps, 0.0).ping
     rng = np.random.default_rng(seed)
-    cache: dict = {}
+    if cache is None:
+        rcache: dict = {}
+        pcache = None
+    else:
+        rcache = cache.setdefault("renderers", {})
+        pcache = cache.setdefault("pings", {})
     nmax = max((p.num_results for p in poses), default=0)
     rows = np.full((len(poses), nmax), np.nan, np.float32)
     fbr = np.full(len(poses), -1, int)
@@ -106,26 +136,34 @@ def render_rows(scene, cfg, poses: Sequence[ReplayPose], *, mode: str = "noisy",
     oom = 0
     for k, p in enumerate(poses):
         key = (p.side, p.range_mm, p.num_results, round(p.pulse_us, 3), p.gain)
-        if key not in cache:
+        if key not in rcache:
             acq = _acq(cfg, p)
             side = Side.PORT if p.side == "port" else Side.STARBOARD
-            cache[key] = (acq, side, make(acq),
-                          PingEncoder(side, acq, model),
-                          (np.arange(acq.num_results) + 0.5) * acq.bin_size_m)
-        acq, side, rr, enc, bins = cache[key]
+            rcache[key] = (acq, side, make(acq),
+                           PingEncoder(side, acq, model),
+                           (np.arange(acq.num_results) + 0.5) * acq.bin_size_m)
+        acq, side, rr, enc, bins = rcache[key]
         pose = Pose3D(float(p.x), float(p.y), float(p.z), float(p.roll),
                       float(p.pitch), float(p.yaw))
-        pg = rr.render(side, pose, 0.0).ping
+        if pcache is None:
+            pg = render(rr, side, pose)
+        else:
+            pk = (key, pose.x, pose.y, pose.z, pose.roll, pose.pitch, pose.yaw)
+            if pk not in pcache:
+                pcache[pk] = render(rr, side, pose)
+            pg = copy.deepcopy(pcache[pk])      # the noisy path replaces pg.power
         if pg.out_of_map_from_m is not None:
             oom += 1
         alt[k] = pg.altitude_m
         if mode == "noisy":
             pg.power = apply_ping_noise(pg.power, bins < pg.altitude_m, 1.0,
-                                        model, rng, specular=pg.specular,
+                                        noise_model(acq) if noise_model else model, rng,
+                                        specular=pg.specular,
                                         texture=pg.texture,
                                         unoccluded=pg.unoccluded,
                                         ambient=pg.ambient,
-                                        speckle_fill=pg.speckle_fill)
+                                        speckle_fill=pg.speckle_fill,
+                                        floor_addition=floor_addition)
             e = enc.encode(pg)
             db = scale_to_db(e.pwr_results, e.min_pwr_db, e.max_pwr_db)
             mx[k] = float(e.max_pwr_db)

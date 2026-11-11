@@ -131,22 +131,23 @@ class WaveEventProcess:
                 "t_remaining_s": round(t0 + dur - t, 1),
                 "envelope": round(best_env, 3)}
 
-    def elevation(self, x, y, t: float) -> np.ndarray:
+    def elevation(self, x, y, t: float, depth: float = 0.0) -> np.ndarray:
         x = np.atleast_1d(np.asarray(x, dtype=np.float64))
         out = np.zeros(x.shape)
         for t0, dur, field in self._live:
             env = self._envelope(t, t0, dur)
             if env > 0.0:
-                out += env * field.elevation(x, y, t)
+                out += env * field.elevation(x, y, t, depth)
         return out
 
-    def slope(self, x, y, t: float) -> tuple[np.ndarray, np.ndarray]:
+    def slope(self, x, y, t: float, depth: float = 0.0
+              ) -> tuple[np.ndarray, np.ndarray]:
         x = np.atleast_1d(np.asarray(x, dtype=np.float64))
         sx, sy = np.zeros(x.shape), np.zeros(x.shape)
         for t0, dur, field in self._live:
             env = self._envelope(t, t0, dur)
             if env > 0.0:
-                a, b = field.slope(x, y, t)
+                a, b = field.slope(x, y, t, depth)
                 sx += env * a
                 sy += env * b
         return sx, sy

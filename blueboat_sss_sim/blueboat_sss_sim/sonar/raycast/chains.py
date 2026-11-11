@@ -48,6 +48,12 @@ import numpy as np
 from ..waveguide import eckart_c
 
 
+#: How far a bounce point is lifted off its plane (along the plane's water-
+#: side normal) before its legs are tested by the oracle. The contributor's own
+#: end is lifted by ``SamplingConfig.surface_offset_m`` instead.
+BOUNCE_OFFSET_M = 1e-4
+
+
 def _unit(v: np.ndarray) -> np.ndarray:
     return v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-300)
 
@@ -222,7 +228,7 @@ def _image_through(A: np.ndarray, planes: list) -> np.ndarray:
 
 
 def build(P: np.ndarray, X: np.ndarray, seq: list, oracle=None,
-          lam: float = 3.4e-3, eps: float = 1e-6, offset: float = 1e-4,
+          lam: float = 3.4e-3, eps: float = 1e-6, offset: float = BOUNCE_OFFSET_M,
           contributor_on: object | None = None, refine: bool = True) -> Chain:
     """The chain ``P -> seq[0] -> ... -> seq[-1] -> X`` for every X.
 
@@ -374,7 +380,7 @@ def build(P: np.ndarray, X: np.ndarray, seq: list, oracle=None,
 
 
 def check_visibility(P, X, c: Chain, oracle, eps: float = 1e-6,
-                     offset: float = 1e-4, idx: np.ndarray | None = None
+                     offset: float = BOUNCE_OFFSET_M, idx: np.ndarray | None = None
                      ) -> None:
     """Clear ``c.visible`` where any leg is blocked (the scene oracle) or
     leaves the water; only contributors ``idx`` (default: every one still
@@ -427,12 +433,15 @@ def _transmit_blocked(P, X, c: Chain, oracle, eps, offset, idx) -> None:
     c.visible[idx] = np.abs(T) > 0.0
 
 
-def sequences(boundaries: list, max_order: int, max_faces: int = 1,
-              max_object_faces: int = 0) -> list:
-    """Every boundary sequence up to ``max_order`` bounces: no boundary
-    twice in a row (planes; the sheet is not re-entrant at these scales) and
-    at most ``max_faces`` planar faces per chain. Ordered by length."""
-    out = [[]]
+def sequences_by_order(boundaries: list, max_order: int, max_faces: int = 1,
+                       max_object_faces: int = 0):
+    """The boundary sequences of each order 1 .. ``max_order`` in turn (a
+    generator: an order is enumerated only when the caller asks for it --
+    the selection stops at the first order with nothing kept, and with the
+    other objects' faces the full list is combinatorial): no boundary twice
+    in a row (planes; the sheet is not re-entrant at these scales), at most
+    ``max_faces`` wall faces and ``max_object_faces`` object faces per
+    chain."""
     frontier = [[]]
     for _ in range(max_order):
         new = []
@@ -445,6 +454,17 @@ def sequences(boundaries: list, max_order: int, max_faces: int = 1,
                 if b.kind == "O" and sum(x.kind == "O" for x in s) >= max_object_faces:
                     continue
                 new.append(s + [b])
-        out += new
+        if not new:
+            return
+        yield new
         frontier = new
+
+
+def sequences(boundaries: list, max_order: int, max_faces: int = 1,
+              max_object_faces: int = 0) -> list:
+    """Every boundary sequence up to ``max_order`` bounces, ordered by
+    length, the empty (direct) one first (:func:`sequences_by_order`)."""
+    out = [[]]
+    for level in sequences_by_order(boundaries, max_order, max_faces, max_object_faces):
+        out += level
     return out

@@ -32,6 +32,15 @@ scatter if a path reaches it -- a deliberate, physical difference from the
 geometric renderer's "above the transducer" sampling rule, recorded in
 ``raycast_phase1.md``.
 
+**objects.mode solid** (2026-11-11, ``raycast.objects``; ``object_mesh.py``):
+the sheet is the TERRAIN alone (the world folder's ``depth.npz``) and every
+object is its own mesh on it, the parts ``worldgen.compounds`` gives it, each
+with its material: ``KIND_SMOOTH_OBJECT`` for a part that also mirrors
+(Kirchhoff patches), ``KIND_SOLID`` otherwise; both carry diffuse scatterers.
+A wall's material is its own, tagged ``<material>#wall`` (its roughness is
+the wall's, never the material table's). The description above is ``raster``,
+the default.
+
 ROS-free, Qt-free.
 """
 
@@ -56,6 +65,10 @@ KIND_ROUGH_OBJECT = 1
 KIND_SMOOTH_OBJECT = 2
 KIND_WALL = 3
 KIND_APRON = 4
+#: A ROUGH object's own mesh (``raycast.objects.mode: solid``, 2026-11-11):
+#: its triangles carry diffuse scatterers under the material law. Not a
+#: floor (``multipath``: a floor bounce to it is a real path) and not a wall.
+KIND_SOLID = 5
 #: What the oracle reports for the analytic sea surface.
 TRI_SURFACE = -2
 
@@ -80,8 +93,13 @@ class TriangleScene:
     dry: np.ndarray                 # (T,) bool, silent land
     surface_z: float = 0.0
     grid_extent: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
-    #: Per smooth object id: (R, t) of its placement (object frame -> world).
-    placements: dict = field(default_factory=dict)
+    #: objects.mode solid: per object id, its placed parts
+    #: (``object_mesh.PartSurface``), in the order they were meshed.
+    parts: dict = field(default_factory=dict)
+    #: How the objects were meshed: "raster" (rough objects are the bumps of
+    #: the sheet) or "solid" (the sheet is the terrain, every object its own
+    #: mesh; ``object_mesh.py``). The mode in force, after any fallback.
+    objects_mode: str = "raster"
 
     @property
     def n_triangles(self) -> int:
@@ -209,6 +227,10 @@ def solid_mesh(sol: Solid, tol: float = CHORD_TOL_M
                  + _band(n, 3 * n, n)                 # top ring
                  + _band(0, 2 * n, n, flip=True))     # bottom ring
         return v, np.array(faces, dtype=np.int64)
+    if k == "ellipsoid":                 # the unit sphere, scaled: a lump's
+        s = np.array([sol.a, sol.b, sol.c])   # outline, 0.5 % of its size
+        v, f = solid_mesh(Solid("capsule", 1.0, 2.0), max(tol / float(s.max()), 5e-3))
+        return v * s, f
     raise ValueError(f"no mesh for solid kind {k!r}")
 
 
@@ -233,6 +255,8 @@ def solid_volume(sol: Solid) -> float:
         return np.pi * sol.a ** 2 * sol.b / 3.0
     if k == "annulus":
         return np.pi * (sol.a ** 2 - sol.b ** 2) * sol.c
+    if k == "ellipsoid":
+        return 4.0 / 3.0 * np.pi * sol.a * sol.b * sol.c
     raise ValueError(f"no volume for solid kind {k!r}")
 
 
@@ -420,10 +444,32 @@ def _wall_box(w: Wall, z_floor: float) -> tuple[np.ndarray, np.ndarray]:
 def build_scene_mesh(scene, world_dir: str | Path | None = None,
                      apron_m: float = 60.0,
                      chord_tol_m: float = CHORD_TOL_M,
-                     terrain: np.ndarray | None = None) -> TriangleScene:
+                     terrain: np.ndarray | None = None,
+                     objects_mode: str = "raster", lib=None,
+                     frequency_hz: float = 450_000.0) -> TriangleScene:
     """Derive the triangle scene from ``scene`` (and the same world folder's
     ``depth.npz``, used only to check the stamping and to know terrain from
-    objects). Nothing is written anywhere."""
+    objects). Nothing is written anywhere.
+
+    ``objects_mode`` (``raycast.objects.mode``): ``"raster"`` -- rough
+    objects are the bumps of the sheet, as always; ``"solid"`` -- the sheet
+    is the terrain alone and every object is its own mesh
+    (:func:`_build_solid`, with the world's ``MaterialLibrary`` ``lib``).
+    ``"solid"`` needs the terrain (``depth.npz``); a world without one is
+    built ``"raster"``, said once."""
+    if objects_mode not in ("raster", "solid"):
+        raise ValueError(f"objects_mode {objects_mode!r} (raster | solid)")
+    if terrain is None:
+        terrain = load_terrain(world_dir, scene)
+    if objects_mode == "solid":
+        if terrain is not None:
+            return _build_solid(scene, np.asarray(terrain, dtype=np.float64),
+                                apron_m, lib, frequency_hz)
+        if getattr(scene, "objects", None):
+            _log.warning(
+                "ray-cast objects.mode 'solid' needs the terrain before objects "
+                "(depth.npz), which %s does not have: its objects stay the bumps "
+                "of the height raster ('raster')", world_dir or "this scene")
     g = scene.grid
     zs = seabed_height(scene)
     names = list(scene.material_names)
@@ -433,8 +479,6 @@ def build_scene_mesh(scene, world_dir: str | Path | None = None,
             names.append(name)
         return names.index(name)
 
-    if terrain is None:
-        terrain = load_terrain(world_dir, scene)
     owner, _ = owner_raster(scene, terrain)
     by_id = {int(o.object_id): o for o in scene.objects}
 
@@ -475,7 +519,6 @@ def build_scene_mesh(scene, world_dir: str | Path | None = None,
     add(av, at, KIND_APRON, -1, -1, mat_index("outside"), False)
 
     # --- smooth solids -----------------------------------------------------
-    placements = {}
     seabed_fn = None
     if any(is_facet_object(o) for o in scene.objects):
         from ...core.geometry import bilinear_sample
@@ -490,7 +533,6 @@ def build_scene_mesh(scene, world_dir: str | Path | None = None,
             continue
         sv, sf = solid_mesh(sol, chord_tol_m)
         R, tr = facet_transform(o, sol, seabed_fn)
-        placements[int(o.object_id)] = (R, tr)
         add(sv @ R.T + tr, sf, KIND_SMOOTH_OBJECT, int(o.object_id), -1,
             mat_index(o.material), False)
 
@@ -498,7 +540,7 @@ def build_scene_mesh(scene, world_dir: str | Path | None = None,
     z_floor = float(zs.min()) - 0.5
     for wi, w in enumerate(getattr(scene, "walls", None) or []):
         wv, wt = _wall_box(w, z_floor)
-        add(wv, wt, KIND_WALL, -1, wi, mat_index("concrete"), False)
+        add(wv, wt, KIND_WALL, -1, wi, mat_index(w.material), False)
 
     xmin, ymin, xmax, ymax = g.extent
     return TriangleScene(
@@ -506,7 +548,75 @@ def build_scene_mesh(scene, world_dir: str | Path | None = None,
         kind=np.concatenate(kind), object_id=np.concatenate(oid),
         wall_index=np.concatenate(widx), material=np.concatenate(mat),
         material_names=names, dry=np.concatenate(dry),
-        grid_extent=(xmin, ymin, xmax, ymax), placements=placements)
+        grid_extent=(xmin, ymin, xmax, ymax))
+
+
+def _build_solid(scene, terrain: np.ndarray, apron_m: float, lib,
+                 frequency_hz: float) -> TriangleScene:
+    """The triangle scene of ``objects.mode: solid``: the terrain sheet
+    (seabed materials only), the apron, every object as the meshes of its
+    parts (``object_mesh.object_parts``), the walls. The sheet stays first
+    (``SheetSampler`` / ``SheetSpecular`` read it by vertex index)."""
+    from ...core.geometry import bilinear_sample
+    from ...worldgen.materials import MaterialLibrary
+    from .object_mesh import object_parts, part_mesh
+    lib = lib if lib is not None else MaterialLibrary()
+    g = scene.grid
+    if terrain.shape != (g.ny, g.nx):
+        raise ValueError("terrain raster does not match the scene grid")
+    zs = terrain
+    names = list(scene.material_names)
+
+    def mat_index(name: str) -> int:
+        if name not in names:
+            names.append(name)
+        return names.index(name)
+
+    v_list, t_list, kind, oid, widx, mat, dry = [], [], [], [], [], [], []
+    nv = 0
+
+    def add(v, t, k, o, w, m, d):
+        nonlocal nv
+        v_list.append(v)
+        t_list.append(t + nv)
+        nv += v.shape[0]
+        n = t.shape[0]
+        kind.append(np.full(n, k, dtype=np.uint8))
+        oid.append(np.full(n, o, dtype=np.int64))
+        widx.append(np.full(n, w, dtype=np.int64))
+        mat.append(np.broadcast_to(np.asarray(m, dtype=np.int64), (n,)).copy())
+        dry.append(np.broadcast_to(np.asarray(d, dtype=bool), (n,)).copy())
+
+    v, t, cell = _sheet(zs, g)
+    seabed_mat = np.asarray(scene.material_id, dtype=np.int64)[cell[:, 0], cell[:, 1]]
+    add(v, t, KIND_SEABED, -1, -1, seabed_mat, (v[t][:, :, 2] >= 0.0).all(axis=1))
+    av, at = _apron(zs, g, getattr(scene, "outside", "fill"), apron_m)
+    add(av, at, KIND_APRON, -1, -1, mat_index("outside"), False)
+
+    def seabed_fn(x, y, _z=zs, _g=g):
+        return bilinear_sample(_z, _g, x, y, fill=float(_z.min()))
+
+    parts = {}
+    for o in getattr(scene, "objects", None) or []:
+        surfaces = object_parts(o, seabed_fn, lib, frequency_hz)
+        if surfaces:
+            parts[int(o.object_id)] = surfaces
+        for sf in surfaces:
+            add(*part_mesh(sf), KIND_SMOOTH_OBJECT if sf.coherent else KIND_SOLID,
+                int(o.object_id), -1, mat_index(sf.material), False)
+
+    z_floor = float(zs.min()) - 0.5
+    for wi, w in enumerate(getattr(scene, "walls", None) or []):
+        wv, wt = _wall_box(w, z_floor)
+        add(wv, wt, KIND_WALL, -1, wi, mat_index(f"{w.material}#wall"), False)
+
+    xmin, ymin, xmax, ymax = g.extent
+    return TriangleScene(
+        vertices=np.vstack(v_list), triangles=np.vstack(t_list),
+        kind=np.concatenate(kind), object_id=np.concatenate(oid),
+        wall_index=np.concatenate(widx), material=np.concatenate(mat),
+        material_names=names, dry=np.concatenate(dry),
+        grid_extent=(xmin, ymin, xmax, ymax), parts=parts, objects_mode="solid")
 
 
 # ================================================================ oracle

@@ -2315,6 +2315,53 @@ def main() -> None:
           and "false positives per hectare" in met.blocked_metrics,
           f"{len(met.blocked_metrics)} rows deferred to the detector (D7)")
 
+    # Picture comparison (analysis/picture_compare.py, 2026-11-10): a
+    # synthetic GCS tile with a known feature -- a +10 dB highlight at 10 m
+    # slant on port, a 30 dB-deep shadow behind it -- is located from its
+    # world point, cropped near -> far and measured back.
+    from blueboat_sss_sim.analysis import picture_compare as _pc  # noqa: E402
+    from PIL import Image as _Img4e
+    _s4e = OUT / "picture_compare_session"
+    (_s4e / "seabed_images" / "metadata").mkdir(parents=True, exist_ok=True)
+    _p4e, _W4e, _H4e = 0.02, 2400, 256
+    _k4e = np.arange(_W4e // 2)
+    _sl4e = (_k4e + 0.5) * _p4e
+    _r4e = np.random.default_rng(4)
+    _db4e = 40.0 + 10 * np.log10(_r4e.exponential(1.0, (_H4e, _W4e)))
+    _row4e = 40.0 + np.where((_sl4e >= 10.0) & (_sl4e < 10.3), 10.0,
+                             np.where((_sl4e >= 10.3) & (_sl4e < 13.3), -30.0, 0.0))
+    _port4e = _W4e // 2 - 1 - _k4e
+    _db4e[100:156, _port4e] = (_row4e[None, :]
+                               + 10 * np.log10(_r4e.exponential(1.0, (56, _k4e.size))))
+    _y4e = np.zeros((_H4e, _W4e))
+    _y4e[:, _port4e] = np.sqrt(np.maximum(_sl4e ** 2 - 4.0, 0.0))[None, :]
+    _y4e[:, _W4e // 2 + _k4e] = -np.sqrt(np.maximum(_sl4e ** 2 - 4.0, 0.0))[None, :]
+    _x4e = np.repeat((np.arange(_H4e)[::-1] * _p4e)[:, None], _W4e, 1)
+    np.savez(_s4e / "seabed_images" / "metadata" / "seabed_00000_world.npz",
+             world_x=_x4e.astype(np.float32), world_y=_y4e.astype(np.float32),
+             intensity_db=_db4e.astype(np.float32),
+             row_bottom_m=np.full(_H4e, 2.0, np.float32),
+             row_ping_index=np.arange(_H4e, dtype=np.int32),
+             row_gain_db=np.zeros((_H4e, 2), np.float32))
+    (_s4e / "seabed_images" / "metadata" / "seabed_00000.json").write_text(json.dumps(
+        {"image_id": 0, "cols": _W4e, "rows": _H4e, "bin_pitch_m": _p4e,
+         "rows_data": [{"x_m": float(_x4e[i, 0]), "y_m": 0.0, "range_m": 24.0}
+                       for i in range(_H4e)]}))
+    _Img4e.fromarray(np.clip((_db4e - 10.0) * 4.0, 0, 255).astype(np.uint8)).save(
+        _s4e / "seabed_images" / "seabed_00000.png")
+    _ses4e = _pc.load_session("synthetic", _s4e)
+    _fx4e = float(_x4e[128, 0])
+    _hit4e = _pc.locate(_ses4e, _fx4e, float(np.sqrt(10.0 ** 2 - 4.0)), 0.05)
+    _m4e = (_pc.feature_metrics(_pc.crop(_ses4e.tiles[0], _hit4e[0][1], _hit4e[0][2]))
+            if _hit4e else {})
+    check("picture_compare locates a world feature and measures its highlight "
+          "and shadow back (+10 dB, -30 dB)",
+          bool(_hit4e) and abs(_m4e.get("highlight_db", 0) - 10.0) < 2.5
+          and abs(_m4e.get("shadow_mean_db", 0) + 30.0) < 3.0
+          and 0.0 <= _m4e.get("shadow_at_m", -9) <= 3.3,
+          f"hit {(_hit4e or [None])[0]}, highlight {_m4e.get('highlight_db')} dB, "
+          f"shadow {_m4e.get('shadow_mean_db')} dB at +{_m4e.get('shadow_at_m')} m")
+
     # ---- 5. Visual artifact ------------------------------------------------------
     # ---- 4d. Wall multipath (mirror-source ghosts) -----------------------------
     # The enclosed-basin regime's signature artifact. Everything here is
@@ -4863,6 +4910,319 @@ def main() -> None:
           and resolve_sonar_config(wdir, "no_such_profile.yaml")
           == "no_such_profile.yaml",
           _bare)
+    import tempfile as _tf
+
+    from blueboat_sss_sim.core import gauss_legendre_cache as _glc
+    with _tf.TemporaryDirectory() as _gd:
+        _ok = True
+        for _n in (32, 97):
+            _x0, _w0 = np.polynomial.legendre.leggauss(_n)
+            _glc._MEMO.pop(_n, None)
+            _x1, _w1 = _glc.leggauss(_n, Path(_gd))          # computed + stored
+            _glc._MEMO.pop(_n, None)
+            _x2, _w2 = _glc.leggauss(_n, Path(_gd))          # read back from disk
+            _ok &= all(np.array_equal(a, b) for a, b in
+                       ((_x0, _x1), (_w0, _w1), (_x0, _x2), (_w0, _w2)))
+            _ok &= (Path(_gd) / f"n{_n}.npz").is_file()
+    check("the live node's Gauss-Legendre cache returns numpy's nodes and weights "
+          "bit for bit, from memory and from disk", bool(_ok))
+    _rc = resolve_sonar_config(wdir, "", "raycast")
+    check("sonar_renderer:=raycast resolves the packaged ray-cast profile, "
+          "an explicit profile still wins (raycast_design.md §11)",
+          _rc.endswith("config/raycast_default_sonar.yaml") and Path(_rc).is_file()
+          and resolve_sonar_config(lab_dir, "", "raycast") == _rc
+          and resolve_sonar_config(wdir, "/tmp/x.yaml", "raycast") == "/tmp/x.yaml"
+          and resolve_sonar_config(wdir, "", "geometric").endswith("default_sonar.yaml"),
+          _rc)
+    # Live-run variants (owner, 2026-11-09): generated, each the default
+    # profile with only its declared ray-cast deltas, listed by MCS.
+    import dataclasses as _dc
+    import yaml as _yaml_v
+    from blueboat_sss_sim.sonar.raycast import config as _rcc
+    _vok, _vdet = True, ""
+    _rc_def = _rcc.RaycastConfig.from_dict(
+        _yaml_v.safe_load(Path(_rc).read_text())["raycast"])
+
+    def _flat(o, pre=""):
+        out = {}
+        items = ([(f.name, getattr(o, f.name)) for f in _dc.fields(o)]
+                 if _dc.is_dataclass(o) else list(o.items()))
+        for k, v in items:
+            if _dc.is_dataclass(v) or isinstance(v, dict):
+                out.update(_flat(v, f"{pre}{k}."))
+            else:
+                out[f"{pre}{k}"] = v
+        return out
+    with _tf.TemporaryDirectory() as _vd:
+        _rcc.write_variant_profiles(_vd)
+        for _vn, _vv in _rcc.RAYCAST_VARIANTS.items():
+            _pkg = Path(_rc).parent / _vn
+            _gen = Path(_vd) / _vn
+            _doc = _yaml_v.safe_load(_pkg.read_text())
+            _cfg_v, _rc_v = _rcc.load_profile(_pkg)
+            _fv, _fd = _flat(_rc_v), _flat(_rc_def)
+            _none = object()
+            _diff = {k for k in set(_fv) | set(_fd) if _fv.get(k, _none) != _fd.get(k, _none)}
+            _want = set(_rcc.flat_deltas(_vv["raycast"]))
+            _vok &= (_pkg.read_bytes() == _gen.read_bytes()
+                     and _diff == _want
+                     and set(_doc["variant"]) == {"label", "order", "description"}
+                     and _doc["renderer"] == "raycast"
+                     and resolve_sonar_config(wdir, _vn, "raycast") == str(_pkg))
+            _vdet += f"{_vn}: {sorted(_diff)} "
+    check("ray-cast live variants: each packaged file is its generator's output, "
+          "differs from the default only in its declared deltas, carries the MCS "
+          "variant block and resolves by bare name", bool(_vok), _vdet)
+    # The fast variant's engine paths (2026-11-10, ENGINE_KNOBS): only the
+    # fast profile turns them on; the full model and live keep today's
+    # renderer, and correction artifacts keep their fingerprint.
+    from blueboat_sss_sim.sonar.config import SonarModelConfig as _SMC
+    from blueboat_sss_sim.sonar.raycast.correction import core_fingerprint as _cfp
+    _ek_ok, _ek_det = True, ""
+    for _vn in ("raycast_default_sonar.yaml", "raycast_live_sonar.yaml"):
+        _, _rc_k = _rcc.load_profile(Path(_rc).parent / _vn)
+        _bad = [k for k, d in _rcc.ENGINE_KNOBS.items() if _rcc.engine_knob(_rc_k, k) != d]
+        _ek_ok &= not _bad
+        _ek_det += f"{_vn}: {_bad or 'all default'}; "
+    _, _rc_f = _rcc.load_profile(Path(_rc).parent / "raycast_fast_sonar.yaml")
+    _on = [k for k, d in _rcc.ENGINE_KNOBS.items() if _rcc.engine_knob(_rc_f, k) != d]
+    _fp = _cfp(_rc_def, _SMC())["raycast"]
+
+    def _has(d, key):
+        *pth, leaf = key.split(".")
+        for q in pth:
+            d = d.get(q, {})
+        return leaf in d
+    _ek_ok &= (sorted(_on) == sorted(_rcc.ENGINE_KNOBS)
+               and not any(_has(_fp, k) for k in _rcc.ENGINE_KNOBS))
+    check("ray-cast engine knobs: the full and live profiles keep every fast-variant engine "
+          "path at its default (today's renderer), the fast profile turns all of them on, "
+          "and a correction fingerprint never carries one at its default",
+          bool(_ek_ok), _ek_det + f"fast on: {sorted(_on)}")
+    # Harbour patch (2026-11-10, .claude/raycast-live.md): the harbour
+    # profiles carry the v2 harbour core, its near-nadir table (edge-held
+    # 4.5-5.55 m, tapered to 0 at 3.5 m, accepted under the performance
+    # keys) and the NC #15 shadow floor fed by the ping's ambient reference.
+    # The default / live / fast profiles keep both off (bit-identical).
+    import hashlib as _hl
+    from blueboat_sss_sim.sonar.raycast import correction as _corr
+    from blueboat_sss_sim.sonar.raycast.floor import ambient_reference as _ambref
+    from blueboat_sss_sim.sonar.noise import apply_ping_noise as _apn
+    _hp_ok, _hp_det = True, ""
+    _art = _corr.resolve_artifact(_rcc.HARBOUR_V2_CORRECTION)
+    _hp_ok &= (_art.is_file() and _hl.sha256(_art.read_bytes()).hexdigest()
+               == _rcc.HARBOUR_V2_CORRECTION_SHA256)
+    for _vn in ("raycast_default_sonar.yaml", "raycast_live_sonar.yaml", "raycast_fast_sonar.yaml"):
+        _, _rc_k = _rcc.load_profile(Path(_rc).parent / _vn)
+        _hp_ok &= (not _rc_k.correction.enabled and _rc_k.floor.reverberation_db == 0.0
+                   and _rc_k.near_range.ringing_db is None)
+    _states = []
+    for _vn in ("raycast_harbour_live_sonar.yaml", "raycast_harbour_fast_sonar.yaml"):
+        _cfg_h, _rc_h = _rcc.load_profile(Path(_rc).parent / _vn)
+        _m_h = _rcc.shared_stage_model(_cfg_h.model, _rc_h.system_gain_db)
+        _c_h = _corr.for_config(_rc_h.correction)
+        _c_h.check_core(_rc_h, _m_h, accept_engine=True)            # raises on a physics change
+        _hp_ok &= _rc_h.floor.reverberation_db == 18.0
+        try:                                                         # strict: still refused
+            _c_h.check_core(_rc_h, _m_h)
+            _hp_ok = False
+        except ValueError:
+            pass
+        try:
+            _c_h.check_core(_dc.replace(_rc_h, system_gain_db=_rc_h.system_gain_db + 1.0), _m_h,
+                            accept_engine=True)
+            _hp_ok = False
+        except ValueError as _e:
+            _hp_ok &= "system_gain_db" in str(_e)
+    _acq_h = _cfg_h.acquisition
+    _r_h = _corr.bin_ranges(_acq_h)
+    _ones = np.ones_like(_r_h)
+    for _alt, _want in ((6.0, _corr.APPLIED), (4.8, _corr.APPLIED_HELD),
+                        (4.0, _corr.APPLIED_TAPER), (3.4, _corr.OFF_ALTITUDE)):
+        _o, _st = _c_h.correct(_ones, _r_h, _alt, _acq_h, nadir_material="sand",
+                               nadir_is_seabed=True)
+        _states.append(f"{_alt}:{_st}:{10 * np.log10(_o.max()):.2f}")
+        _hp_ok &= _st == _want
+    # the taper at 4.0 m (half-way down 4.5 -> 3.5 m) applies half the table, bin by bin;
+    # the profile's onset fade (2026-11-11) brings it in as sqrt(distance) over 0.8 m after
+    # the first lit bin from 0.9 altitude on, and without it the table stands from the start
+    _o40 = _c_h.correct(_ones, _r_h, 4.0, _acq_h, nadir_material="sand", nadir_is_seabed=True)[0]
+    _r040 = _r_h[int(np.argmax(_r_h >= 0.9 * 4.0))]
+    _w40 = np.sqrt(np.clip((_r_h - _r040) / 0.8, 0.0, 1.0))
+    _o40n = _dc.replace(_c_h, onset_fade_m=0.0, counts={}).correct(
+        _ones, _r_h, 4.0, _acq_h, nadir_material="sand", nadir_is_seabed=True)[0]
+    _hp_ok &= (_c_h.onset_fade_m == 0.8
+               and np.allclose(10 * np.log10(_o40), 0.5 * _c_h.db_at(_r_h, 4.0) * _w40, atol=1e-9)
+               and np.allclose(10 * np.log10(_o40n), 0.5 * _c_h.db_at(_r_h, 4.0), atol=1e-9))
+    # the artifact without a profile hold: unchanged (off below its domain)
+    _c_plain = _corr.load(_rcc.HARBOUR_V2_CORRECTION)
+    _hp_ok &= _c_plain.gate(4.8, _acq_h, nadir_material="sand", nadir_is_seabed=True) \
+        == _corr.OFF_ALTITUDE
+    # the floor is no part of a correction's physical core
+    _hp_ok &= (_cfp(_rc_def, _SMC())["sha256"] == _cfp(_dc.replace(
+        _rc_def, floor=_rcc.FloorConfig(reverberation_db=18.0)), _SMC())["sha256"])
+    # the ambient reference: a -41 dB/decade seabed with a 2 m shadow and a bright object
+    _alt_a = 6.0
+    _lvl = 60.0 - 41.0 * np.log10(np.maximum(_r_h, 1e-3))
+    _pw = np.where(_r_h > _alt_a, 10.0 ** (_lvl / 10.0), 0.0)
+    _sh = (_r_h > 12.0) & (_r_h < 14.0)
+    _pw[_sh] = 0.0
+    _pw[(_r_h > 11.0) & (_r_h < 11.4)] *= 30.0
+    _amb = _ambref(_pw, _r_h, _alt_a)
+    _aerr = float(np.max(np.abs(10.0 * np.log10(_amb[_sh]) - _lvl[_sh])))
+    _hp_ok &= (_aerr < 0.5 and bool(np.all(_amb[_r_h <= _alt_a] == 0.0))
+               and _ambref(np.zeros_like(_r_h), _r_h, _alt_a) is None)
+    # the noise stage: floor 0 -> the ambient changes nothing; 18 dB -> the
+    # shadow holds the seabed's speckle 18 dB under the ambient
+    _wc = _r_h < _alt_a
+    _n0 = _apn(_pw, _wc, 1.0, _m_h, np.random.default_rng(3))
+    _n1 = _apn(_pw, _wc, 1.0, _dc.replace(_m_h, reverberation_db=0.0), np.random.default_rng(3),
+               ambient=_amb)
+    _hp_ok &= np.array_equal(_n0, _n1)
+    _sh_db = []
+    for _sd in range(40):
+        _n18 = _apn(_pw, _wc, 1.0, _dc.replace(_m_h, reverberation_db=18.0, speckle=True),
+                    np.random.default_rng(_sd), ambient=_amb)
+        _sh_db.append(np.mean(_n18[_sh] / _amb[_sh]))
+    _floor_db = 10.0 * np.log10(np.mean(_sh_db))
+    _hp_ok &= -19.0 < _floor_db < -16.5
+    # v2 (2026-11-10, after the owner's run): the reference cannot jump
+    # behind a large shadow (a slope smoothed across pings, the level a
+    # median), and it carries the correction's factor across the shadow
+    _hp2, _hp2_det = True, ""
+    _tab = 10.0 ** (np.interp(_r_h / _alt_a, [0.85, 1.0, 1.5, 2.0], [0.0, 12.0, 6.0, 0.0]) / 10.0)
+    _law = np.where(_r_h > _alt_a, 10.0 ** (_lvl / 10.0), 0.0)
+    _st, _steps, _prev = {}, [], None
+    for _k in range(30):                       # a shadow sweeping over 30-60 % of the range
+        _ph = _law.copy()
+        _s0 = 8.0 + 0.1 * _k
+        _ph[(_r_h > _s0) & (_r_h < _s0 + 4.0 + 0.1 * _k)] = 0.0
+        _ph[(_r_h > _s0 - 1.5) & (_r_h < _s0)] *= 10.0       # the object's lit face
+        _ref = _ambref(_ph * _tab, _r_h, _alt_a, physical=_ph, state=_st)
+        _m = (_r_h > 12.0) & (_r_h < 13.0)
+        _lv = 10.0 * np.log10(np.mean(_ref[_m]))
+        if _prev is not None:
+            _steps.append(abs(_lv - _prev))
+        _prev = _lv
+    _true_db = 10.0 * np.log10(np.mean((_law * _tab)[_m]))
+    _hp2 &= max(_steps) < 0.75 and abs(_prev - _true_db) < 2.5   # the quay's floor spread: 17-25 dB
+    _rn = _ambref(_ph * _tab, _r_h, _alt_a, physical=_ph, state=_st)
+    _mm = (_r_h > 7.0) & (_r_h < 8.0) & (_ph > 0)
+    _hp2 &= np.allclose((_rn / (_law))[_mm], _tab[_mm], rtol=0.2)
+    _hp2_det += f"floor step max {max(_steps):.2f} dB, level err {_prev - _true_db:+.2f} dB; "
+    # the measured near range (1200 bins / 44.3 us): applies only there; the
+    # noise stage reproduces the real mean-of-dB profile the rule reads
+    _nr = _rc_h.near_range
+    _acq600 = _dc.replace(_acq_h, num_results=600)
+    _hp2 &= _nr.applies(_acq_h) and not _nr.applies(_acq600)
+    _hp2 &= (_cfp(_rc_def, _SMC())["sha256"] == _cfp(_dc.replace(
+        _rc_def, near_range=_rcc.NearRangeConfig(**_rcc.HARBOUR_NEAR_RANGE)), _SMC())["sha256"])
+    _nm = _rcc.noise_stage_model(_cfg_h.model, _rc_h, _acq_h)
+    _hp2 &= abs(10.0 * np.log10(_nm.watercolumn_noise) + _rc_h.system_gain_db - 17.04) < 1e-9
+    _hp2 &= _rcc.noise_stage_model(_cfg_h.model, _rc_h, _acq600).watercolumn_noise == \
+        _rcc.shared_stage_model(_cfg_h.model, _rc_h.system_gain_db).watercolumn_noise
+    _spec = 10.0 ** ((_nr.ringing_at(_r_h) - _rc_h.system_gain_db) / 10.0)
+    _wcm = np.ones_like(_r_h, dtype=bool)
+    _rows = np.array([10.0 * np.log10(_apn(np.zeros_like(_r_h), _wcm, 1.0, _nm,
+                                             np.random.default_rng(100 + _k), specular=_spec))
+                      + _rc_h.system_gain_db for _k in range(300)])
+    _mdb = _rows.mean(0)
+    for _rx, _want_db in ((0.05, 55.24), (0.3, 28.06), (1.0, 19.79), (3.0, 14.53)):
+        _i = int(np.argmin(np.abs(_r_h - _rx)))
+        _hp2 &= abs(_mdb[_i] - _want_db) < 1.5
+        _hp2_det += f"r {_rx}: {_mdb[_i]:.1f} (real {_want_db}); "
+    check("ray-cast harbour patch v2: the shadow floor's reference holds still behind a "
+          "sweeping shadow and carries the correction across it; the measured 1200-bin near "
+          "range applies only at its acquisition, is no part of a core, and its noise stage "
+          "reproduces the real near-range profile", bool(_hp2), _hp2_det)
+    check("ray-cast harbour patch: the v2 core is accepted under the fast/live engine keys "
+          "and refused on a physics change; edge-hold / taper / off statuses; the floor is "
+          "no part of a core; the ambient reference survives a shadow; floor 0 changes "
+          "nothing and 18 dB fills a shadow at the measured depth",
+          bool(_hp_ok), f"{_states}; ambient err {_aerr:.3f} dB; shadow {_floor_db:.2f} dB")
+    # Holding the simulation while a slow ping renders (core/sim_hold.py):
+    # a fake world control and a timer the test fires by hand.
+    from blueboat_sss_sim.core.sim_hold import RenderHold, resolve_hold_mode
+
+    class _FakeCtl:
+        def __init__(self, ok=True):
+            self.calls, self.ok = [], ok
+
+        def set_paused(self, p):
+            self.calls.append(p)
+            return self.ok
+
+    class _ManualTimer:
+        last = None
+
+        def __init__(self, delay, fn):
+            self.delay, self.fn, self.cancelled = delay, fn, False
+            _ManualTimer.last = self
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            self.cancelled = True
+
+    def _hold(mode, ok=True):
+        c = _FakeCtl(ok)
+        return c, RenderHold(c, mode, 0.1, timer_factory=_ManualTimer)
+    _c1, _h1 = _hold("when_needed")
+    _h1.run(lambda: 1)                                    # fast: never paused
+    _fast = _c1.calls == [] and _ManualTimer.last.cancelled \
+        and abs(_ManualTimer.last.delay - 0.09) < 1e-12 and not _h1.last_held \
+        and abs(RenderHold(_FakeCtl(), "when_needed", 0.0125).arm_delay_s - 0.0075) < 1e-12
+    _c2, _h2 = _hold("when_needed")
+    _h2.run(lambda: _ManualTimer.last.fn())              # overrun: paused, resumed
+    _slow = _c2.calls == [True, False] and _h2.last_held and _h2.holds == 1
+    _c3, _h3 = _hold("when_needed")
+    try:
+        _h3.run(lambda: (_ManualTimer.last.fn(), 1 / 0))
+    except ZeroDivisionError:
+        pass
+    _raise = _c3.calls == [True, False] and not _h3._paused
+    _c4, _h4 = _hold("always")
+    _h4.run(lambda: 1)
+    _c5, _h5 = _hold("off")
+    _h5.run(lambda: 1)
+    _c6, _h6 = _hold("always", ok=False)
+    for _ in range(4):
+        _h6.run(lambda: 1)
+
+    # Teardown: a resume that fails because Gazebo is gone stays silent; one
+    # that fails while the world is still advertised warns.
+    class _DyingCtl(_FakeCtl):
+        def __init__(self, alive):
+            super().__init__()
+            self.alive = alive
+
+        def set_paused(self, p):
+            self.calls.append(p)
+            return bool(p)                    # pause works, resume fails
+
+        def available(self):
+            return self.alive
+    _teardown = True
+    for _alive in (False, True):
+        _logs = []
+        _cd = _DyingCtl(_alive)
+        _hd = RenderHold(_cd, "always", 0.1, log=_logs.append, timer_factory=_ManualTimer)
+        _hd.run(lambda: 1)
+        _teardown &= (not _hd._paused and bool(_logs) == _alive
+                      and _cd.calls == [True, False, False])
+    check("sim hold: no pause for a fast render, pause + resume on an overrun "
+          "(timer at budget - max(5 ms, 0.1 x budget)), resume when the render raises, 'always' "
+          "around every render, 'off' never, off after 3 failed pauses, a failed "
+          "resume silent only when Gazebo is gone; auto = when_needed for the "
+          "ray-cast only",
+          _fast and _slow and _raise and _teardown and _c4.calls == [True, False]
+          and _c5.calls == [] and _h6.mode == "off" and _c6.calls == [True] * 3
+          and resolve_hold_mode("auto", "raycast") == "when_needed"
+          and resolve_hold_mode("auto", "geometric") == "off"
+          and resolve_hold_mode("always", "geometric") == "always",
+          f"fast {_fast} slow {_slow} raise {_raise} always {_c4.calls} "
+          f"off {_c5.calls} fail {_h6.mode}/{_c6.calls}")
     check("path_publisher window sized from either trajectory schema",
           abs(trajectory_total_time(str(tdir / "wakamatsu_like.yaml"))
               - (90.0 * 1.1 + 30.0)) < 1e-6
@@ -4972,11 +5332,83 @@ def main() -> None:
           "rolls to port up (Mx > 0)", t_sx[1] < -10.0 and t_sy[0] > 10.0,
           f"My {t_sx[1]:+.1f} N.m, Mx {t_sy[0]:+.1f} N.m")
     rs = hull.restoring_summary()
-    check("catamaran natural periods below the wave band (contouring hull)",
+    check("catamaran natural periods (link-frame inertia, plugin added mass)",
           0.3 < rs["t_heave_s"] < 1.0 and 0.2 < rs["t_roll_s"] < 1.0
-          and 0.3 < rs["t_pitch_s"] < 1.2,
+          and 0.6 < rs["t_pitch_s"] < 1.2,
           f"T heave {rs['t_heave_s']:.2f} s, roll {rs['t_roll_s']:.2f} s, "
           f"pitch {rs['t_pitch_s']:.2f} s, A_wp {rs['waterplane_m2']:.2f} m^2")
+    # The offline mirror's inertia is Gazebo's LINK-frame tensor
+    # (2026-11-10): blueboat.xacro writes <inertia> in an inertial frame
+    # rolled by rpy (pi/2, 0, 0), which swaps y and z -- pitch is the
+    # attribute izz (5.64), not iyy (3.92). Re-derived from Control's own
+    # file so a change there cannot silently desynchronise the mirror.
+    from blueboat_sss_sim.sea.motion import URDF_LINK_INERTIA  # noqa: E402
+    _xacro = (PKG_ROOT.parents[1] / "BlueBoat-Control" / "blueboat_description"
+              / "urdf" / "blueboat.xacro")
+    if _xacro.is_file():
+        _xt = _xacro.read_text()
+        _blk = _xt[_xt.find("base_link"):]
+        _blk = _blk[_blk.find("<inertial>"):_blk.find("</inertial>")]
+        _rpy = re.search(r'rpy\s*=\s*"([^"]*)"', _blk)
+        _att = {k: float(v) for k, v in re.findall(
+            r'\b(ixx|iyy|izz)="([-0-9.eE]+)"', _blk)}
+        _rp = (_rpy.group(1).split() if _rpy else ["0", "0", "0"])
+        _rolled = _rp[0].replace(" ", "") in ("${pi/2}", "1.5707963267948966",
+                                              "1.5708")
+        _want = ((_att["ixx"], _att["izz"], _att["iyy"]) if _rolled
+                 else (_att["ixx"], _att["iyy"], _att["izz"]))
+        check("offline mirror inertia = Gazebo's link frame (xacro's rotated "
+              "inertial: pitch = izz)",
+              np.allclose(URDF_LINK_INERTIA, _want, rtol=0, atol=1e-9),
+              f"xacro rpy {' '.join(_rp)}, attributes {_att} -> link "
+              f"{tuple(round(v, 4) for v in _want)}; mirror {URDF_LINK_INERTIA}")
+    else:
+        print(f"  SKIP: link-frame inertia vs Control's xacro ({_xacro} not "
+              "checked out)")
+
+    # Motion-spectrum estimator (2026-11-10): the real boat's motion is
+    # gated on its SPECTRUM (centroid, 0.8-2 Hz fraction), not only its
+    # std -- 'smooth' matched the corpus std at 0.65 Hz while the real
+    # boat rocks at ~1.1 Hz. One estimator reads the corpus and every
+    # simulated run (analysis.sea_validation.attitude_spectra).
+    from blueboat_sss_sim.analysis.sea_validation import (  # noqa: E402
+        CORPUS_TARGET_FILES, TARGETS_FILE, attitude_spectra,
+        svlog_attitude_spectra)
+    _rng = np.random.default_rng(5)
+    _ts = np.arange(0.0, 300.0, 0.04)
+    _fr = 1.1 + _rng.normal(0.0, 0.05, 40)
+    _sig = sum(np.cos(2 * np.pi * fq * _ts + ph) for fq, ph in
+               zip(_fr, _rng.uniform(0, 2 * np.pi, 40)))
+    _sig = np.radians(1.0) * _sig / _sig.std()
+    _yw = 0.3 + np.cumsum(np.radians(_rng.normal(0.0, 0.1, _ts.size)))
+    _sp = attitude_spectra(_ts, _sig, 0.5 * _sig, _yw)
+    check("attitude_spectra recovers a 1.1 Hz motion (centroid, band fraction, std)",
+          abs(_sp["roll"]["centroid_hz"] - float(np.mean(_fr))) < 0.01
+          and _sp["roll"]["frac_band"] > 0.95
+          and abs(_sp["roll"]["std_deg"] - 1.0) < 0.05
+          and abs(_sp["pitch"]["std_deg"] - 0.5) < 0.03,
+          f"centroid {_sp['roll']['centroid_hz']} Hz (components' mean "
+          f"{np.mean(_fr):.3f}), band {_sp['roll']['frac_band']}, "
+          f"std {_sp['roll']['std_deg']} / {_sp['pitch']['std_deg']} deg")
+    _corpus = Path(os.environ.get("BLUEBOAT_SSS_CORPUS",
+                                  Path.home() / "ros2_ws/data/SSS_data"))
+    import yaml as _yaml_t
+    _tdoc = (_yaml_t.safe_load(TARGETS_FILE.read_text())
+             if TARGETS_FILE.is_file() else None)
+    check("corpus attitude targets file present (format blueboat_attitude_targets/1)",
+          _tdoc is not None and _tdoc.get("format") == "blueboat_attitude_targets/1"
+          and {f["file"] for f in _tdoc["files"]} == set(CORPUS_TARGET_FILES),
+          f"{TARGETS_FILE.name}: bands {(_tdoc or {}).get('bands', {}).get('roll_centroid_hz')}"
+          " Hz roll centroid")
+    _small = _corpus / "diffDepthCompensation.svlog"
+    if _small.is_file():
+        _rec = next(f for f in _tdoc["files"] if f["file"] == _small.name)
+        _now = svlog_attitude_spectra(_small, _tdoc["estimator"])
+        check("targets reproduce from the corpus (diffDepthCompensation, same estimator)",
+              all(_now[k] == _rec[k] for k in ("roll", "pitch", "yaw_rate", "segments")),
+              f"roll {_now['roll']} vs stored {_rec['roll']}")
+    else:
+        print(f"  SKIP: corpus targets reproduction (no {_small})")
     # Horizontal Froude-Krylov force + yaw (2026-09-05): a surface sloping
     # up toward +x pushes the hull toward -x by rho g V slope; a zero slope
     # function leaves the vertical-only wrench bit-identical.
@@ -5138,24 +5570,30 @@ def main() -> None:
 
     # Presets file: every preset labelled and referenced, Tp in band,
     # unknown keys raise by name.
-    check("presets: five current + five wave levels, all labelled and referenced",
+    check("presets: five current + six wave levels (harbour_chop since "
+          "2026-11-10), all labelled and referenced",
           presets.current_names() == ["none", "weak", "moderate", "strong",
                                       "very_strong"]
-          and presets.wave_names() == ["calm", "rippled", "smooth", "slight",
-                                       "rough"]
+          and presets.wave_names() == ["calm", "rippled", "harbour_chop",
+                                       "smooth", "slight", "rough"]
           and all(p.label and p.description and p.reference
                   for p in list(presets.current.values())
                   + list(presets.waves.values())))
-    # Since 2026-09-03 the presets sit ABOVE the pure wind-sea DNV band
-    # (3.6-5 sqrt(Hs)): a basin carries swell/wake energy, so Tp runs to
-    # ~10 sqrt(Hs) (ripples on a longer swell); gamma 1.5 broadens the
-    # spectrum, and every non-calm
-    # preset has a random wave-group (events) block.
-    check("wave presets: Tp in 3.6-10 sqrt(Hs), gamma 1.5, short-crested, "
-          "events on, Hs monotonic",
-          all(3.6 * np.sqrt(p.hs_m) <= p.tp_s <= 10.0 * np.sqrt(p.hs_m)
+    # Since 2026-11-10 every level is a fetch-limited young sea, Tp = 3.6
+    # sqrt(Hs) (the owner's re-derivation; it was 2-4.5 s, above the DNV
+    # wind-sea band): JONSWAP / Kahma & Calkoen growth give Tp/sqrt(Hs) =
+    # 3.0-4.0 for a harbour and 3.6 reproduces the real boat's ~1.1 Hz
+    # motion; gamma 1.5 broadens the spectrum; every non-calm preset has a
+    # random wave-group (events) block for the long-period energy.
+    from blueboat_sss_sim.sea.spectrum import (TP_PER_SQRT_HS,  # noqa: E402
+                                               hybrid_frequencies,
+                                               tp_fetch_limited)
+    check("wave presets: Tp = 3.6 sqrt(Hs) (fetch-limited, +-1.5 %), gamma 1.5, "
+          "short-crested, events on, Hs monotonic",
+          all(abs(p.tp_s / tp_fetch_limited(p.hs_m) - 1.0) < 0.015
               and p.gamma <= 2.0 and p.events.active and p.spread_s <= 3.0
               for p in presets.waves.values() if p.hs_m > 0)
+          and TP_PER_SQRT_HS == 3.6
           and not presets.waves["calm"].events.active
           and [p.hs_m for p in presets.waves.values()]
           == sorted(p.hs_m for p in presets.waves.values()))
@@ -5286,7 +5724,12 @@ def main() -> None:
     # spring rings the 0.6 s heave mode (the "regular, too frequent" wave
     # the user saw); with them the boat contours the sea and roll / pitch
     # sit in the corpus band (roll std 0.9-1.3 deg, pitch 0.8-1.5 deg).
+    # The pose-hold ringing is a numerical property, so it is gated on a
+    # long-period sea where the 0.6 s ring stands clear of the waves (the
+    # pre-2026-11-10 'smooth': Hs 0.15 m, Tp 2.8 s), not on a preset.
     st_sm = resolve_state(presets, "none", 0.0, "smooth", 0.0)
+    st_sm = dataclasses.replace(st_sm, waves=dataclasses.replace(
+        st_sm.waves, hs_m=0.15, tp_s=2.8))
     loop_bug = simulate_3dof(presets, st_sm, duration_s=40.0, dt=0.02,
                              pose_hold_s=0.05, predict=False,
                              damping=DampingSpec(), seed=3)
@@ -5294,9 +5737,9 @@ def main() -> None:
                              pose_hold_s=0.05, predict=True,
                              damping=hull_damping_from_config(presets.hull),
                              seed=3)
-    check("closed loop under a 20 Hz pose hold: heave follows the sea (no "
-          "0.6 s ringing), roll and pitch in the corpus band, surge and "
-          "yaw driven",
+    check("closed loop under a 20 Hz pose hold (Hs 0.15 m, Tp 2.8 s): heave "
+          "follows the sea (no 0.6 s ringing), roll and pitch bounded, surge "
+          "and yaw driven",
           loop_fix["finite"] and loop_fix["heave_peak_period_s"] > 1.5
           and loop_fix["heave_hf_fraction"] < 0.10
           and 0.5 < loop_fix["roll_std_deg"] < 2.5
@@ -5309,6 +5752,69 @@ def main() -> None:
           f"{loop_fix['pitch_std_deg']:.2f} deg; un-fixed: T "
           f"{loop_bug['heave_peak_period_s']:.2f} s, hf "
           f"{loop_bug['heave_hf_fraction']:.2f}")
+
+    # 2026-11-10: the hull feels the wave SLOPE spectrum (hybrid
+    # discretisation to 3 Hz) at its draft (Smith decay), and the site
+    # level reproduces the real boat's motion SPECTRUM, not only its std.
+    _om, _var = hybrid_frequencies(0.15, 1.39, 1.5, 5.0, f_max_hz=3.0)
+    _wd = np.linspace(2 * np.pi / 1.39 * 0.4, 2 * np.pi * 3.0, 40000)
+    _sd = jonswap(_wd, 0.15, 1.39, 1.5)
+    _kd = dispersion(_wd, 5.0)
+    _slope_c = float(np.trapezoid(_kd ** 2 * _sd, _wd)) if hasattr(np, "trapezoid") \
+        else float(np.trapz(_kd ** 2 * _sd, _wd))
+    _slope_d = float((dispersion(_om, 5.0) ** 2 * _var).sum())
+    _share = dispersion(_om, 5.0) ** 2 * _var / _slope_d
+    check("hybrid discretisation: m0 exact, slope variance to 3 Hz within 3 %, "
+          "no component carries > 25 % of it, <= 24 frequencies",
+          abs(4.0 * np.sqrt(_var.sum()) / 0.15 - 1.0) < 0.02
+          and abs(_slope_d / _slope_c - 1.0) < 0.03
+          and _share.max() < 0.25 and len(_om) <= 24,
+          f"{len(_om)} frequencies {(_om / 2 / np.pi).min():.2f}-"
+          f"{(_om / 2 / np.pi).max():.2f} Hz, Hs {4*np.sqrt(_var.sum()):.4f} m, "
+          f"slope {_slope_d / _slope_c:.3f} of the continuous, max share "
+          f"{_share.max():.2f}")
+    _wfd = WaveField(0.07, 0.95, 1.5, 90.0, 3.0, 5.0,
+                     rng=np.random.default_rng(3), discretisation="hybrid")
+    _k1 = dispersion(2 * np.pi * 1.0, 5.0)[0]
+    _wf1 = WaveField(0.07, 0.95, 1.5, 90.0, 3.0, 5.0, n_freq=16,
+                     rng=np.random.default_rng(3))
+    _e0 = _wfd.elevation([0.3, 1.0], [0.2, -1.0], 4.0)
+    _ed = _wfd.elevation([0.3, 1.0], [0.2, -1.0], 4.0, depth=0.0)
+    _es = _wfd.elevation_and_slope([0.3, 1.0], [0.2, -1.0], 4.0, 0.045)
+    check("draft decay: depth 0 is bit-identical, e^-kd at the 4.5 cm draft "
+          "(0.83 at 1 Hz), elevation+slope in one evaluation equals the two "
+          "calls, and the default field is the legacy equal-energy one",
+          np.array_equal(_e0, _ed)
+          and abs(np.interp(2 * np.pi, _wfd.omega, _wfd.decay(0.045))
+                  - np.exp(-_k1 * 0.045)) < 0.02
+          and np.allclose(_es[0], _wfd.elevation([0.3, 1.0], [0.2, -1.0], 4.0, 0.045),
+                          rtol=0, atol=1e-15)
+          and np.allclose(_es[1], _wfd.slope([0.3, 1.0], [0.2, -1.0], 4.0, 0.045)[0],
+                          rtol=0, atol=1e-15)
+          and _wf1.discretisation == "equal_energy",
+          f"decay at 1 Hz {np.interp(2*np.pi, _wfd.omega, _wfd.decay(0.045)):.3f} "
+          f"(e^-kd {np.exp(-_k1*0.045):.3f}); {len(_wfd.omega)} components")
+    _st_hc = resolve_state(presets, "none", 0.0, "harbour_chop", 180.0)
+    _st_hc = dataclasses.replace(_st_hc, waves=dataclasses.replace(
+        _st_hc.waves, events=dataclasses.replace(_st_hc.waves.events,
+                                                 rate_per_hour=0.0)))
+    _hc = simulate_3dof(presets, _st_hc, duration_s=70.0, dt=0.02, seed=3,
+                        cells_per_m=20.0)
+    _kk = int(10.0 / 0.02)
+    _hsp = attitude_spectra(_hc["t"][_kk:], _hc["roll"][_kk:], _hc["pitch"][_kk:],
+                            np.full(_hc["t"].size - _kk, 0.3))
+    _tb = (_tdoc or {}).get("bands", {})
+    _cb = _tb.get("roll_centroid_hz", [1.11, 1.17])
+    check("harbour_chop reproduces the real boat's motion SPECTRUM (offline "
+          "loop): roll centroid within 0.15 Hz of the corpus band, >= 75 % of "
+          "roll power in 0.8-2 Hz, roll/pitch std 0.6-1.6 deg",
+          _cb[0] - 0.15 <= _hsp["roll"]["centroid_hz"] <= _cb[1] + 0.15
+          and _hsp["roll"]["frac_band"] >= 0.75
+          and 0.6 <= _hsp["roll"]["std_deg"] <= 1.6
+          and 0.6 <= _hsp["pitch"]["std_deg"] <= 1.6,
+          f"roll {_hsp['roll']} / pitch {_hsp['pitch']}; corpus roll centroid "
+          f"{_cb} Hz, roll std {_tb.get('roll_std_deg')}, pitch std "
+          f"{_tb.get('pitch_std_deg')}")
     bad_yaml = OUT / "bad_sea.yaml"
     bad_yaml.write_text("format: blueboat_sea_state_presets/1\n"
                         "current: {x: {speed_mps: 1.0, bogus: 2}}\nwaves: {}\n")
@@ -5517,6 +6023,54 @@ def main() -> None:
     check("headless launches run the Gazebo server only (-s), default keeps the GUI",
           gz_args_for(True) == "-r -s" and gz_args_for("true") == "-r -s"
           and gz_args_for(False) == "-r" and gz_args_for("false") == "-r")
+    # 2026-11-09: the Gazebo GUI crashed at start-up (gz-transport getenv
+    # race) and froze a ray-cast run; auto = server only for the ray-cast,
+    # and Gazebo exiting by itself stops the launch with the reason.
+    # 2026-11-10: the ray-cast's GUI comes back as a separate client process
+    # (gz sim -g, "gz_gui"), whose crash never stops the server or the launch.
+    from full_mission_launch import (gazebo_exit_actions,  # noqa: E402
+                                     gazebo_gui_mode, gz_gui_client_cmd,
+                                     profile_renderer, resolve_headless)
+    _gx = gazebo_exit_actions("gazebo", 0, False)
+    check("headless auto = server -s + a separate GUI client for the ray-cast "
+          "(renderer arg or the profile's renderer key), one process for the "
+          "geometric; Gazebo exiting by itself stops the launch with its reason, "
+          "never during a shutdown, and a GUI-client exit never does",
+          resolve_headless("auto", "raycast") and not resolve_headless("auto", "geometric")
+          and gazebo_gui_mode("auto", "raycast") == "client"
+          and gazebo_gui_mode("", "geometric") == "embedded"
+          and gazebo_gui_mode("true", "raycast") == "none"
+          and gazebo_gui_mode("false", "raycast") == "embedded"
+          and gz_gui_client_cmd("harmonic") == ["gz", "sim", "-g", "--force-version", "8"]
+          and gazebo_exit_actions("gz_gui", -11, False) is None
+          and not resolve_headless("", "") and resolve_headless("true", "geometric")
+          and not resolve_headless("false", "raycast")
+          and profile_renderer("raycast_live_sonar.yaml") == "raycast"
+          and profile_renderer("default_sonar.yaml") == ""
+          and profile_renderer("no_such_profile.yaml") == ""
+          and isinstance(_gx, str) and "headless:=true" in _gx
+          and gazebo_exit_actions("gazebo", 0, True) is None
+          and gazebo_exit_actions("sss_sim_node", 1, False) is None,
+          str(_gx)[:80])
+    from full_mission_launch import (parse_real_time_factor,  # noqa: E402
+                                     read_max_step_size)
+    _rtf_refused = True
+    for _bad_rtf in ("0.005", "4.5"):
+        try:
+            parse_real_time_factor(_bad_rtf)
+            _rtf_refused = False
+        except ValueError:
+            pass
+    check("real_time_factor: x1 leaves the flags as before; below 1, -z = rtf / "
+          "the world's physics step (x0.1 at 10 ms -> 10 Hz, x4 -> 400 Hz); outside [0.01, 4] refused",
+          gz_args_for(False, "1.0", 0.01) == "-r"
+          and gz_args_for(False, "0.1", 0.01) == "-r -z 10"
+          and gz_args_for(True, 0.25, 0.01) == "-r -s -z 25"
+          and gz_args_for(False, 0.01, 0.01) == "-r -z 1"
+          and gz_args_for(True, 4.0, 0.01) == "-r -s -z 400"
+          and parse_real_time_factor("4.0") == 4.0
+          and read_max_step_size(str(world_dir / "world.sdf")) == 0.01
+          and _rtf_refused)
     check("the sea-state launch arguments are the six the launches forward",
           set(SEA_ARGS) == {"sea_current", "sea_current_from_deg", "sea_waves",
                             "sea_waves_from_deg", "sea_schedule", "sea_seed"})
@@ -5705,6 +6259,58 @@ def main() -> None:
           and _l10["pitch"][0] > 0.6 and abs(_dlv10) < 0.05,
           f"lag-1 level {_l10['level'][0]:.3f}, jitter {_l10['jitter'][0]:.3f}, "
           f"pitch {_l10['pitch'][0]:.3f}; level change {_dlv10:+.3f} dB")
+    # The other motions (2026-11-10): under the harbour 'smooth' sea the
+    # geometric speckle's along-track lag-1 fell to 0.16 (real 0.37-0.44,
+    # ray-cast 0.43) -- yaw and sway move each azimuth line off the one
+    # 1 cm row of cells it reads. `scatterer_anchoring: ground` reads every
+    # cell of the line's strip of the footprint; under per-ping walks of
+    # sway 5 mm, roll 0.35 deg and heave 5 mm it must keep >= 0.85 x its
+    # level lag-1, at an unchanged mean level. Yaw is different in
+    # physics, not only in the old field: a 0.1 deg step of a 0.5 deg beam
+    # moves the footprint by 20 % of its width at every range, so even a
+    # real beam keeps only ~(1 - 0.2)^2 = 0.64 of its intensity
+    # correlation; the gate is 0.8 x that (the line field kept 0.11). The
+    # default `line` field is reported only (the record of the defect).
+    _rrg10 = GeometricRenderer(_sc10, _acq10, dataclasses.replace(
+        model, scatterer_anchoring="ground"))
+    _wk10 = np.random.default_rng(11)
+    _walk10 = {"yaw": np.cumsum(_wk10.normal(0.0, np.radians(0.1), 80)),
+               "sway": np.cumsum(_wk10.normal(0.0, 0.005, 80)),
+               "roll": np.cumsum(_wk10.normal(0.0, np.radians(0.35), 80)),
+               "heave": np.cumsum(_wk10.normal(0.0, 0.005, 80))}
+
+    def _lagm10(rend, kind):
+        rng = np.random.default_rng(7)
+        rows, lv = [], []
+        for k in range(80):
+            x = -1.0 + 0.0236 * k
+            v = float(_walk10[kind][k]) if kind in _walk10 else 0.0
+            pose = Pose3D(x, v if kind == "sway" else 0.0,
+                          v if kind == "heave" else 0.0,
+                          v if kind == "roll" else 0.0, 0.0,
+                          v if kind == "yaw" else 0.0)
+            pg = rend.render(Side.PORT, pose, 0.0).ping
+            lv.append(pg.power.copy())
+            rows.append(10 * np.log10(np.maximum(apply_ping_noise(
+                pg.power, _bins10 < pg.altitude_m, 1.0, model, rng,
+                specular=pg.specular, texture=pg.texture), 1e-30)))
+        return (_ts10(np.array(rows))["track_corr_lag1"],
+                float(np.mean(np.array(lv)[:, 60:420])))
+    _g10 = {k: _lagm10(_rrg10, k) for k in ("level", "yaw", "sway", "roll", "heave")}
+    _ly10 = _lagm10(_rr10, "yaw")[0]
+    _dlg10 = 10 * np.log10(_g10["level"][1] / _l10["level"][1])
+    _yexp10 = (1.0 - 0.1 / model.horizontal_aperture_deg) ** 2
+    check("ground-anchored speckle survives every motion: under per-ping "
+          "sway / roll / heave walks the along-track lag-1 keeps >= 0.85 x its "
+          "level value, under a 0.1 deg/ping yaw walk >= 0.8 x the footprint-"
+          "overlap expectation (1 - 0.1/0.5)^2, at the default field's mean level",
+          all(_g10[k][0] >= 0.85 * _g10["level"][0]
+              for k in ("sway", "roll", "heave"))
+          and _g10["yaw"][0] >= 0.8 * _yexp10 * _g10["level"][0]
+          and abs(_dlg10) < 0.05,
+          "ground: " + ", ".join(f"{k} {_g10[k][0]:.3f}" for k in _g10)
+          + f"; line (default, record only): level {_l10['level'][0]:.3f}, "
+          f"yaw {_ly10:.3f}; level vs line {_dlg10:+.3f} dB")
 
     # ------------------------------------------------------------------
     print("[11] builder schema help: every form row explains itself")
@@ -8129,6 +8735,208 @@ def _section_calibration() -> None:
                    str(out16 / "artifact_check.json")])
     check("the sss_calibration CLI checks the registry and validates an "
           "artifact (exit 0)", rc == 0 and rv == 0, f"exit {rc} / {rv}")
+
+    print("[18] review 2026-11-11: run provenance, floor addition, ray-cast "
+          "labels, Gazebo object heights")
+    from blueboat_sss_sim.sonar.config import (AcquisitionParams as _AP18,
+                                               SonarModelConfig as _SMC18)
+    from blueboat_sss_sim.worldgen.materials import MaterialLibrary as _ML18
+    # ---- run provenance (core/provenance.py) ------------------------------
+    import shutil as _sh18
+    import tempfile as _tf18
+    from blueboat_sss_sim.core import provenance as _pv
+    _files18 = _pv.tree_files()
+    _chk18 = _pv.source_check()
+    _stamp18 = _pv.make_stamp(PKG_ROOT, "x")
+    check("provenance: the code digest covers the package's modules and the profiles, a "
+          "checkout run in place matches itself, and the build stamp carries that digest",
+          "blueboat_sss_sim/ros/sss_sim_node.py" in _files18
+          and "config/default_sonar.yaml" in _files18
+          and not any("__pycache__" in k or k.endswith(".json") for k in _files18)
+          and _chk18["matches"] is True and _pv.stale_message(_chk18) == ""
+          and _stamp18["source_digest"] == _pv.digest_of(_files18)
+          and _stamp18["source_root"] == str(PKG_ROOT),
+          f"{len(_files18)} files, digest {_pv.digest_of(_files18)[:12]}")
+    with _tf18.TemporaryDirectory() as _d18:
+        _a, _b = Path(_d18) / "src", Path(_d18) / "ins"
+        for _r in (_a, _b):
+            (_r / "blueboat_sss_sim" / "core").mkdir(parents=True)
+            (_r / "config").mkdir()
+            _sh18.copy(PKG_ROOT / "blueboat_sss_sim" / "core" / "geo.py",
+                       _r / "blueboat_sss_sim" / "core" / "geo.py")
+            _sh18.copy(PKG_ROOT / "config" / "default_sonar.yaml", _r / "config")
+        _fa = _pv.tree_files(_a / "blueboat_sss_sim", _a / "config")
+        _same = _pv.digest_of(_fa) == _pv.digest_of(
+            _pv.tree_files(_b / "blueboat_sss_sim", _b / "config"))
+        with open(_b / "config" / "default_sonar.yaml", "ab") as _f18:
+            _f18.write(b"\n")
+        (_b / "blueboat_sss_sim" / "core" / "gone.py").write_text("x = 1\n")
+        _fb = _pv.tree_files(_b / "blueboat_sss_sim", _b / "config")
+        _msg18 = _pv.stale_message({
+            "matches": False, "source_root": str(_a),
+            "differing": sorted(k for k in _fb if k in _fa and _fb[k] != _fa[k]),
+            "only_in_source": sorted(k for k in _fa if k not in _fb),
+            "only_in_install": sorted(k for k in _fb if k not in _fa)})
+        _wd18 = _pv.world_digest(_d18)
+    check("provenance: two equal trees share one digest; a one-byte change and a file "
+          "deleted from the source are both NAMED in the stale-install message",
+          _same and _pv.digest_of(_fa) != _pv.digest_of(_fb)
+          and "config/default_sonar.yaml" in _msg18
+          and "blueboat_sss_sim/core/gone.py (deleted from the source)" in _msg18
+          and "colcon build" in _msg18 and _wd18["sha256"] is None,
+          _msg18[:110])
+
+    # ---- the shadow floor's addition domain (sonar/noise.py) ---------------
+    from blueboat_sss_sim.sonar.noise import apply_ping_noise as _apn18
+    _c18 = dataclasses.replace(_SMC18(), reverberation_db=18.0,
+                               ringing_level_db=0.0)
+    _n18, _mu18 = 120_000, 1e-3
+    _pw18 = np.full(_n18, _mu18)
+    _tx18 = np.random.default_rng(5).exponential(1.0, _n18)
+    _wc18 = np.zeros(_n18, bool)
+    _wc18[:4000] = True
+    _am18 = np.where(_wc18, 0.0, _mu18)
+
+    def _run18(mode):
+        return _apn18(_pw18, _wc18, 1.0, _c18, np.random.default_rng(7), texture=_tx18,
+                      ambient=_am18, floor_addition=mode)
+    _rg18 = np.random.default_rng(7)
+    _old18 = _pw18 * _tx18
+    _fl18 = _c18.noise_floor * _rg18.exponential(1.0, size=_n18)
+    _fl18 = np.maximum(_fl18, 10.0 ** (-1.8) * _am18 * _rg18.exponential(1.0, size=_n18))
+    _old18 = _old18 + _fl18
+    _old18[_wc18] += _c18.watercolumn_noise * _rg18.exponential(1.0, size=int(_wc18.sum()))
+    _p18, _f18b = _run18("power"), _run18("field")
+    _tail18 = [10 * np.log10(np.percentile(x[~_wc18] / x[~_wc18].mean(), 1))
+               for x in (_p18, _f18b)]
+    check("shadow floor: 'power' (default) is the code before 2026-11-11 bit for bit; "
+          "'field' keeps the speckle's dark tail at -20 dB re the mean (power: -16.6), "
+          "the same mean, the same water column, and never a negative intensity",
+          np.array_equal(_p18, _old18) and np.array_equal(_p18[_wc18], _f18b[_wc18])
+          and abs(_tail18[1] + 20.0) <= 0.3 and -17.2 <= _tail18[0] <= -16.0
+          and abs(_f18b[~_wc18].mean() / _p18[~_wc18].mean() - 1.0) < 0.01
+          and float(_f18b.min()) >= 0.0,
+          f"p1 power {_tail18[0]:.2f} dB, field {_tail18[1]:.2f} dB")
+
+    # ---- the new ray-cast keys: off by default, on in the harbour profiles ----
+    from blueboat_sss_sim.sonar.raycast import config as _rc18
+    from blueboat_sss_sim.sonar.raycast.correction import _NOT_CORE as _nc18
+    _d18c = _rc18.RaycastConfig()
+    _state18 = {}
+    for _vn in ("raycast_default_sonar.yaml", "raycast_live_sonar.yaml",
+                "raycast_fast_sonar.yaml", "raycast_harbour_live_sonar.yaml",
+                "raycast_harbour_fast_sonar.yaml"):
+        _, _q = _rc18.load_profile(PKG_ROOT / "config" / _vn)
+        _state18[_vn] = (_q.labels.enabled, _q.floor.addition, _q.seed_per_run,
+                         _q.objects.mode)
+    check("ray-cast keys of 2026-11-11 (labels, floor.addition, seed_per_run, "
+          "objects.mode): off in the code default and in the default / live / fast "
+          "profiles, on in both harbour profiles, and outside the correction's physical core",
+          (_d18c.labels.enabled, _d18c.floor.addition, _d18c.seed_per_run,
+           _d18c.objects.mode) == (False, "power", False, "raster")
+          and all(_state18[k] == (False, "power", False, "raster") for k in _state18
+                  if "harbour" not in k)
+          and all(_state18[k] == (True, "field", True, "solid") for k in _state18
+                  if "harbour" in k)
+          and {"labels", "seed_per_run", "floor", "objects"} <= set(_nc18),
+          str({k.replace("raycast_", "").replace("_sonar.yaml", ""): v
+               for k, v in _state18.items()}))
+
+    # ---- ray-cast ground truth (sonar/raycast/labels.py), CPU oracle ---------
+    from blueboat_sss_sim.sonar.config import SPEED_OF_SOUND_MPS as _c0_18
+    from blueboat_sss_sim.sonar.raycast import beam as _bm18
+    from blueboat_sss_sim.sonar.raycast.labels import LabelOracle as _LO18
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer as _RR18
+    from blueboat_sss_sim.worldgen.scene import stamp_objects as _so18
+    _g18 = GridSpec(origin_x=-1.5, origin_y=-1.0, resolution=0.1, nx=31, ny=161)
+    _h18 = np.full((_g18.ny, _g18.nx), -7.0)
+    _rf18 = np.full(_h18.shape, 0.3)
+    _m18 = _rc18.shared_stage_model(_SMC18(), 126.6)
+    _acq18 = _AP18()
+    _a18, _hg18 = 10.0, 0.40
+    _ob18 = [PlacedObject(object_id=4, type="crate_plastic", x=float(_m18.mount_x_m),
+                          y=float(_m18.mount_y_abs_m) + _a18, yaw=0.0, length=0.5,
+                          width=0.4, proud_height=_hg18, burial=0.0, reflectivity=0.4,
+                          material="plastic")]
+    _ras18 = _so18(_ob18, _g18, _h18, _rf18)
+    _sc18 = SceneModel(grid=_g18, height=_h18, reflectivity=_rf18, **_ras18.scene_kwargs(),
+                       material_id=np.zeros(_h18.shape, dtype=np.uint8),
+                       material_names=["sand"], objects=_ob18, walls=[], seed=3,
+                       config_snapshot={}, outside="edge")
+    _rr18 = _RR18(_sc18, _acq18, _m18, _rc18.RaycastConfig.from_dict(
+        {"paths": {"max_order": 1}, "labels": {"enabled": True}}))
+    _sp18 = _rr18.sensor_pose(Side.PORT, Pose3D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+    _ea18, _en18, _ = _bm18.transducer_frame(_sp18.yaw, _sp18.pitch, _sp18.roll,
+                                             Side.PORT.sign, _rr18.tilt)
+    _P18 = np.array([_sp18.x, _sp18.y, _sp18.z])
+    _lo18 = _LO18(_rr18)
+    _cs18 = _lo18.contacts(Side.PORT, _P18, _ea18, _en18, float(_acq18.bin_size_m))
+    _far18 = _lo18.contacts(Side.PORT, _P18 + np.array([40.0, 0.0, 0.0]), _ea18, _en18,
+                            float(_acq18.bin_size_m))
+    _dz18 = float(_P18[2] + 7.0)
+    _af18 = _a18 + 0.2
+    _exp18 = ((np.hypot(_af18 * _dz18 / (_dz18 - _hg18), _dz18) - np.hypot(_af18, _dz18))
+              * float(_c0_18) / float(_rr18.c) / float(_acq18.bin_size_m))
+    check("ray-cast ground truth: a box 10 m across is one visible contact whose shadow, "
+          "read off the oracle, is the flat-floor geometry within 2 bins of the device's "
+          "1500 m/s range axis; a ping that sees nothing reports nothing",
+          len(_cs18) == 1 and _cs18[0].object_id == 4 and _cs18[0].visible
+          and abs(_cs18[0].shadow_bins - _exp18) <= 2.0 and _far18 == []
+          and abs(_cs18[0].slant_range_m - float(np.hypot(_a18, _dz18))) < 1e-6,
+          f"shadow {_cs18[0].shadow_bins if _cs18 else None} vs {_exp18:.1f} bins")
+
+    # ---- objects as their own meshes (sonar/raycast/object_mesh.py), CPU ------
+    from blueboat_sss_sim.sonar.raycast import object_mesh as _om18
+    from blueboat_sss_sim.sonar.raycast import scene_mesh as _sm18
+
+    def _flat18(x, y):
+        return np.full(np.shape(x), -7.0)
+    _blk18 = PlacedObject(object_id=1, type="concrete_block", x=0.0, y=5.0, yaw=0.3,
+                          length=0.6, width=0.4, proud_height=0.3, burial=0.25,
+                          reflectivity=0.8, material="concrete")
+    _pal18 = PlacedObject(object_id=2, type="pallet_wood", x=0.0, y=8.0, yaw=0.0,
+                          length=1.1, width=1.1, proud_height=0.14, burial=0.0,
+                          reflectivity=0.35, material="wood", fill_fraction=0.6)
+    (_sb18,) = _om18.object_parts(_blk18, _flat18, _ML18(), 451127.0)
+    _vb18, _fb18 = _om18.part_mesh(_sb18)
+    _sp18 = _om18.object_parts(_pal18, _flat18, _ML18(), 451127.0)
+    _zp18 = np.vstack([_om18.part_mesh(q)[0] for q in _sp18])[:, 2] + 7.0
+    _terr18 = np.full((_g18.ny, _g18.nx), -7.0)
+    _ms18 = _sm18.build_scene_mesh(_sc18, None, terrain=_terr18, objects_mode="solid")
+    _mr18 = _sm18.build_scene_mesh(_sc18, None)
+    check("ray-cast objects.mode solid: a rough block is its 12-triangle box with its top at "
+          "terrain + effective height; a pallet is 13 boards (wood, a smooth material: they "
+          "mirror too) standing 0.14 m; the sheet becomes the terrain and a scene without "
+          "depth.npz stays raster",
+          _fb18.shape[0] == 12 and not _sb18.coherent
+          and abs(float(_vb18[:, 2].max()) + 7.0 - _blk18.effective_height) < 1e-9
+          and len(_sp18) == 13 and all(q.coherent and q.part.solid.kind == "box" for q in _sp18)
+          and abs(float(_zp18.max()) - 0.14) < 1e-9 and abs(float(_zp18.min())) < 1e-9
+          and _ms18.objects_mode == "solid" and _mr18.objects_mode == "raster"
+          and float(_ms18.vertices[:_g18.nx * _g18.ny, 2].max()) == -7.0,
+          f"block {_fb18.shape[0]} tris, pallet {len(_sp18)} parts")
+
+    # ---- Gazebo object heights (worldgen/sdf_writer.py) ----------------------
+    import re as _re18
+    from blueboat_sss_sim.worldgen.sdf_writer import _object_sdf as _osdf18
+    _lib18 = _ML18()
+
+    def _zpose18(o, z_base):
+        return float(_re18.search(r"<pose>(\S+) (\S+) (\S+) ", _osdf18(o, z_base, _lib18)).group(3))
+    _lying18 = PlacedObject(object_id=1, type="drum_200l", x=2.0, y=3.0, yaw=0.3,
+                            length=0.58, width=0.58, proud_height=0.9, burial=0.0,
+                            reflectivity=0.9, material="metal", roll=np.pi / 2,
+                            rest="lying", rest_z=-4.71)
+    _half18 = PlacedObject(object_id=2, type="concrete_block", x=0.0, y=0.0, yaw=0.0,
+                           length=0.5, width=0.3, proud_height=0.4, burial=0.5,
+                           reflectivity=0.8, material="concrete")
+    check("Gazebo: a rested object is drawn at its settled world height (rest_z is "
+          "absolute, not an offset from the terrain), and a half-buried flat object's "
+          "top stands at terrain + effective height",
+          abs(_zpose18(_lying18, -5.0) + 4.71) < 1e-3
+          and abs(_zpose18(_half18, -5.0) + 0.5 * _half18.effective_height + 5.0
+                  - _half18.effective_height) < 1e-3,
+          f"rested z {_zpose18(_lying18, -5.0)}, half-buried centre {_zpose18(_half18, -5.0)}")
 
 
 if __name__ == "__main__":

@@ -479,6 +479,16 @@ class SonarModelConfig:
                                            # (changing it changes every image)
     scatterer_seed: int = 0                # extra salt on the field, on top
                                            # of the world seed
+    scatterer_anchoring: str = "line"      # "line": each azimuth line reads
+                                           # the one row of cells it crosses
+                                           # (bit-identical default); "ground"
+                                           # (2026-11-10): every cell of the
+                                           # line's along-track strip of the
+                                           # footprint, so yaw / sway / roll
+                                           # do not re-draw the speckle every
+                                           # ping (track lag-1 0.16 -> ~real
+                                           # under waves). One-idea profile:
+                                           # config/ground_anchored_sonar.yaml
     # --- shadow, volume scattering and the waterline (2026-09-19) --------
     reverberation_reference: str = "ambient"
                                            # what the shadow floor is a

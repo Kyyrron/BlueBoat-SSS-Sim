@@ -19,8 +19,10 @@ load-bearing:
 
 The seabed sheet (terrain + rough objects) is sampled on a world lattice in
 x-y with the sheet's own triangle split (so every point lies on the mesh),
-refined on steep cells; any other triangle (walls, the incoherent share of
-smooth solids, apron skirts) on a lattice in its own plane. Both are clipped
+refined on steep cells; any other sampled triangle (walls; in objects.mode
+solid every rough object's own mesh) on a lattice in its own plane. Smooth
+solids carry no diffuse scatterers (their coherent patches only -- the
+``1 - C`` share is not rendered; ``independent_review_2026-11-11.md``). Both are clipped
 to the region the caller passes (the beam strip), so a 50 m quay costs only
 the part in the beam.
 
@@ -44,6 +46,15 @@ _INV53 = 1.0 / float(1 << 53)
 
 #: Salts of the independent streams.
 SALT_JX, SALT_JY, SALT_PHASE, SALT_SUB, SALT_AMP = 1, 2, 3, 4, 5
+
+#: A steep sheet cell is refined along an axis only where its surface
+#: spacing would exceed this multiple of the lattice spacing: n = ceil(stretch
+#: / REFINE_STRETCH). 1.25 h is inside the §6 mean criterion (5 mm: 0.008,
+#: 7 mm: 0.018; tools/slope_sweep.py, 2026-11-04: ramps of 20 / 35 / 50 / 70
+#: deg pass at 0.006 / 0.010 / 0.006 / 0.004 against 0.02), and ceil(stretch)
+#: alone is 2 for ANY tilt -- 4 points on every slightly sloped cell (a
+#: natural harbour seabed: 23.5M contributors where 5.8M cells suffice).
+REFINE_STRETCH = 1.25
 
 
 def _mix(x: np.ndarray) -> np.ndarray:
@@ -91,6 +102,12 @@ class Scatterers:
 
     def __len__(self) -> int:
         return int(self.area.size)
+
+    def take(self, sel) -> "Scatterers":
+        """The subset ``sel`` (a boolean mask or an index array)."""
+        return Scatterers(*(getattr(self, f)[sel] for f in (
+            "pos", "normal", "area", "phase", "tri", "material", "object_id",
+            "kind", "rayleigh")))
 
     @staticmethod
     def concat(parts: list["Scatterers"]) -> "Scatterers":
@@ -171,12 +188,20 @@ class SheetSampler:
         x = (p + hash_uniform(self.seed, p, q, sub, SALT_JX)) * h
         y = (q + hash_uniform(self.seed, p, q, sub, SALT_JY)) * h
         z, tri = self._locate(x, y)
-        nz = np.where(tri >= 0, self.tri_normal[np.maximum(tri, 0), 2], 1.0)
-        J = 1.0 / np.maximum(np.abs(nz), 1e-3)
-        n_sub = np.minimum(np.ceil(J).astype(np.int64) ** 2,
-                           self.max_refine ** 2)
-        # Steep cells: n_sub jittered points instead of one, each standing
-        # for its share of the cell (its own triangle's slope factor).
+        tn = np.where((tri >= 0)[:, None], self.tri_normal[np.maximum(tri, 0)],
+                      np.array([0.0, 0.0, 1.0]))
+        nz = np.maximum(np.abs(tn[:, 2]), 1e-3)
+        # Steep cells: a stratified sub-grid of n_x x n_y jittered points,
+        # n = ceil(stretch / REFINE_STRETCH) per axis (stretch_x = sqrt(1 +
+        # z_x^2)), so the spacing ON the surface stays <= REFINE_STRETCH h
+        # along both axes; each point stands for its share of the cell (its
+        # own triangle's slope factor). Replaced ceil(J)^2 unstratified points
+        # (2026-11-04): a slope along one axis needs ~J points, not J^2.
+        nxs = np.minimum(np.ceil(np.sqrt(tn[:, 2] ** 2 + tn[:, 0] ** 2) / nz / REFINE_STRETCH),
+                         self.max_refine).astype(np.int64)
+        nys = np.minimum(np.ceil(np.sqrt(tn[:, 2] ** 2 + tn[:, 1] ** 2) / nz / REFINE_STRETCH),
+                         self.max_refine).astype(np.int64)
+        n_sub = nxs * nys
         rep = n_sub > 1
         if rep.any():
             pr = np.repeat(p[rep], n_sub[rep])
@@ -184,8 +209,10 @@ class SheetSampler:
             starts = np.cumsum(n_sub[rep]) - n_sub[rep]
             kk = np.arange(pr.size) - np.repeat(starts, n_sub[rep])
             nr = np.repeat(n_sub[rep], n_sub[rep])
-            xr = (pr + hash_uniform(self.seed, pr, qr, kk + 1, SALT_JX)) * h
-            yr = (qr + hash_uniform(self.seed, pr, qr, kk + 1, SALT_JY)) * h
+            nxr = np.repeat(nxs[rep], n_sub[rep])
+            nyr = np.repeat(nys[rep], n_sub[rep])
+            xr = (pr + (kk % nxr + hash_uniform(self.seed, pr, qr, kk + 1, SALT_JX)) / nxr) * h
+            yr = (qr + (kk // nxr + hash_uniform(self.seed, pr, qr, kk + 1, SALT_JY)) / nyr) * h
             zr, tr = self._locate(xr, yr)
             p = np.concatenate([p[~rep], pr])
             q = np.concatenate([q[~rep], qr])
@@ -211,12 +238,35 @@ class SheetSampler:
                           mat, oid, kind, ray)
 
 
+def wall_is_quay(rr, tris: np.ndarray) -> np.ndarray:
+    """Per wall triangle: does it belong to a ``kind: quay`` wall (backed by
+    land), as opposed to a pontoon (water on both sides)?"""
+    walls = getattr(rr._scene, "walls", None) or []
+    wi = rr.mesh.wall_index[tris]
+    return np.array([0 <= int(i) < len(walls) and getattr(walls[int(i)], "kind", "quay") == "quay"
+                     for i in wi], dtype=bool)
+
+
+def cull_wall_triangle(quay: bool, dn: float, zlo: float) -> bool:
+    """``sampling.cull_unreachable``, a whole wall triangle: wholly above the
+    still waterline, or a quay face turned away from the transducer
+    (``dn`` = the transducer's signed distance along the outward normal).
+    Shared by the GPU plan and the CPU reference."""
+    return zlo > 0.0 or (quay and dn <= 0.0)
+
+
 def planar_sample(mesh: TriangleScene, tris: np.ndarray, seed: int,
-                  spacing_m: float, keep) -> Scatterers:
+                  spacing_m: float, keep, P: np.ndarray | None = None,
+                  r_max: float | None = None) -> Scatterers:
     """Scatterers on arbitrary triangles: a lattice in each triangle's own
     plane anchored at its first vertex, one jittered point per cell whose
     jittered position falls inside the triangle, filtered by ``keep(pos)``
-    (the beam strip). World-fixed through (seed, triangle, cell)."""
+    (the beam strip). World-fixed through (seed, triangle, cell).
+
+    With ``P`` and ``r_max`` (``keep`` rejecting anything beyond r_max of P),
+    only the cells within the r_max box around P's projection are drawn --
+    the same set (a cell outside the box has an in-plane offset alone beyond
+    r_max), but a 200 m quay face no longer means 10^8 cells."""
     h = float(spacing_m)
     tv = mesh.vertices[mesh.triangles[tris]]
     nrm_all = mesh.normals()[tris]
@@ -228,9 +278,17 @@ def planar_sample(mesh: TriangleScene, tris: np.ndarray, seed: int,
             continue
         e1 = e1 / L1
         e2 = np.cross(n, e1)
-        P = np.array([[0.0, 0.0], [L1, 0.0],
-                      [(C - A) @ e1, (C - A) @ e2]])
-        lo, hi = P.min(axis=0), P.max(axis=0)
+        V2 = np.array([[0.0, 0.0], [L1, 0.0],
+                       [(C - A) @ e1, (C - A) @ e2]])
+        lo, hi = V2.min(axis=0), V2.max(axis=0)
+        if P is not None and r_max is not None:
+            if abs((P - A) @ n) > r_max:
+                continue
+            sp, rp = (P - A) @ e1, (P - A) @ e2
+            lo = np.array([max(lo[0], sp - r_max), max(lo[1], rp - r_max)])
+            hi = np.array([min(hi[0], sp + r_max), min(hi[1], rp + r_max)])
+            if hi[0] < lo[0] or hi[1] < lo[1]:
+                continue
         ip = np.arange(int(np.floor(lo[0] / h)), int(np.floor(hi[0] / h)) + 1)
         iq = np.arange(int(np.floor(lo[1] / h)), int(np.floor(hi[1] / h)) + 1)
         if ip.size * iq.size > 50_000_000:
@@ -240,7 +298,7 @@ def planar_sample(mesh: TriangleScene, tris: np.ndarray, seed: int,
         s = (pp + hash_uniform(seed, tt, pp, qq, SALT_JX)) * h
         r = (qq + hash_uniform(seed, tt, pp, qq, SALT_JY)) * h
         # barycentric inside test in the plane
-        v0, v1 = P[1] - P[0], P[2] - P[0]
+        v0, v1 = V2[1] - V2[0], V2[2] - V2[0]
         den = v0[0] * v1[1] - v0[1] * v1[0]
         a = (s * v1[1] - r * v1[0]) / den
         b = (v0[0] * r - v0[1] * s) / den

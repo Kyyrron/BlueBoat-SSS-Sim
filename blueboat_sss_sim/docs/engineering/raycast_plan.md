@@ -298,3 +298,191 @@ Tolerances: `raycast_design.md` §7 (codes in brackets).
   - Multipath diffuse pairs folded by reciprocity, (i, j) + (j, i) → 2 (i, j): K(K+1)/2 pairs
     instead of K². `sigma_bistatic` is reciprocal to 1.2e-15 (2·10⁵ random geometries, three
     materials).
+* 2026-11-04 — **The whole per-contributor pipeline on the GPU; G1 passes; the pool validation fits
+  in 24 h at full sampling** (`raycast_phase4.md`).
+  - The CPU modules stay the reference, and `use_gpu_pipeline = False` is the comparison.
+    `backend: warp` runs scatterers, direct, diffraction, selection, pairs, facets and the floor
+    coherent channel on the device. Each stage is checked against the reference: the floor stage on
+    flat, pool and calm 0.9 m scenes, pair by pair to order 4.
+  - G1's first failure was a parameter inconsistency, not precision: the bounce-point lift was
+    1 mm on the GPU and 0.1 mm on the CPU. It is now one registered constant
+    (`raycast.paths.bounce_offset_m`). G1 then passed: quay + sill ε_μ 4.1e-6, flat 9.2e-7, leaks
+    0 / 22 049.
+  - BVH queries now stop at the segment's end. Hit decisions are unchanged; the proof is in the
+    report. Per ping-side: flat 0.08 s, pool 0.63 s, harbour 2.46 s, against 4.2 / 968 / 15 s at
+    the start of Phase 4.
+  - Pool validation cost, 72 real poses: mean 0.99 s per ping-side, so ~4.2 h for p4's ~15 200
+    ping-sides. The sampling is not reduced, and no gates amendment is needed.
+  - Steep-cell refinement rule C was gated before adoption (slope sweep, ε_μ p95 ≤ 0.010 against
+    0.02). `raycast.sampling.refine_stretch` is registered.
+  - CPU reference fix: the floor coherent deposit now carries thin-shell leg transmission. It is a
+    no-op without flooded shells, so the fit's flat scenes are unchanged.
+  - The fit's memory: it ran out of RAM three times (12.4 GB). Bases are now held compact (power()
+    bit for bit) and renderers are no longer rebuilt per evaluation.
+* 2026-11-04 — **Gates amendment 2** (`~/calib/raycast/gates_amendment_2.yaml`, sha256
+  `991b0036a111e4ab797c6542903724c141613b16a4729f9963be262905b38268`, private). The three pool
+  statistics get what `gates.yaml` left open:
+  - the session value: the median sim − real of the wall pings; the mean sim − real of the box passes;
+  - the bootstrap unit: blocks of 8 wall pings per run-side, or box passes; paired across renderers;
+    300 resamples, 0.95.
+  - It was written before any ray-cast pool statistic was computed, and nothing frozen changes.
+  - The scorer is `tools/pool_score.py`: p4_score's rules verbatim, plus readouts of the 0–1 m
+    shadow band and the per-ping wall values.
+  - NC #4's "sand and mud" for the ray-cast sensor: the envelope's dark bottom (reflectivity 0.22) is
+    rendered as its mud sediment (`calibration.seabed._render_noisy`). The geometric path is unchanged.
+* 2026-11-04 — **Gates amendment 3** (`~/calib/raycast/gates_amendment_3.yaml`, sha256
+  `488776e036e32a58f0d6f88b72ad5ec375def5e72040ed2915b21a61f09bcb42`, private). It was written before any ray-cast harbour render, and nothing frozen changes.
+  - `harbour_quay_face`'s pooled-verdict bootstrap: blocks of 8 selected pings per recording-side,
+    paired across renderers.
+  - The range kernel (range_corr_2 + range_corr_3, ONE motivating statistic in gates.yaml) is read
+    conservatively. It improves only when both improve, and is worse when either is worse.
+* 2026-11-04 — **Fit-basis key bug.** `calib._geometry_rc` removed the fitted keys but left their
+  empty parent mappings. The fit's configuration (`set_params` adds `beam`) and the builder's
+  therefore hashed the same flat scene to different keys, and every basis was built twice. Keys are
+  now normalised (empty mappings pruned), and the existing bases were hard-linked to their
+  normalised names (`tools/phaseA_migrate_keys.py`): all 2352 bases of the fit's first evaluation
+  are present. The fit now holds one fit call's bases at a time (~11 GB); five out-of-memory kills
+  are logged in `PROGRESS.md`.
+* 2026-11-04 — **Gates amendment 4** (`~/calib/raycast/gates_amendment_4.yaml`, sha256
+  `cf48cf383f912d18be5babefae1257a440962262dfdcac6ec2be55ec556d4df7`, private; the owner's decision the same day). The bounds of
+  `raycast.seabed.sediments.sand.gamma2` move from [2.000001, 3.92] to **[2.6, 3.92]**.
+  - The J&R law's I_K quadrature grows as (40/q)^(1/(γ2−2)):
+    - γ2 2.6: 1.5 s per table;
+    - γ2 2.5: ~1.3 GB per call;
+    - γ2 2.4: 58 GB;
+    - below that, not computable.
+  - The fit had moved γ2 down and exhausted the host. Written before any fit result.
+  - A fitted γ2 at the new bound fails `params_in_bounds` and is reported.
+* 2026-11-05 — **Phase A attempt 1: NO-GO.** The fit did not converge, and every final parameter
+  sits on a bound.
+  - The diagnosis is in `raycast_phaseA.md`:
+    - the nadir metric is degenerate, with zero sensitivity to the fitted parameters;
+    - the default sea surface suppresses the shallow-water multipath.
+  - Two bugs were found on the way:
+    - NC4 compared the geometric envelope with itself, a false PASS;
+    - `raycast_compare` passed the per-renderer detections to the point estimate.
+* 2026-11-05 — **Gates amendment 5: attempt 2** (`~/calib/raycast/gates_amendment_5.yaml`, sha256
+  `537952ecf9effa10b45a46d68a60e157c420e7b51bc1627334e8e3067298587a`; the owner's request). Written before any attempt-2 result.
+  - The fit uses the level metric only, with a full-render multipath correction.
+  - The sea-surface roughness is set per site: the pool at 3e-4 m (pass 4); the beach and harbour
+    scanned on their calibration strata.
+  - The pool gets its floor description, if it can be rendered within budget.
+  - The validation sessions are now development evidence. The hold-out stays sealed.
+  - If attempt 2 is still a NO-GO, a disclosed empirical correction layer follows.
+* 2026-11-06 — **Attempt 2's validation is invalid: two engine defects** (`raycast_phaseA.md`). Both
+  were found by diagnosis and fixed for the ray-cast only; the geometric path is unchanged and the
+  smoke test passes.
+  - The attitude replay applied the recording's altitude variation dz as the vehicle's z. This lifted
+    the 0.22 m-deep transducer out of the water, and some pings came back empty. dz now moves the
+    seabed.
+  - The FBR altitude match fired on the far-range level of a sensor with no first-return crest and
+    clamped strata to 0.2 m. It is now guarded.
+  - New engine selector `level_crest`.
+  - The probe and the feasibility fit show that calibration alone cannot hold the crest and the tail
+    within the bounds.
+* 2026-11-06 — **Gates amendment 6** (`~/calib/raycast/gates_amendment_6.yaml`, sha256
+  `162871ff76b767fd52d4cff5b7b4fe510797d51a34205623c90e4c1a01519952`, private). It records the owner's
+  decision: a physical near-normal contribution, with the primary literature verified first. It was
+  written before any attempt-2b fit. No fit is run with the incomplete physics, and the correction
+  layer is not used.
+* 2026-11-06 — **Near-normal verification** (`raycast_nearnormal_verification.md`). Read NC94, NC98
+  and JR07 §6.3, §6.5 and §13.1–13.5; reference checks R1–R5.
+  - **The rough-facet term is NOT implemented.** It is a lower approximation of the full Kirchhoff
+    result, which our SSA already reproduces: SSA/Kirchhoff 0.00 dB at 89°, and energy conserved to
+    0.02 dB at 30 kHz. Adding it double-counts, and would add at most +2.6 dB.
+  - The crest deficit (+9 to +23 dB in crest/tail ratio) comes from:
+    - the vertical beam's large-angle response (the strip's first null at nadir, −55 dB two-way;
+      the f_v ≤ 0.3 cap);
+    - the 450 kHz small-scale spectrum (no coherent nadir return for any power law inside the
+      bounds);
+    - the TVG law.
+  - Attempt 2's roughness set loses 32.8 dB of the reflected energy: it is outside the SSA's validity.
+  - The water column (27.8 dB) is the shared measured constant, which does not carry over across
+    acquisitions (real 16.7–29 dB on the harbour). It is not a ray-cast defect.
+  - Owner decision pending.
+* 2026-11-06 — **Owner redirect: a hybrid model; Stage 1 baseline; gates amendment 6a.**
+  - The plan is `~/.claude/plans/bubbly-crafting-pixel.md`: preserve; one bounded beam + energy
+    feasibility test; a project-wide reassessment; a physical core plus a separate correction layer.
+  - The baseline archive is `~/calib/raycast/archive/2026-11-06_stage1/`: 181 files, manifest
+    verified, untracked files included.
+  - The hold-out audit is `~/calib/raycast/stage1/holdout_audit.md`. The ray-cast work has never
+    touched the hold-out. It is not pristine, though: geometric passes 1–4 analysed it, `pp_shell`
+    0.11 came from it, and the smoke test reads two of its files for decoder checks.
+  - `raycast_test --quick` was stopped at 23 PASS / 0 FAIL; the remaining sections are being rerun.
+  - **Gates amendment 6a** (`~/calib/raycast/gates_amendment_6a.yaml`, sha256 `c2bcc5cd4b769f681792d1c281d834f842c949bc87e53fca3dc5b852fdb11ae4`, private) was
+    written before any Stage-2 computation. It records:
+    - the verification outcome;
+    - the owner's 11 amendments;
+    - the Stage-2 procedure: one shared gain and TVG, f_v > 0.217 treated as a hypothesis, the energy
+      validity check;
+    - the decision rule and the stop rule.
+* 2026-11-06 (late) — **Stage 2 complete: the 6a decision is FAIL** (`raycast_assessment.md` §4).
+  - Test A (beam variants, seabed SAX99) and Test B (7 energy-valid seabed sets × f_v {0.217, 0.5})
+    used full GPU renders, one shared gain and TVG, identical conditions, and beam and seabed swaps
+    proven exact.
+  - No admissible beam and no energy-valid seabed brings the harbour crests within 3 dB.
+  - In every set the crest residual rises by about +11 dB from 5.7 to 16.5 m of altitude, whatever
+    the beam and the seabed.
+  - The whole γ2 = 2.6 row of the grid is energy-invalid, so the attempt-1 and attempt-2 solutions
+    lay outside the SSA's domain.
+  - The full `--quick` suite passes on the current code: 23 + 41 PASS, 0 FAIL, 2 SKIP (G1
+    included). Smoke: 493 ALL PASS.
+  - The correction-layer mechanism is built (`sonar/raycast/correction.py`, off by default, CL1–CL5).
+  - Proposal (assessment §12): the hybrid, with gates amendment 6b written before the correction is
+    fitted. Nothing fitted yet.
+* 2026-11-07 — **Gates amendment 6b: the harbour-first hybrid** (`~/calib/raycast/gates_amendment_6b.yaml`,
+  sha256 `66ee6c35c73fc2ae28c5d8a67ad8a91e383a40a766c9321926d9aa47b4e96c0a`, private). Written before any
+  render, fit or score of the correction work. It records:
+  - the owner's direction (harbour-first; shallow water a secondary limitation, never in the harbour fit)
+    and decisions D1–D4: SAX99 + f_v 0.217 with gain/TVG refitted on the harbour calibration tails; the
+    recorded harbour sessions' acquisition envelope, transfer failures = known limitations; enabled
+    5.55–11.30 m true nadir altitude; seabed at true distance = device altitude × c/1500;
+  - the data: one calibration recording (PM-cal, 16 strata, 40 m / 600 / 106.4 µs); validation PM-diffsv,
+    07-21, AM (development evidence); groups 600-bin and 1200-bin;
+  - the form (`u_logalt`, support u 0.85–1.35, linear in log10 alt; F1 2 or F2 6 coefficients chosen by
+    leave-one-band-out CV) and an adequacy stop before validation;
+  - the acceptance (P1–P5 must improve, S1–S8 must stay stable), the per-group outcome rule, and the
+    out-of-domain behaviour (off and bit-identical outside the domain, with a status).
+* 2026-11-07 — **Gates amendment 6c** (`~/calib/raycast/gates_amendment_6c.yaml`, sha256
+  `2c12231ddb61bb2b786a121e23364bc301766935077bb868f6495aed909f3693`, private), after 6b's adequacy STOP and before
+  any refit or validation score. 6b's STOP came only from the calibration bands at 14–16 m: three port-only strata
+  beyond the 11.5–14.5 m data gap, with a +20 to +26 dB crest deficit, outside the enabled domain. The fit set is
+  restricted to the 13 calibration strata at 5–11 m; everything else of 6b is unchanged (owner instruction quoted).
+* 2026-11-07 — **Gates amendment 6d: correction v2** (`~/calib/raycast/gates_amendment_6d.yaml`, sha256 `c0a0666a74f91a720d7894d5b2994e6504a4e2549e90dc567ef029bb94984de0`,
+  private). Written after v1's partial validation and before any v2 fit or score, on the owner's decision. Changes:
+  - the support is widened to u 0.85–2.0 (the measured extent of the first-return excess);
+  - the core gain and TVG are refitted on the tail beyond it (r ≥ 2.25 alt);
+  - S1 is restated against real, S4 adds the new support end, and S5 uses the tail beyond the support.
+
+  M1, P1–P5 and the outcome rule are unchanged. Every v2 validation result is **development evidence** only.
+* 2026-11-07 — **Correction v1 and v2: final validation** (48 harbour strata, 42 in domain, expected mode; noisy on 6;
+  `~/calib/raycast/correction/validation{,_v2}.json`, figures in `figures{,_v2}/`). Pooled mean |M1|:
+  - v1: 600-bin 8.11 → 1.62 dB, 1200-bin 5.25 → 1.48 dB;
+  - v2: 600-bin 9.99 → 1.79 dB, 1200-bin 7.25 → 1.66 dB.
+
+  Both versions fail P2 at 9–10 m (C +3.1 to +3.7 dB) and P3 on 2–3 strata. v2 passes S1–S5 except S3 on 07-21. S6
+  fails in every session for both, although C is closer to real than P on 36 of 42 window speckle statistics (v2,
+  a diagnostic, not a criterion). Under 6b D, **both groups are EXCLUDED** in v1 and v2, and no criterion was
+  changed. Per the owner's D2 this is a known limitation, not a no-go: the artifacts keep their domain, with
+  `status: failed: every group EXCLUDED`. v2 is the recommended testable version (assessment §13.5). NC #4 for the
+  hybrid is not triggered by the rule.
+* 2026-11-07 — **CUDA error 101: diagnosed, left OPEN** (assessment §13.7). It is device-memory exhaustion: Warp's
+  scan reports a failed temporary allocation after "error 2: out of memory". It is not a sizing or empty-array bug.
+  - A 40 m harbour ping-side needs about 3.3–4.5 GB of working memory (pool high-water mark 5.4 GB with 2
+    renderers), and each renderer keeps ~0.3–0.5 GB resident.
+  - The OOM retry releases only the current renderer's buffers, so a deterministic demand fails all 11 retries.
+  - 20 m / 1200 bins (the thesis acquisition) peaks at 1.4 GB.
+
+  The two candidate fixes are not applied: release every cached renderer on retry, or segment the scatterer
+  pipeline in range. Live-path check: the hybrid v2 profile builds and renders through the node's code path on the
+  harbour world. It applies on the 9 in-domain poses, is off on the 3 above 11.3 m, and takes 0.1–1 s per
+  ping-side.
+* 2026-11-07 — **MCS/GCS integration verified end to end; range advice** (owner request). Run through the MCS
+  `LaunchManager`: Ray-cast, x0.03, Extra args `sonar_config:=` the harbour hybrid v2, on the Shiraishijima world at
+  20 m / 1200 bins, with the GCS App recording.
+  - Result: 20.3 Hz in sim time, 3 seabed images, the `.svlog`, waterfall, mosaic and detections, and a clean stop.
+  - Range sweep (GPU memory): 2.3 GB at 20 m up to 6.3 GB at 40 m; out of memory at 50 m. Advice: ≤ 30 m, never
+    > 40 m (README).
+  - Limitation: the processor's bottom tracker reads the ray-cast's first return 1.4–1.6 m late, against 2 cm for
+    the geometric renderer (assessment §13.6).
+  - Fix: `sss_sim_node.main`'s teardown race.

@@ -121,11 +121,12 @@ class MaterialSurface:
     and the coherent-sum RMS height rule."""
 
     def __init__(self, material_names, frequency_hz: float,
-                 sediments: dict | None = None) -> None:
+                 sediments: dict | None = None, lib=None) -> None:
         from ...worldgen.materials import (MaterialLibrary, WATER_DENSITY_KGM3,
                                            WATER_SOUND_SPEED_MPS,
                                            surface_roughness_m)
-        lib = MaterialLibrary()
+        from .scattering import base_material
+        lib = lib if lib is not None else MaterialLibrary()
         sed = sediments if sediments is not None else _ssa.SEDIMENTS
         self.names = list(material_names)
         self.sediment: list[_ssa.SedimentParams | None] = []
@@ -138,7 +139,7 @@ class MaterialSurface:
                 self.rms.append(0.0)
                 continue
             try:
-                m = lib.get(n)
+                m = lib.get(base_material(n))
             except KeyError:
                 m = None
             # any material with acoustic constants: its own fluid half-space
@@ -181,7 +182,7 @@ class SheetSpecular:
     def __init__(self, mesh, scene, k: float, frequency_hz: float,
                  n1: float, n2: float, patch_phase_rad: float,
                  patch_min_m: float, patch_max_m: float,
-                 sediments: dict | None = None) -> None:
+                 sediments: dict | None = None, lib=None) -> None:
         g = scene.grid
         self.g = g
         self.mesh = mesh
@@ -204,7 +205,7 @@ class SheetSpecular:
         tn = mesh.normals()
         self.tri_normal = np.where(tn[:, 2:3] < 0, -tn, tn)
         self.surf = MaterialSurface(mesh.material_names, frequency_hz,
-                                    sediments)
+                                    sediments, lib)
         self.out_mat = (int(mesh.material[mesh.kind == KIND_APRON][0])
                         if (mesh.kind == KIND_APRON).any() else 0)
 

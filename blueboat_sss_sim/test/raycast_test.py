@@ -409,7 +409,7 @@ def direct_path_unit_checks() -> None:
         u = np.linspace(-L / 2, L / 2, 40001)
         rr = np.sqrt(R * R - 2 * np.outer(d @ e_a, u) + u[None, :] ** 2)
         f = np.exp(1j * k * (rr - R)) * R / rr
-        ref_b = np.trapz(f, u, axis=1) / L
+        ref_b = (getattr(np, "trapezoid", None) or np.trapz)(f, u, axis=1) / L
         db = 20 * np.log10(np.maximum(np.abs(b), 1e-12))
         dbr = 20 * np.log10(np.maximum(np.abs(ref_b), 1e-12))
         peak = dbr.max()
@@ -620,6 +620,188 @@ def po_closed_form_checks() -> None:
               f"sigma {10 * np.log10(sig):.2f} dBsm vs {10 * np.log10(closed()):.2f} "
               f"({err:+.3f} dB), {n} lit patches")
 
+
+
+def energy_validity_checks() -> None:
+    """JR07 eq. 13.18 as a roughness-set validity diagnostic (gates amendment 6a,
+    seabed_ssa.normal_incidence_energy): the SSA's normal-incidence scattered
+    energy equals the flat-interface |V|^2 in the narrow-lobe limit."""
+    import math as _m
+    from blueboat_sss_sim.sonar.raycast import seabed_ssa as _ssa
+    print("\n[R2] seabed law: normal-incidence energy validity (JR07 13.18)")
+    p30 = _ssa.SedimentParams("jr07_fig13_2", 1.845, 1.1782, 0.01624, 3.25, 0.000141, 0.0)
+    r = _ssa.normal_incidence_energy(p30, 2 * _m.pi * 30e3 / 1500.0, 30e3, 1500.0)
+    check("[S-E] 30 kHz JR07 Fig. 13.2 sand: scattered energy = |V(90)|^2 within 0.1 dB (narrow lobe)",
+          r["converged"] and abs(r["ratio_db"]) <= 0.1,
+          f"{r['ratio_db']:+.3f} dB, half-energy cone {r['half_energy_cone_deg']:.1f} deg, {r['n']} nodes")
+    sax = _ssa.SEDIMENTS["sand"]
+    r4 = _ssa.normal_incidence_energy(sax, 2 * _m.pi * 450e3 / 1540.0, 450e3, 1540.0)
+    bad = _ssa.SedimentParams("attempt2", sax.a_rho, sax.nu_p, sax.delta_p, 2.6000222831170428,
+                              2.355823389776493e-05, 0.0)
+    rb = _ssa.normal_incidence_energy(bad, 2 * _m.pi * 450e3 / 1540.0, 450e3, 1540.0)
+    check("[S-E] 450 kHz: SAX99 sand valid, attempt 2's fitted set rejected (amendment 6a band)",
+          _ssa.energy_valid(r4["ratio_db"]) and not _ssa.energy_valid(rb["ratio_db"]),
+          f"SAX99 {r4['ratio_db']:+.2f} dB, attempt 2 {rb['ratio_db']:+.2f} dB "
+          f"(band [{_ssa.ENERGY_VALID_LO_DB}, {_ssa.ENERGY_VALID_HI_DB}] dB)")
+
+
+def correction_layer_checks() -> None:
+    """The empirical correction layer (sonar/raycast/correction.py, owner
+    2026-11-06): off = bit-identical, mean-only, edge-held, strict artifacts,
+    speckle normalisation preserved through the shared noise stage."""
+    import tempfile
+    import yaml as _yaml
+    from blueboat_sss_sim.calibration.seabed import acquisition_for, flat_scene
+    from blueboat_sss_sim.core.types import Pose3D as _P, Side as _S
+    from blueboat_sss_sim.sonar.config import SonarConfig, find_default_sonar_yaml
+    from blueboat_sss_sim.sonar.noise import apply_ping_noise
+    from blueboat_sss_sim.sonar.raycast import correction as corr
+    from blueboat_sss_sim.sonar.raycast.config import RaycastConfig, shared_stage_model
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[R2] empirical correction layer (not physics): switch, mean-only, artifacts")
+    cfg = SonarConfig.from_yaml(find_default_sonar_yaml())
+    acq = acquisition_for(cfg, 5000, 200, 44.3, 4)
+    base = {"seed": 3}
+
+    def render(extra):
+        rc = RaycastConfig.from_dict({**base, **extra})
+        rr = RaycastRenderer(flat_scene(1.6, 8.0), acq, shared_stage_model(cfg.model, rc.system_gain_db), rc)
+        return rr.render(_S.PORT, _P(0.0, 0.0, 0.0, 0.01, 0.0, 0.0), 0.0).ping
+    p0 = render({})
+    p_off = render({"correction": {"enabled": False, "artifact": "/nonexistent.yaml"}})
+    check("[CL1] correction off: power, texture and specular bit-identical to no correction section",
+          np.array_equal(p0.power, p_off.power) and np.array_equal(p0.texture, p_off.texture)
+          and not hasattr(p_off, "power_uncorrected"))
+    art = dict(format=corr.FORMAT, version="test", label="test only", form="u",
+               u_knots=[0.0, 1.0, 1.5, 3.0], db=[0.0, 0.0, 0.0, 0.0],
+               domain={"altitude_m": [0.5, 3.0]}, fitted_on=["synthetic"], gates="test")
+    with tempfile.TemporaryDirectory() as td:
+        f0 = Path(td) / "zero.yaml"
+        f0.write_text(_yaml.safe_dump(art))
+        pz = render({"correction": {"enabled": True, "artifact": str(f0)}})
+        check("[CL2] an all-zero table is bit-identical, and keeps the physical mean on the ping",
+              np.array_equal(pz.power, p0.power) and np.array_equal(pz.power_uncorrected, p0.power))
+        f1 = Path(td) / "crest.yaml"
+        f1.write_text(_yaml.safe_dump({**art, "db": [0.0, 6.0, 3.0, 0.0]}))
+        pc = render({"correction": {"enabled": True, "artifact": str(f1)}})
+        r = (np.arange(acq.num_results) + 0.5) * acq.bin_size_m
+        expect = np.interp(np.clip(r / pc.altitude_m, 0.0, 3.0), [0.0, 1.0, 1.5, 3.0], [0.0, 6.0, 3.0, 0.0])
+        lit = p0.power > 0
+        got = 10 * np.log10(pc.power[lit] / p0.power[lit])
+        check("[CL3] mean power x 10^(dB/10) of the table at u = r/altitude; texture untouched; beyond the "
+              "last knot the edge value (0 dB) is held",
+              np.max(np.abs(got - expect[lit])) < 1e-9 and np.array_equal(pc.texture, p0.texture)
+              and np.all(pc.power[r > 3.0 * pc.altitude_m] == p0.power[r > 3.0 * pc.altitude_m]),
+              f"max |dB err| {np.max(np.abs(got - expect[lit])):.1e}")
+        # speckle normalisation through the shared noise stage, same seed
+        m = shared_stage_model(cfg.model, RaycastConfig.from_dict(base).system_gain_db)
+        wc = r < pc.altitude_m
+        n0 = apply_ping_noise(p0.power, wc, 1.0, m, np.random.default_rng(5), specular=p0.specular,
+                              texture=p0.texture)
+        n1 = apply_ping_noise(pc.power, wc, 1.0, m, np.random.default_rng(5), specular=pc.specular,
+                              texture=pc.texture)
+        strong = p0.power > 1e3 * m.noise_floor
+        if p0.specular is not None:              # the ringing's own (low-CV) channel must not dominate
+            strong &= p0.power > 1e3 * p0.specular
+        rel = np.abs(n1[strong] / pc.power[strong] - n0[strong] / p0.power[strong])
+        check("[CL4] speckle preserved: noisy / mean identical with and without the correction (same seed) "
+              "where the echo dominates the floors",
+              strong.sum() > 20 and float(rel.max()) < 1e-2, f"{int(strong.sum())} bins, max |diff| {rel.max():.1e}")
+    bad = []
+    for mutate in ({"format": "x"}, {"form": "poly"}, {"u_knots": [0.0, 0.0, 1.0, 2.0]}, {"db": [0.0, 1.0]},
+                   {"extra": 1}, {"fitted_on": []}, {"db": [0.0, float("nan"), 0.0, 0.0]}):
+        try:
+            corr.from_dict({**art, **mutate})
+            bad.append(mutate)
+        except (KeyError, ValueError):
+            pass
+    check("[CL5] malformed artifacts are refused (format, form, knots, shape, unknown key, no sessions, NaN)",
+          not bad, f"accepted: {bad}")
+    # gates amendment 6b (2026-11-07): off outside the domain, the physical core, the engine path
+    from blueboat_sss_sim.sonar.raycast import calib as _rcal
+    rc0 = RaycastConfig.from_dict(base)
+    m0 = shared_stage_model(cfg.model, rc0.system_gain_db)
+    with tempfile.TemporaryDirectory() as td:
+        def art_file(name, **over):
+            f = Path(td) / f"{name}.yaml"
+            f.write_text(_yaml.safe_dump({**art, "db": [0.0, 6.0, 3.0, 0.0], **over}))
+            return str(f)
+
+        def on(path):
+            return {"correction": {"enabled": True, "artifact": path}}
+        fa = art_file("alt", domain={"altitude_m": [3.0, 5.0]})
+        pa = render(on(fa))
+        check("[CL6] altitude outside the domain: OFF -- power bit-identical to the physical ping, status "
+              "'off:altitude', counted",
+              np.array_equal(pa.power, p0.power) and np.array_equal(pa.texture, p0.texture)
+              and pa.correction_status == corr.OFF_ALTITUDE
+              and corr._CACHE[fa].counts.get(corr.OFF_ALTITUDE, 0) >= 1,
+              f"status {getattr(pa, 'correction_status', None)}, altitude {pa.altitude_m:.2f} m")
+        other = {"label": "1200", "num_results": 1200, "range_mm": [18000, 52000], "pulse_us": [44.3, 86.5]}
+        mine = {"label": "this", "num_results": int(acq.num_results),
+                "range_mm": [int(acq.range_length_mm)] * 2, "pulse_us": [44.3, 44.3]}
+        p_out = render(on(art_file("acq_out", domain={"altitude_m": [0.5, 3.0], "acquisitions": [other]})))
+        p_in = render(on(art_file("acq_in", domain={"altitude_m": [0.5, 3.0], "acquisitions": [other, mine]})))
+        check("[CL7] acquisition gate: outside every recorded group -> OFF and bit-identical; inside one -> "
+              "applied",
+              np.array_equal(p_out.power, p0.power) and p_out.correction_status == corr.OFF_ACQUISITION
+              and p_in.correction_status == corr.APPLIED and np.array_equal(p_in.power, pc.power),
+              f"{p_out.correction_status} / {p_in.correction_status}")
+        p_mud = render(on(art_file("mud", domain={"altitude_m": [0.5, 3.0], "nadir_material": ["mud"]})))
+        p_sand = render(on(art_file("sand", domain={"altitude_m": [0.5, 3.0], "nadir_material": ["sand"]})))
+        check("[CL8] nadir gate: a seabed of another material -> OFF and bit-identical; sand -> applied",
+              np.array_equal(p_mud.power, p0.power) and p_mud.correction_status == corr.OFF_NADIR
+              and p_sand.correction_status == corr.APPLIED and np.array_equal(p_sand.power, pc.power),
+              f"{p_mud.correction_status} / {p_sand.correction_status}")
+        good = corr.core_fingerprint(rc0, m0)
+        bad_core = corr.core_fingerprint(RaycastConfig.from_dict({**base, "system_gain_db": 140.0}), m0)
+        f_good = art_file("core_ok", domain={"altitude_m": [0.5, 3.0]}, core=good)
+        f_bad = art_file("core_bad", domain={"altitude_m": [0.5, 3.0]}, core=bad_core)
+        p_core = render(on(f_good))
+        try:
+            render(on(f_bad))
+            refused, why = False, ""
+        except ValueError as e:
+            refused, why = True, str(e)
+        check("[CL9] an artifact fitted on another physical core is refused at construction; the matching "
+              "core applies",
+              refused and "system_gain_db" in why and p_core.correction_status == corr.APPLIED
+              and np.array_equal(p_core.power, pc.power), why[:120])
+        # the calibration engine's noisy path: the physical render cached, the correction on a copy
+        rc_on = {**base, **on(f_good)}
+        rr_e, _, key_e = _rcal.noisy_renderer(cfg, acq, 1.6, 8.0, rc_on, material="sand")
+        rr_p, _, key_p = _rcal.noisy_renderer(cfg, acq, 1.6, 8.0, dict(base), material="sand")
+        pose = _P(0.0, 0.0, 0.0, 0.01, 0.0, 0.0)
+        n_before = len(_rcal._PINGS)
+        e_c = _rcal.cached_render(rr_e, key_e, _S.PORT, pose, correction=_rcal.correction_for_rc(rc_on))
+        e_p = _rcal.cached_render(rr_p, key_p, _S.PORT, pose)
+
+        def no_build():
+            raise AssertionError("a renderer was built for a cached ping")
+        e_c2 = _rcal.cached_render(no_build, _rcal.noisy_key(acq, 1.6, 8.0, rc_on, "sand"), _S.PORT, pose,
+                                   correction=_rcal.correction_for_rc(rc_on))
+        check("[CL10] engine noisy path: the corrected copy equals the renderer-applied correction (bit for "
+              "bit), the physical and corrected arms share ONE render (same texture), and a cached ping builds "
+              "no renderer",
+              key_e == key_p and rr_e is rr_p and len(_rcal._PINGS) == n_before + 1
+              and np.array_equal(e_c2.power, e_c.power) and e_c2.texture is e_c.texture
+              and np.array_equal(e_c.power, p_core.power)
+              and np.allclose(e_c.power, p_core.power, rtol=1e-12, atol=0.0)
+              and np.array_equal(e_p.power, p0.power) and np.array_equal(e_c.power_uncorrected, e_p.power)
+              and e_c.texture is e_p.texture and e_c.correction_status == corr.APPLIED
+              and not hasattr(e_p, "correction_status"),
+              f"{len(_rcal._PINGS) - n_before} new render(s)")
+    nonlocal_bad = []
+    for mutate in ({"db": [1.0, 6.0, 3.0, 0.0]}, {"db": [0.0, 6.0, 3.0, -0.5]},
+                   {"form": "u_logalt", "log10_alt_knots": [0.0, 0.5],
+                    "db": [[0.0, 6.0, 3.0, 0.0], [0.0, 6.0, 3.0, 2.0]]}):
+        try:
+            corr.from_dict({**art, **mutate})
+            nonlocal_bad.append(mutate)
+        except ValueError:
+            pass
+    check("[CL11] a table that is not localised (non-zero first or last u-knot, either form) is refused",
+          not nonlocal_bad, f"accepted: {nonlocal_bad}")
 
 def seabed_law_checks() -> None:
     """[S2-S5]: the small-slope seabed law, the volume term, reflection."""
@@ -1470,13 +1652,802 @@ def gpu_checks() -> None:
           "intensity <= 1e-3 of P)", worst_mu <= 1e-4 and worst_e <= 1e-3, "; ".join(det))
 
 
+# ------------------------------------------------- [F] fast-variant engine paths
+def _fast_scene():
+    """A shallow harbour corner: sand at -1.5 m, dry land (+0.5 m) behind a
+    quay at y = 8 (top 0.5 m, its box buried to the scene floor), a floating
+    pontoon at y = 5 (water on both sides) and a submerged sill at y = 3."""
+    from blueboat_sss_sim.core.types import Wall
+    sc = flat_scene(-1.5, half=20.0)
+    ys = sc.grid.origin_y + sc.grid.resolution * np.arange(sc.grid.ny)
+    sc.height[ys > 8.6, :] = 0.5
+    sc.walls = [Wall("quay", -10.0, 8.15, 10.0, 8.15, top_z=0.5),
+                Wall("pontoon", -3.0, 5.0, 3.0, 5.0, top_z=0.3, thickness=2.0,
+                     kind="pontoon", draft_m=0.4),
+                Wall("sill", -1.0, 3.0, 1.0, 3.0, top_z=-1.1, thickness=0.3)]
+    return sc
+
+
+def _frame(rr, side, pose):
+    from blueboat_sss_sim.sonar.raycast import beam as _beam
+    s = rr.sensor_pose(side, pose)
+    e_a, e_n, e_v = _beam.transducer_frame(s.yaw, s.pitch, s.roll, side.sign, rr.tilt)
+    return np.array([s.x, s.y, s.z]), e_a, e_n, e_v
+
+
+def _sorted_rows(sc_) -> np.ndarray:
+    a = np.column_stack([sc_.pos, sc_.area, sc_.tri.astype(np.float64)])
+    return a[np.lexsort(a.T[::-1])]
+
+
+def fast_variant_checks() -> None:
+    """[F] the fast variant's engine paths (raycast_fast_optimize_plan.md):
+    every knob off reproduces today; on, each does what it says. GPU checks
+    skip visibly without Warp."""
+    try:
+        from blueboat_sss_sim.sonar.raycast import gpu_render as gr
+    except Exception as exc:                        # noqa: BLE001
+        skip("[F] fast-variant engine paths", f"no Warp in this interpreter ({type(exc).__name__})")
+        return
+    from blueboat_sss_sim.core.types import Pose3D, Side
+    from blueboat_sss_sim.sonar.config import AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast.config import RaycastConfig, shared_stage_model
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    from blueboat_sss_sim.sonar.raycast.scene_mesh import KIND_WALL
+    print("\n[F] fast-variant engine paths")
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    acq = AcquisitionParams()
+    sc = _fast_scene()
+    pose = Pose3D(0.0, 0.0, 0.0)
+
+    # F1 -- cull_unreachable: GPU set = CPU set; nothing unreachable kept
+    sets = {}
+    for cull in (False, True):
+        rc = RaycastConfig.from_dict({"backend": "warp", "sampling": {"cull_unreachable": cull}})
+        rr = RaycastRenderer(sc, acq, model, rc)
+        P, e_a, e_n, _ = _frame(rr, Side.PORT, pose)
+        g = gr.GpuScene(rr).scatterers(P, e_a, e_n).numpy()
+        c = rr._scatterers(P, e_a, e_n)                          # noqa: SLF001
+        sets[cull] = (rr, P, g, c)
+    rr, P, g, c = sets[True]
+    m = rr.mesh
+    wall = g.kind == KIND_WALL
+    wi = m.wall_index[np.maximum(g.tri, 0)]
+    back = np.einsum("ij,ij->i", P - g.pos, g.normal) <= 0.0
+    zs = rr.sheet._locate(g.pos[:, 0], g.pos[:, 1])[0]          # noqa: SLF001
+    off = rr._rc.sampling.surface_offset_m                       # noqa: SLF001
+    names = [w.name for w in sc.walls]
+    ok_g, ok_c = _sorted_rows(g), _sorted_rows(c)
+    same = ok_g.shape == ok_c.shape and (ok_g.size == 0 or float(np.max(np.abs(ok_g - ok_c))) <= 1e-9)
+    _, _, g0, _ = sets[False]
+    wall0 = g0.kind == KIND_WALL
+    wi0 = m.wall_index[np.maximum(g0.tri, 0)]
+    back0 = np.einsum("ij,ij->i", P - g0.pos, g0.normal) <= 0.0
+    check("[F1] cull_unreachable: no point above the waterline, no wall point buried, no "
+          "quay face turned away; the pontoon keeps its far face; GPU set = CPU set; "
+          "off keeps all of them",
+          same and len(g) > 0 and not (g.pos[:, 2] > 0).any()
+          and not (wall & (g.pos[:, 2] < zs - off)).any()
+          and not (wall & back & (wi == names.index("quay"))).any()
+          and (wall & back & (wi == names.index("pontoon"))).any()
+          and (g0.pos[:, 2] > 0).any() and (wall0 & back0 & (wi0 == names.index("quay"))).any(),
+          f"{len(g0)} -> {len(g)} scatterers ({100 * (1 - len(g) / max(len(g0), 1)):.0f} % culled), "
+          f"GPU = CPU {same}")
+
+    # F2 -- reselect_every: reuse within the limits, reselect outside them
+    rc = RaycastConfig.from_dict({"backend": "warp", "paths": {
+        "max_order": 1, "reselect_every": 10, "reselect_move_m": 0.3}})
+    rr = RaycastRenderer(sc, acq, model, rc)
+
+    def ping(x, yaw_deg=0.0):
+        pg = rr.render(Side.PORT, Pose3D(x, 0.0, 0.0, 0.0, 0.0, np.radians(yaw_deg)), 0.0).ping
+        return bool(rr.multipath.last_report["diffuse"].get("reused", False)), pg.power
+
+    seq = [ping(0.01 * k)[0] for k in range(11)]
+    _, p_fresh = ping(1.0)
+    r_same, p_same = ping(1.0)
+    moved = ping(1.31)[0]
+    ping(1.0)
+    turned = ping(1.0, 2.5)[0]
+    # the pontoon's west end face (x = -3) is in front of the transducer, then
+    # no longer, after a 0.1 m move: the boundary set changed
+    x_face = -3.0 - rr.sensor_pose(Side.PORT, Pose3D(0.0, 0.0, 0.0)).x
+    ping(x_face - 0.05)
+    crossed = ping(x_face + 0.05)[0]
+    rel = float(np.max(np.abs(p_same - p_fresh)) / max(float(np.max(np.abs(p_fresh))), 1e-300))
+    rr1 = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict(
+        {"backend": "warp", "paths": {"max_order": 1}}))
+    for k in range(3):
+        rr1.render(Side.PORT, Pose3D(0.01 * k, 0.0, 0.0), 0.0)
+    none1 = ("reused" not in rr1.multipath.last_report["diffuse"]
+             and not rr1._gpu_mp._sel_cache)                       # noqa: SLF001
+    check("[F2] reselect_every 10: pings 2-10 reuse, ping 11 reselects; a 0.31 m move, a "
+          "2.5 deg turn and a boundary leaving range reselect; a reused ping = the fresh one; "
+          "reselect_every 1 never reuses or stores",
+          seq == [False] + [True] * 9 + [False] and r_same and not moved and not turned
+          and not crossed and rel <= 1e-9 and none1,
+          f"sequence {''.join('R' if q else 'S' for q in seq)}, reused vs fresh {rel:.1e}")
+
+    # F3 -- diffraction.method edge: the closed form on the D1 knife edge,
+    # GPU = CPU, continuity, and no factor without a wall box
+    from blueboat_sss_sim.core.types import Wall
+    from blueboat_sss_sim.sonar.raycast.diffraction import edge_window, fresnel_F
+    from blueboat_sss_sim.sonar.raycast.gpu_render import GpuMultipath
+    edge_cfg = {"paths": {"max_order": 1}, "diffraction": {"method": "edge"}}
+    sd = flat_scene(-20.0)
+    sd.walls = [Wall("screen", -25.0, 10.0, 25.0, 10.0, top_z=-2.0, thickness=0.002)]
+    rd = RaycastRenderer(sd, acq, model, RaycastConfig.from_dict(edge_cfg))
+    dif = rd.multipath.diffraction
+    lam = dif.lam
+    vs = np.linspace(-2.0, 3.0, 21)
+    d1 = d2 = 10.0 - 0.001
+    h = vs / np.sqrt(2 * (d1 + d2) / (lam * d1 * d2))
+    U = np.ones(vs.size, complex)
+    for k, hk in enumerate(h):
+        A = np.array([0.0, 0.0, -2.0 - hk])
+        B = np.array([[0.0, 20.0, -2.0 - hk]])
+        idx, Dk = dif.leg_factors(A, B, np.array([hk > 0]), np.array([hk <= 0]))
+        U[k] = Dk[0] if idx.size else np.nan
+    ref = fresnel_F(vs)
+    e_db = np.abs(20 * np.log10(np.abs(U) / np.abs(ref)))
+    e_ph = np.abs(np.angle(U / ref))
+    check("[F3] edge method on the D1 knife edge: |F| <= 0.5 dB, phase <= 0.1 rad, v in [-2, 3]",
+          bool(np.all(np.isfinite(U))) and e_db.max() <= 0.5 and e_ph.max() <= 0.1,
+          f"max {e_db.max():.3f} dB, {e_ph.max():.4f} rad")
+    rg = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict({"backend": "warp", **edge_cfg}))
+    P, e_a, e_n, _ = _frame(rg, Side.PORT, pose)
+    cs = rg._scatterers(P, e_a, e_n)                              # noqa: SLF001
+    rng_f = np.random.default_rng(3)
+    pick = rng_f.choice(len(cs), size=min(len(cs), 200_000), replace=False)
+    off = rg._rc.sampling.surface_offset_m                        # noqa: SLF001
+    Xv = cs.pos[pick] + off * cs.normal[pick]
+    blk = rg.oracle.occluded(np.broadcast_to(P, Xv.shape), Xv, 1e-6)
+    idx_c, D_c = rg.multipath.diffraction.leg_factors(P, Xv, blk, ~blk)
+    Dc_full = np.where(blk, 0.0 + 0j, 1.0 + 0j)
+    Dc_full[idx_c] = D_c
+    import warp as wp
+    gm = GpuMultipath(rg.multipath)
+    dev = gm.dev
+
+    class _Legs:
+        pos = wp.array(cs.pos[pick], dtype=wp.vec3d, device=dev)
+        normal = wp.array(cs.normal[pick], dtype=wp.vec3d, device=dev)
+
+        def __len__(self):
+            return int(pick.size)
+    st = np.where(blk, 1, 3).astype(np.int32)
+    Dg = wp.array(np.column_stack([np.where(blk, 0.0, 1.0), np.zeros(pick.size)]), dtype=wp.vec2d,
+                  device=dev)
+    Tt = wp.array(np.tile([1.0, 0.0], (pick.size, 1)), dtype=wp.vec2d, device=dev)
+    gm.last_timing, gm._t = {}, time.perf_counter()               # noqa: SLF001
+    gm._edge_diffraction(P, _Legs(), wp.array(st, dtype=wp.int32, device=dev), Dg, Tt)  # noqa: SLF001
+    dg = Dg.numpy()
+    Dg_full = dg[:, 0] + 1j * dg[:, 1]
+    err = float(np.max(np.abs(Dg_full - Dc_full)))
+    check("[F3] edge method: GPU leg factors = CPU reference (<= 1e-6) on 2e5 legs of the harbour "
+          "corner", err <= 1e-6 and idx_c.size > 0,
+          f"{idx_c.size} legs diffracted ({int(blk[idx_c].sum())} shadowed), max |dD| {err:.1e}")
+    lone = dif.leg_factors(np.array([0.0, -10.0, -10.0]), np.array([[0.0, -1.0, -10.0]]),
+                           np.array([True]), np.array([False]))[0]
+    check("[F3] edge method: continuous across the shadow boundary (F(0) = 1/2) and at n2 "
+          "(window 0); a shadow cast by no wall box gets no factor",
+          abs(fresnel_F(0.0) - 0.5) < 1e-12 and edge_window(dif.n2, dif.n1, dif.n2) == 0.0
+          and edge_window(dif.n1, dif.n1, dif.n2) == 1.0 and lone.size == 0)
+
+    # F4 -- precision fp32: the visibility test agrees with fp64, no leak into
+    # a closed box, and a render keeps its level and its speckle
+    o = gm.oracle
+    rng4 = np.random.default_rng(44)
+    lo4, hi4 = np.array([-12.0, -4.0, -1.6]), np.array([12.0, 12.0, 0.4])
+    a4 = rng4.uniform(lo4, hi4, size=(100_000, 3))
+    b4 = rng4.uniform(lo4, hi4, size=(100_000, 3))
+    pw = next(w for w in sc.walls if w.kind == "pontoon")
+    ins = np.column_stack([rng4.uniform(pw.x0 + 0.01, pw.x1 - 0.01, 20_000),
+                           rng4.uniform(pw.y0 - 0.5 * pw.thickness + 0.01,
+                                        pw.y0 + 0.5 * pw.thickness - 0.01, 20_000),
+                           rng4.uniform(-pw.draft_m + 0.01, pw.top_z - 0.01, 20_000)])
+    outp = np.column_stack([rng4.uniform(-12, 12, 20_000), rng4.uniform(-4.0, 3.5, 20_000),
+                            rng4.uniform(-1.4, -0.05, 20_000)])
+
+    def blocked(A, B, use32):
+        o.use32 = int(use32)
+        out = wp.empty(len(A), dtype=wp.int32, device=dev)
+        wp.launch(gr._seg_blocked_probe_k, len(A), [o, wp.array(A, dtype=wp.vec3d, device=dev),
+                                                    wp.array(B, dtype=wp.vec3d, device=dev),
+                                                    wp.float64(1e-6), out], device=dev)
+        return out.numpy()
+    dis = float(np.mean(blocked(a4, b4, 0) != blocked(a4, b4, 1)))
+    leaks = int((blocked(outp, ins, 1) == 0).sum())
+    o.use32 = 0
+    lv = {}
+    for prec in ("fp64", "fp32"):
+        rp_ = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict(
+            {"backend": "warp", "precision": prec, "paths": {"max_order": 1},
+             "sampling": {"cull_unreachable": True}, "diffraction": {"method": "edge"}}))
+        pg = rp_.render(Side.PORT, pose, 0.0).ping
+        lv[prec] = (pg.power, pg.power * pg.texture)
+    lit = (lv["fp64"][0] > 0) & (lv["fp32"][0] > 0)
+    dL = np.abs(10 * np.log10(lv["fp32"][0][lit] / lv["fp64"][0][lit]))
+    ok_r = (lv["fp64"][1] > 0) & (lv["fp32"][1] > 0)
+    dR = np.abs(10 * np.log10(lv["fp32"][1][ok_r] / lv["fp64"][1][ok_r]))
+    check("[F4] precision fp32: visibility = fp64 on 1e5 random segments (<= 1e-4 disagree), "
+          "0 leaks into a closed box (2e4 probes); a render's mean level |dL| p99 <= 0.05 dB "
+          "and realised |dR| median <= 0.05 dB",
+          dis <= 1e-4 and leaks == 0 and float(np.percentile(dL, 99)) <= 0.05
+          and float(np.median(dR)) <= 0.05,
+          f"disagree {dis:.1e}, leaks {leaks}, |dL| p99 {np.percentile(dL, 99):.4f} dB, "
+          f"|dR| median {np.median(dR):.4f} dB")
+
+    def rel(a, b):
+        return float(np.max(np.abs(a - b)) / max(float(np.max(np.abs(b))), 1e-300))
+
+    # F5 -- band_cull (phase 2): on a wall-free scene no multipath sequence is
+    # kept, so dropping the out-of-band sheet points is exact; fewer points;
+    # the GPU emits the CPU reference's set
+    sf = flat_scene(-6.0, half=25.0)
+    out5 = {}
+    for band in (False, True):
+        rc5 = RaycastConfig.from_dict({"backend": "warp", "paths": {"max_order": 1},
+                                       "sampling": {"band_cull": band}})
+        r5 = RaycastRenderer(sf, acq, model, rc5)
+        P5, e_a5, e_n5, _ = _frame(r5, Side.PORT, pose)
+        g5 = gr.GpuScene(r5).scatterers(P5, e_a5, e_n5).numpy()
+        c5 = r5._scatterers(P5, e_a5, e_n5)                       # noqa: SLF001
+        pg = r5.render(Side.PORT, pose, 0.0).ping
+        kept5 = r5.multipath.last_report["diffuse"].get("kept", 0)
+        out5[band] = (len(g5), _sorted_rows(g5), _sorted_rows(c5), pg.power,
+                      pg.power * pg.texture, kept5)
+    n0, _, _, p0, t0, _ = out5[False]
+    n1, g1s, c1s, p1, t1, k1 = out5[True]
+    same5 = g1s.shape == c1s.shape and float(np.max(np.abs(g1s - c1s))) <= 1e-9
+    check("[F5] band_cull: fewer sheet points; with no kept multipath sequence the ping is "
+          "unchanged (<= 1e-9); GPU set = CPU set",
+          n1 < n0 and k1 == 0 and rel(p1, p0) <= 1e-9 and rel(t1, t0) <= 1e-9 and same5,
+          f"{n0} -> {n1} points ({100 * (1 - n1 / max(n0, 1)):.0f} % culled), "
+          f"power {rel(p1, p0):.1e}, realised {rel(t1, t0):.1e}, GPU = CPU {same5}")
+
+    # F6 -- the floor channel's image pairs reused with the selection
+    # (reselect_every): a reused ping renders as the fresh one
+    r6 = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict(
+        {"backend": "warp", "paths": {"max_order": 1, "reselect_every": 10,
+                                      "reselect_move_m": 0.3}}))
+    pf = r6.render(Side.PORT, pose, 0.0).ping
+    fresh6 = not r6.multipath.last_report["floor"]["reused"]
+    pr_ = r6.render(Side.PORT, pose, 0.0).ping
+    reused6 = r6.multipath.last_report["floor"]["reused"]
+    r6b = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict(
+        {"backend": "warp", "paths": {"max_order": 1}}))
+    r6b.render(Side.PORT, pose, 0.0)
+    r6b.render(Side.PORT, pose, 0.0)
+    never6 = not r6b.multipath.last_report["floor"]["reused"]
+    check("[F6] floor image pairs: the second ping reuses the first's kept pairs and renders "
+          "the same (<= 1e-9); reselect_every 1 never reuses",
+          fresh6 and reused6 and never6 and rel(pr_.power, pf.power) <= 1e-9
+          and rel(pr_.power * pr_.texture, pf.power * pf.texture) <= 1e-9,
+          f"power {rel(pr_.power, pf.power):.1e}")
+
+    # F7 -- stage timing off (the live node): no value changes
+    out7 = {}
+    for timing in (True, False):
+        r7 = RaycastRenderer(sc, acq, model, RaycastConfig.from_dict(
+            {"backend": "warp", "paths": {"max_order": 1}}))
+        r7.stage_timing = timing
+        pg = r7.render(Side.PORT, pose, 0.0).ping
+        out7[timing] = (pg.power, pg.power * pg.texture, dict(r7.last_timing))
+    check("[F7] stage_timing off: the same ping (<= 1e-9), and no per-stage GPU timing",
+          rel(out7[False][0], out7[True][0]) <= 1e-9 and rel(out7[False][1], out7[True][1]) <= 1e-9
+          and "scatterers" in out7[True][2] and "scatterers" not in out7[False][2],
+          f"power {rel(out7[False][0], out7[True][0]):.1e}")
+
+
+
+# ------------------------------------------------------------- [L] labels
+def _label_scene(objects, walls=(), depth: float = -7.0, x_half: float = 5.5,
+                 y0: float = -2.0, y1: float = 22.0, res: float = 0.05) -> SceneModel:
+    """A flat sand strip with pinned objects (the builder's own stamp)."""
+    nx = int(round(2 * x_half / res)) + 1
+    ny = int(round((y1 - y0) / res)) + 1
+    g = GridSpec(origin_x=-x_half, origin_y=y0, resolution=res, nx=nx, ny=ny)
+    h = np.full((ny, nx), depth)
+    refl = np.full(h.shape, 0.3)
+    objs = [sm_copy(o) for o in objects]
+    ras = stamp_objects(objs, g, h, refl)
+    return SceneModel(grid=g, height=h, reflectivity=refl, **ras.scene_kwargs(),
+                      material_id=np.zeros(h.shape, dtype=np.uint8),
+                      material_names=["sand"], objects=objs, walls=list(walls), seed=3,
+                      config_snapshot={}, outside="edge")
+
+
+def _box(oid: int, x: float, y: float, height: float, length: float = 0.5,
+         width: float = 0.4, typ: str = "crate_plastic", material: str = "plastic"):
+    from blueboat_sss_sim.core.types import PlacedObject
+    return PlacedObject(object_id=oid, type=typ, x=x, y=y, yaw=0.0, length=length,
+                        width=width, proud_height=height, burial=0.0, reflectivity=0.4,
+                        material=material)
+
+
+def label_checks() -> None:
+    """[L] ground-truth contacts of the ray-cast sensor (``labels.py``): read
+    off its own mesh and oracle, the schema of the geometric renderer's, the
+    shadow against flat-floor geometry, occlusion, and -- with Warp and the
+    BlueBoat-Perception checkout -- the labeler's box against the render."""
+    import dataclasses
+    from blueboat_sss_sim.core.types import GroundTruthContact, Pose3D, Side, Wall
+    from blueboat_sss_sim.sonar.config import SPEED_OF_SOUND_MPS, AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast.config import RaycastConfig, shared_stage_model
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    print("\n[L] ground-truth contacts (labels.py)")
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    acq = AcquisitionParams()
+    bin_m = float(acq.bin_size_m)
+    rc0 = RaycastConfig.from_dict({"paths": {"max_order": 1}, "labels": {"enabled": True}})
+    depth = -7.0
+    cases = [(6.0, 0.15), (10.0, 0.15), (15.0, 0.15), (6.0, 0.40), (10.0, 0.40), (15.0, 0.40)]
+    xs = [-3.75 + 1.5 * i for i in range(len(cases))]
+    mount_x, mount_y = float(model.mount_x_m), float(model.mount_y_abs_m)
+    # each box centred `a` metres across from the PORT transducer of a boat at (x - mount_x, 0)
+    objs = [_box(i, x, mount_y + a, hgt) for i, (x, (a, hgt)) in enumerate(zip(xs, cases))]
+    sc = _label_scene(objs)
+    rr = RaycastRenderer(sc, acq, model, rc0)
+    scale = float(SPEED_OF_SOUND_MPS) / float(rr.c)
+
+    def contacts(r_, x_boat, side=Side.PORT):
+        P, e_a, e_n, _ = _frame(r_, side, Pose3D(x_boat, 0.0, 0.0, 0.0, 0.0, 0.0))
+        from blueboat_sss_sim.sonar.raycast.labels import LabelOracle
+        if getattr(r_, "_labels", None) is None:
+            r_._labels = LabelOracle(r_, int(r_._rc.labels.max_points))   # noqa: SLF001
+        return P, r_._labels.contacts(side, P, e_a, e_n, bin_m)           # noqa: SLF001
+
+    # [L1] schema: the dataclass the node serialises, every field typed as the geometric's
+    P, cs = contacts(rr, xs[1] - mount_x)
+    mine = [c for c in cs if c.object_id == 1]
+    ok = (len(mine) == 1 and isinstance(mine[0], GroundTruthContact)
+          and isinstance(mine[0].object_id, int) and mine[0].object_type == "crate_plastic"
+          and mine[0].side is Side.PORT and isinstance(mine[0].visible, bool)
+          and mine[0].ghost is False and mine[0].via == ""
+          and all(isinstance(getattr(mine[0], f), float)
+                  for f in ("slant_range_m", "extent_bins", "shadow_bins")))
+    check("[L1] a contact is the shared GroundTruthContact, typed as the node serialises it", ok,
+          f"{mine[0] if mine else cs}")
+
+    # [L2] shadow length against flat-floor geometry, in the device's bins (tolerance: 2 bins)
+    worst, lines = 0.0, []
+    for i, (x, (a, hgt)) in enumerate(zip(xs, cases)):
+        P, cs = contacts(rr, x - mount_x)
+        c = next((q for q in cs if q.object_id == i), None)
+        dz = float(P[2] - depth)
+        a_far = a + 0.5 * 0.4
+        expect = (np.hypot(a_far * dz / (dz - hgt), dz) - np.hypot(a_far, dz)) * scale / bin_m
+        got = float("nan") if c is None else c.shadow_bins
+        worst = max(worst, abs(got - expect) if c is not None and c.visible else np.inf)
+        lines.append(f"{a:g} m/H {hgt:g}: {got:.1f} vs {expect:.1f}")
+    check("[L2] shadow_bins = flat-floor geometry within 2 bins (6 / 10 / 15 m, H 0.15 / 0.40 m)",
+          worst <= 2.0, "; ".join(lines) + f"; worst {worst:.2f} bins")
+
+    # [L2b] slant_range_m keeps the schema's meaning: true metres to the centre on the seabed
+    P, cs = contacts(rr, xs[4] - mount_x)
+    c = next(q for q in cs if q.object_id == 4)
+    want = float(np.hypot(cases[4][0], P[2] - depth))
+    check("[L2b] slant_range_m is the true range to the object's centre on the seabed",
+          abs(c.slant_range_m - want) < 1e-6, f"{c.slant_range_m:.4f} vs {want:.4f} m")
+
+    # [L4] occlusion: behind a quay, and inside a taller object's shadow -> visible False
+    quay = Wall("quay", -3.0, 8.0, 3.0, 8.0, top_z=0.5)
+    sc4 = _label_scene([_box(0, -1.5, mount_y + 5.0, 0.40),          # in front of the quay
+                        _box(1, -1.5, mount_y + 11.0, 0.40),         # behind it
+                        _box(2, 1.5, mount_y + 5.0, 1.00, width=0.6),  # a tall box ...
+                        # ... and one wholly inside its shadow: the tall box's far top
+                        # edge (5.3 m, 1.0 m high) shades the floor to 6.22 m; at this
+                        # box's far edge (5.9 m) the shadow ray is still 0.35 m up
+                        _box(3, 1.5, mount_y + 5.7, 0.15)],
+                       walls=[quay])
+    # the quay spans x in [-3, 0] only, so the second pair is not behind it
+    sc4.walls = [Wall("quay", -3.0, 8.0, 0.0, 8.0, top_z=0.5)]
+    rr4 = RaycastRenderer(sc4, acq, model, rc0)
+    _, ca = contacts(rr4, -1.5 - mount_x)
+    _, cb = contacts(rr4, 1.5 - mount_x)
+    va = {c.object_id: c for c in ca}
+    vb = {c.object_id: c for c in cb}
+    ok = (va.get(0) is not None and va[0].visible and va[0].shadow_bins > 0
+          and va.get(1) is not None and not va[1].visible and va[1].shadow_bins == 0.0
+          and vb.get(2) is not None and vb[2].visible
+          and vb.get(3) is not None and not vb[3].visible)
+    check("[L4] an object behind a quay or inside another object's shadow is reported "
+          "visible: false, shadow 0", ok,
+          "; ".join(f"{k}:{'vis' if c.visible else 'hidden'}/{c.shadow_bins:.0f}"
+                    for k, c in sorted({**va, **vb}.items())))
+
+    # [L5] no object in the strip -> no contact; labels off -> the renderer reports none
+    _, c_none = contacts(rr, 30.0)
+    rr_off = RaycastRenderer(sc, acq, model, dataclasses.replace(rc0, labels=type(rc0.labels)()),
+                             mesh=rr.mesh, oracle=rr.oracle)
+    check("[L5] a ping that sees no object reports no contact; labels off by default",
+          c_none == [] and rr_off.labels_on is False and RaycastConfig().labels.enabled is False)
+
+    # [L3] the labeler's box against the RENDER (GPU + the Perception checkout)
+    try:
+        import warp  # noqa: F401
+    except Exception as exc:                        # noqa: BLE001
+        skip("[L3] the label box covers the rendered highlight and shadow",
+             f"no Warp in this interpreter ({type(exc).__name__})")
+        return
+    perc = ROOT.parents[1] / "BlueBoat-Perception" / "blueboat_perception"
+    if not (perc / "blueboat_perception" / "core" / "sim_labels.py").is_file():
+        skip("[L3] the label box covers the rendered highlight and shadow",
+             f"no BlueBoat-Perception checkout at {perc}")
+        return
+    sys.path.insert(0, str(perc))
+    from blueboat_perception.core import sim_labels as SL       # noqa: E402
+    rcg = dataclasses.replace(rc0, backend="warp")
+    rr_g = RaycastRenderer(sc, acq, model, rcg)
+    rr_e = RaycastRenderer(_label_scene([]), acq, model, rcg)    # the same floor, no object
+    t0 = time.perf_counter()
+    n_ping = 0
+    lines, ok_all, shift_seen = [], True, True
+    for i in (1, 2, 4, 5):                                       # 10 and 15 m, both heights
+        x, (a, hgt) = xs[i], cases[i]
+        pose = Pose3D(x - mount_x, 0.0, 0.0, 0.0, 0.0, 0.0)
+        r1 = rr_g.render(Side.PORT, pose, 0.0)
+        r0 = rr_e.render(Side.PORT, pose, 0.0)
+        n_ping += 1
+        p1, p0 = np.asarray(r1.ping.power), np.asarray(r0.ping.power)
+        c = next((q for q in r1.contacts if q.object_id == i), None)
+        if c is None:
+            ok_all = False
+            lines.append(f"{a:g}/{hgt:g}: no contact")
+            continue
+        sp = r1.ping.pose
+        o = SL.WorldObject(object_id=i, type="crate_plastic", x=x, y=mount_y + a, yaw=0.0,
+                           length=0.5, width=0.4, height=hgt)
+        kw = dict(bin_m=bin_m, range_max_m=float(acq.range_max_m), n_bins=int(acq.num_results))
+        cd = {"shadow_bins": c.shadow_bins, "slant_range_m": c.slant_range_m}
+        pose6 = [sp.x, sp.y, sp.z, sp.roll, sp.pitch, sp.yaw]
+        g = SL.ping_object_bins(pose6, 1, o, cd, depth, range_scale=scale, **kw)
+        g1 = SL.ping_object_bins(pose6, 1, o, cd, depth, range_scale=1.0, **kw)
+        k = np.arange(p1.size)
+        lit0 = p0 > 0
+        near = (k >= g["k"][0] - 60) & (k <= g["k"][2] + 60) & lit0
+        hot = near & (p1 > 2.0 * p0)
+        dark = near & (p1 < 0.5 * p0)
+        feat = hot | dark
+        inside = (k >= g["k"][0]) & (k <= g["k"][2])
+        inside1 = (k >= g1["k"][0]) & (k <= g1["k"][2])
+        cov = float((feat & inside).sum()) / max(int(feat.sum()), 1)
+        cov1 = float((feat & inside1).sum()) / max(int(feat.sum()), 1)
+        over = int(g["k"][2]) - int(np.flatnonzero(feat).max()) if feat.any() else 0
+        ok_all &= bool(feat.any() and cov >= 0.98 and over <= SL.DEFAULT_RANGE_MARGIN_BINS + 3)
+        shift_seen &= cov1 < 0.98
+        lines.append(f"{a:g} m/H {hgt:g}: {int(feat.sum())} feature bins, covered {100 * cov:.1f} % "
+                     f"(without the scale {100 * cov1:.1f} %), far end +{over} bins")
+    check("[L3] the labeler's box (with range_scale) holds >= 98 % of the rendered highlight "
+          "and shadow bins and overshoots by <= margin + 3 bins", ok_all, "; ".join(lines))
+    check("[L3b] the same box WITHOUT range_scale misses them (the 1500 m/s bin mapping)",
+          shift_seen)
+    # labels never change the ping
+    rr_n = RaycastRenderer(sc, acq, model, dataclasses.replace(rcg, labels=type(rcg.labels)()),
+                           mesh=rr_g.mesh, oracle=rr_g.oracle)
+    pose = Pose3D(xs[4] - mount_x, 0.0, 0.0, 0.0, 0.0, 0.0)
+    a_ = rr_g.render(Side.PORT, pose, 0.0)
+    b_ = rr_n.render(Side.PORT, pose, 0.0)
+    rel = float(np.max(np.abs(np.asarray(a_.ping.power) - np.asarray(b_.ping.power)))
+                / np.max(np.abs(np.asarray(b_.ping.power))))
+    check("[L6] labels on or off: the same ping (<= 1e-9 relative), and off reports no contact",
+          rel <= 1e-9 and b_.contacts == [] and len(a_.contacts) >= 1, f"rel {rel:g}")
+    t1 = time.perf_counter()
+    for _ in range(20):
+        contacts(rr_g, xs[4] - mount_x)
+    per = (time.perf_counter() - t1) / 20 * 1e3
+    t2 = time.perf_counter()
+    for _ in range(20):
+        contacts(rr_g, 30.0)
+    per0 = (time.perf_counter() - t2) / 20 * 1e3
+    check("[L7] cost per ping-side: <= 3 ms with an object in the strip, <= 0.2 ms with none",
+          per <= 3.0 and per0 <= 0.2, f"{per:.2f} ms / {per0:.3f} ms")
+    del t0, n_ping
+
+
+
+# ------------------------------------------------- [O] objects.mode solid
+def object_checks() -> None:
+    """[O] ``raycast.objects.mode: solid`` (``object_mesh.py``): every object
+    its own mesh on the terrain sheet. Geometry on the CPU; renders with Warp
+    (skipped visibly without it)."""
+    import dataclasses
+    from blueboat_sss_sim.core.types import PlacedObject, Pose3D, Side
+    from blueboat_sss_sim.sonar.config import AcquisitionParams
+    from blueboat_sss_sim.sonar.raycast import object_mesh as om
+    from blueboat_sss_sim.sonar.raycast.config import RaycastConfig, shared_stage_model
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer
+    from blueboat_sss_sim.worldgen.materials import SAND_REFLECTION, acoustic_reflection
+    print("\n[O] objects as their own meshes (objects.mode solid)")
+    depth = -7.0
+
+    def flat(x, y):
+        return np.full(np.shape(x), depth)
+
+    def obj(oid, typ, material, L, W, H, burial=0.0, x=0.0, y=10.0, yaw=0.0, **kw):
+        return PlacedObject(object_id=oid, type=typ, x=x, y=y, yaw=yaw, length=L, width=W,
+                            proud_height=H, burial=burial, reflectivity=0.5,
+                            material=material, **kw)
+
+    lib = MaterialLibrary()
+
+    def surfaces(o):
+        return om.object_parts(o, flat, lib, 451127.0)
+
+    # [O1] a class that is one solid: the catalog primitive, placed on the terrain
+    lines, ok = [], True
+    for o in (obj(0, "tire_bicycle", "rubber", 0.65, 0.65, 0.20),
+              obj(1, "concrete_block", "concrete", 0.6, 0.4, 0.30, burial=0.25),
+              obj(2, "mooring_pile", "concrete", 0.4, 0.4, 2.0),
+              obj(3, "tent_weight", "concrete", 0.3, 0.14, 0.08)):
+        (sf,) = surfaces(o)
+        v, f = om.part_mesh(sf)
+        sol = CATALOG[o.type].solid(o)
+        vol = sm.mesh_volume(v, f)
+        top = float(v[:, 2].max()) - depth
+        ok &= (not sf.coherent and abs(vol / sm.solid_volume(sol) - 1.0) < 5e-3
+               and abs(top - o.effective_height) < 2e-3)
+        lines.append(f"{o.type}: {f.shape[0]} tris, volume "
+                     f"{100 * (vol / sm.solid_volume(sol) - 1):+.2f} %, top {top:.3f} m")
+    check("[O1] a rough class that is one solid is its catalog primitive: volume within 0.5 %, "
+          "its top at terrain + effective height (burial sinks it, the sheet hides the rest)",
+          ok, "; ".join(lines))
+
+    # [O2] a smooth one keeps the facet objects' own placement (M2's transform) and mirrors
+    box = obj(4, "crate_plastic", "plastic", 0.5, 0.4, 0.25, yaw=0.4)
+    (sf,) = surfaces(box)
+    R, t = sm.facet_transform(box, CATALOG[box.type].solid(box), flat)
+    pbox = obj(11, "plastic_box", "pp_shell", 0.716, 0.425, 0.323, params={"wall_mm": 2.0})
+    check("[O2] a smooth primitive is placed exactly as before (facet_transform) and mirrors; "
+          "an instance with construction knobs carries its own material name",
+          sf.coherent and np.array_equal(sf.R, R) and np.array_equal(sf.t, t)
+          and sf.material == "plastic" and surfaces(pbox)[0].material == "pp_shell#11")
+
+    # [O3] every catalog class is 3-D parts: outward meshes inside its stored footprint,
+    # its top at the stored height (a compound may stop short of it, never stand over it)
+    from blueboat_sss_sim.worldgen.objects import typical_instance
+    lines, ok, n_tri = [], True, 0
+    for name, spec in CATALOG.items():
+        o = typical_instance(spec)
+        o.x, o.y, o.yaw = 0.0, 10.0, 0.0
+        sfs = surfaces(o)
+        vs = [om.part_mesh(q) for q in sfs]
+        n_tri += sum(f.shape[0] for _, f in vs)
+        v = np.vstack([q for q, _ in vs])
+        top = float(v[:, 2].max()) - depth - o.effective_height
+        half = np.abs(v[:, :2] - [o.x, o.y]).max(axis=0) - 0.5 * np.array([o.length, o.width])
+        # a rope or chain wanders 1.5 widths about its line, as its mask does
+        slack = 0.015 + (1.5 * o.width if name in ("rope", "chain") else 0.0)
+        good = (all(sm.mesh_volume(q, f) > 0.0 for q, f in vs)
+                and -0.35 * o.proud_height - 0.01 <= top <= 0.012 and float(half.max()) <= slack)
+        ok &= good
+        if len(sfs) > 1 or not good:
+            lines.append(f"{name} {len(sfs)} parts ({'+'.join(sorted({q.material for q in sfs}))})"
+                         + ("" if good else f" BAD top {top:+.3f} half {half.max():+.3f}"))
+    pal = surfaces(obj(5, "pallet_wood", "wood", 1.1, 1.1, 0.14, fill_fraction=0.6))
+    tyre = surfaces(obj(6, "tire_car", "rubber", 0.65, 0.65, 0.20))
+    check("[O3] every catalog class is 3-D parts: outward meshes inside the stored footprint, "
+          "top at the stored height; a pallet is boards, a car tyre a tread band on its body",
+          ok and len(pal) == 7 + 3 + 3 and all(q.part.solid.kind == "box" for q in pal)
+          and [q.material for q in tyre] == ["tyre_tread", "rubber"],
+          f"{len(CATALOG)} classes, {n_tri} triangles; " + "; ".join(lines))
+    check("[O3b] nothing proud of the seabed: no parts",
+          surfaces(obj(10, "concrete_block", "concrete", 0.5, 0.3, 0.2, burial=1.0)) == [])
+
+    # [O3c] one surface rule: the diffuse law of a smooth material is the rough law times
+    # its diffuse share 1 - C (Eckart), and fouling replaces a fraction by the sand law
+    from blueboat_sss_sim.sonar.raycast.config import SeabedLawConfig
+    from blueboat_sss_sim.sonar.raycast.scattering import DiffuseLaw
+    k450 = 2.0 * np.pi * 451127.0 / 1500.0
+    names = ["sand", "plastic", "concrete", "metal#wall", "gravel"]
+    mat = np.arange(len(names))
+    ci = np.full(len(names), 0.7)
+
+    def sig(**kw):
+        return DiffuseLaw(SeabedLawConfig(), names, k450, **kw).sigma(ci, ci, mat)
+    s0, s1, sf_ = sig(), sig(split=True), sig(split=True, fouling=0.4)
+    scale = {n: (acoustic_reflection(lib.get(n.split("#")[0]), frequency_hz=451127.0)
+                 / SAND_REFLECTION) ** 2 for n in names[1:4]}
+    share = -np.expm1(-(2.0 * k450 * 1e-4 * 0.7) ** 2)
+    check("[O3c] the diffuse law: a rough material and a wall are the sand law x |R/R_sand|^2; "
+          "a smooth one x its diffuse share 1 - C; gravel +3 dB; fouling f mixes in the sand "
+          "law; without the split or fouling nothing moves",
+          np.allclose(s0[1:4] / s0[0], [scale[n] for n in names[1:4]], rtol=1e-12)
+          and np.isclose(s1[1] / s0[1], share, rtol=1e-12)
+          and np.array_equal(s1[[0, 2, 3, 4]], s0[[0, 2, 3, 4]])
+          and np.isclose(s0[4] / s0[0], 10 ** 0.3, rtol=1e-12)
+          and np.allclose(sf_[1:4] / s0[0], 0.6 * s1[1:4] / s0[0] + 0.4, rtol=1e-12)
+          and sf_[0] == s0[0] and sf_[4] == s0[4],
+          f"plastic diffuse share {10 * np.log10(share):+.1f} dB at cos 0.7")
+
+    # the scenes of the render checks: one block 10 m across, in three materials
+    model = shared_stage_model(SonarModelConfig(), 126.6)
+    acq = AcquisitionParams()
+    mount_x, mount_y = float(model.mount_x_m), float(model.mount_y_abs_m)
+    a, hgt = 10.0, 0.40
+
+    def scene_with(material):
+        o = [] if material is None else [obj(0, "concrete_block", material, 0.5, 0.4, hgt,
+                                             x=mount_x, y=mount_y + a)]
+        return _label_scene(o, x_half=2.0, y0=-1.0, y1=21.0, res=0.1)
+
+    def solid_mesh_of(sc):
+        terrain = np.full(sc.height.shape, depth)
+        return sm.build_scene_mesh(sc, None, terrain=terrain, objects_mode="solid")
+
+    sc_c = scene_with("concrete")
+    mesh_c = solid_mesh_of(sc_c)
+    from blueboat_sss_sim.sonar.raycast.scene_mesh import KIND_ROUGH_OBJECT, KIND_SOLID
+    check("[O4] solid mode: the sheet is the terrain (no object bump in it), the block is 12 "
+          "triangles of kind SOLID with its material and id; raster mode tags sheet quads",
+          int((mesh_c.kind == KIND_SOLID).sum()) == 12
+          and not (mesh_c.kind == KIND_ROUGH_OBJECT).any()
+          and mesh_c.objects_mode == "solid"
+          and set(mesh_c.object_id[mesh_c.kind == KIND_SOLID].tolist()) == {0}
+          and mesh_c.material_names[int(mesh_c.material[mesh_c.kind == KIND_SOLID][0])] == "concrete"
+          and bool((sm.build_scene_mesh(sc_c, None).kind == KIND_ROUGH_OBJECT).any()))
+    try:
+        import warp  # noqa: F401
+    except Exception as exc:                        # noqa: BLE001
+        skip("[O5]-[O8] solid-mode renders", f"no Warp in this interpreter ({type(exc).__name__})")
+        return
+    rc = RaycastConfig.from_dict({"paths": {"max_order": 1}, "backend": "warp",
+                                  "labels": {"enabled": True},
+                                  "sampling": {"scatterer_spacing_m": 0.005}})
+    pose = Pose3D(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def render(sc, mesh=None):
+        rr = RaycastRenderer(sc, acq, model, rc, mesh=mesh)
+        rr.stage_timing = False
+        return rr, rr.render(Side.PORT, pose, 0.0)
+
+    # [O5] no object: solid and raster are the same scene
+    sc0 = scene_with(None)
+    _, r_ras = render(sc0)
+    _, r_sol = render(sc0, solid_mesh_of(sc0))
+    p_ras, p_sol = np.asarray(r_ras.ping.power), np.asarray(r_sol.ping.power)
+    rel = float(np.max(np.abs(p_ras - p_sol)) / np.max(np.abs(p_ras)))
+    relt = float(np.max(np.abs(np.asarray(r_ras.ping.texture) - np.asarray(r_sol.ping.texture))))
+    check("[O5] an object-free world renders alike in both modes (<= 1e-9 relative): the "
+          "seabed the correction was fitted on is the same sheet", rel <= 1e-9 and relt <= 1e-9,
+          f"power {rel:g}, texture {relt:g}")
+    p0 = p_sol
+
+    # [O6] the block: a highlight, a shadow as long as geometry says, one visible contact
+    rr_c, r_c = render(sc_c, mesh_c)
+    p_c = np.asarray(r_c.ping.power)
+    bin_m = float(acq.bin_size_m)
+    scale = 1500.0 / float(rr_c.c)
+    P = np.array([r_c.ping.pose.x, r_c.ping.pose.y, r_c.ping.pose.z])
+    dz = float(P[2] - depth)
+    a_far = a + 0.2
+    k_far = int(np.hypot(a_far, dz) * scale / bin_m)
+    k_tip = int(np.hypot(a_far * dz / (dz - hgt), dz) * scale / bin_m)
+    k_near = int(np.hypot(a - 0.2, dz - hgt) * scale / bin_m)
+    hi = float(10 * np.log10(p_c[k_near - 2:k_far + 3].max() / p0[k_near - 2:k_far + 3].max()))
+    sh = p_c[k_far + 6:k_tip - 5] / p0[k_far + 6:k_tip - 5]
+    lit = np.flatnonzero((p_c[k_far + 6:] / np.maximum(p0[k_far + 6:], 1e-300)) >= 0.5)
+    k_end = k_far + 6 + int(lit[0]) if lit.size else -1
+    c = next((q for q in r_c.contacts if q.object_id == 0), None)
+    expect = (np.hypot(a_far * dz / (dz - hgt), dz) - np.hypot(a_far, dz)) * scale / bin_m
+    check("[O6] a concrete block 10 m across in solid mode: a highlight over the bare seabed, "
+          "a shadow under -10 dB that ends where geometry says (+-5 bins with the receive "
+          "envelope), and one visible contact whose shadow_bins is geometry within 2 bins",
+          hi > 3.0 and float(10 * np.log10(sh.max())) < -10.0 and abs(k_end - k_tip) <= 5
+          and c is not None and c.visible and abs(c.shadow_bins - expect) <= 2.0,
+          f"highlight {hi:+.1f} dB, shadow max {10 * np.log10(sh.max()):.1f} dB, ends at bin "
+          f"{k_end} vs {k_tip}, contact shadow {c.shadow_bins if c else None} vs {expect:.1f}")
+
+    # [O7] material ordering: the same ROUGH block in three materials -> its diffuse echo
+    # scales by |R|^2 (a smooth material such as wood takes the Kirchhoff path instead:
+    # NC #17's rule, checked by [O2]). "generic" has no acoustic constants: the sand law.
+    kR = {m: (acoustic_reflection(lib.get(m), frequency_hz=451127.0) / SAND_REFLECTION) ** 2
+          for m in ("concrete", "rubber")}
+    kR["generic"] = 1.0
+    pw = {"concrete": p_c}
+    for m in ("rubber", "generic"):
+        scm = scene_with(m)
+        pw[m] = np.asarray(render(scm, solid_mesh_of(scm))[1].ping.power)
+    win = slice(k_near - 2, k_far + 3)
+    num = float((pw["concrete"][win] - pw["rubber"][win]).sum())
+    den = float((pw["generic"][win] - pw["rubber"][win]).sum())
+    got = 10 * np.log10(num / den)
+    want = 10 * np.log10((kR["concrete"] - kR["rubber"]) / (kR["generic"] - kR["rubber"]))
+    far_same = float(np.max(np.abs(pw["concrete"][k_tip + 40:] - pw["rubber"][k_tip + 40:]))
+                     / np.max(pw["concrete"][k_tip + 40:]))
+    check("[O7] the same rough block in concrete, sand-equivalent and rubber: its own echo "
+          "scales with the material's |R|^2 (0.1 dB), and the seabed beyond its shadow does "
+          "not move", abs(got - want) <= 0.1 and far_same <= 1e-9,
+          f"(concrete - rubber) / (generic - rubber) = {got:+.2f} dB vs {want:+.2f} dB; "
+          f"scales re sand: " + ", ".join(f"{m} {10 * np.log10(v):+.1f} dB" for m, v in kR.items())
+          + f"; far seabed rel {far_same:g}")
+
+    # [O8] repeatability, and the cost of an object in the strip
+    r_c2 = rr_c.render(Side.PORT, pose, 0.0)
+    rel = float(np.max(np.abs(np.asarray(r_c2.ping.power) - p_c)) / np.max(np.abs(p_c)))
+    t0 = time.perf_counter()
+    for _ in range(10):
+        rr_c.render(Side.PORT, pose, 0.0)
+    t_obj = (time.perf_counter() - t0) / 10
+    far = Pose3D(30.0, 0.0, 0.0, 0.0, 0.0, 0.0)           # the block out of reach
+    rr_c.render(Side.PORT, far, 0.0)
+    t0 = time.perf_counter()
+    for _ in range(10):
+        rr_c.render(Side.PORT, far, 0.0)
+    t_far = (time.perf_counter() - t0) / 10
+    check("[O8] a repeat render is the same ping (<= 1e-9); cost recorded", rel <= 1e-9,
+          f"rel {rel:g}; ping-side {1e3 * t_obj:.1f} ms with the block in the strip, "
+          f"{1e3 * t_far:.1f} ms with nothing in reach")
+
+    # [O9] a smooth block: mirror patches plus the diffuse share; fully fouled it is the
+    # sand-equivalent block, whatever it is made of
+    def with_fouling(f):
+        return dataclasses.replace(rc, objects=dataclasses.replace(rc.objects, fouling=f))
+    sc_p = scene_with("plastic")
+    p_p = np.asarray(render(sc_p, solid_mesh_of(sc_p))[1].ping.power)
+    rr_f = RaycastRenderer(sc_p, acq, model, with_fouling(1.0), mesh=solid_mesh_of(sc_p))
+    p_f = np.asarray(rr_f.render(Side.PORT, pose, 0.0).ping.power)
+    rel = float(np.max(np.abs(p_f - pw["generic"])) / np.max(pw["generic"]))
+    body = float(10 * np.log10((p_p[win] - p0[win]).clip(1e-300).sum()
+                               / (pw["generic"][win] - p0[win]).clip(1e-300).sum()))
+    check("[O9] a smooth (plastic) block mirrors AND scatters diffusely; with fouling 1 it is "
+          "the sand-equivalent block to 1e-9, whatever its material",
+          rel <= 1e-9 and float((p_p[win] - p0[win]).sum()) > 0.0,
+          f"fouled vs sand-equivalent rel {rel:g}; clean plastic echo {body:+.1f} dB re the "
+          "sand-equivalent block")
+
+    # [O10] a car tyre: the steel-belted tread band over the same tyre in bare rubber
+    def tyre_scene(typ):
+        o = obj(0, typ, "rubber", 0.65, 0.65, 0.20, x=mount_x, y=mount_y + a)
+        return _label_scene([o], x_half=2.0, y0=-1.0, y1=21.0, res=0.1)
+    pt = {}
+    for typ in ("tire_car", "tire_bicycle"):
+        sct = tyre_scene(typ)
+        pt[typ] = np.asarray(render(sct, solid_mesh_of(sct))[1].ping.power)
+    kt = slice(int(np.hypot(a - 0.33, dz - 0.2) * scale / bin_m) - 2,
+               int(np.hypot(a + 0.33, dz) * scale / bin_m) + 3)
+    hi_car = float(10 * np.log10(pt["tire_car"][kt].max() / p0[kt].max()))
+    hi_rub = float(10 * np.log10(pt["tire_bicycle"][kt].max() / p0[kt].max()))
+    check("[O10] a car tyre's tread band (rubber on its steel belts) returns well over the "
+          "same tyre in bare rubber, and over the seabed", hi_car > hi_rub + 6.0 and hi_car > 6.0,
+          f"peak over the bare seabed: belted {hi_car:+.1f} dB, bare rubber {hi_rub:+.1f} dB")
+
+    # [O11] a wall is built of its material: steel over concrete = their |R|^2
+    from blueboat_sss_sim.core.types import Wall
+    pw_w = {}
+    for m in ("concrete", "metal"):
+        scw = _label_scene([], walls=[Wall("quay", -2.0, mount_y + 12.0, 2.0, mount_y + 12.0,
+                                           top_z=0.5, material=m)],
+                           x_half=2.0, y0=-1.0, y1=21.0, res=0.1)
+        pw_w[m] = np.asarray(render(scw, solid_mesh_of(scw))[1].ping.power)
+    kw_ = slice(int(11.7 * scale / bin_m), int(np.hypot(11.85, dz) * scale / bin_m))
+    got = float(10 * np.log10((pw_w["metal"][kw_] - p0[kw_]).sum()
+                              / (pw_w["concrete"][kw_] - p0[kw_]).sum()))
+    want = 20 * np.log10(acoustic_reflection(lib.get("metal"), frequency_hz=451127.0)
+                         / acoustic_reflection(lib.get("concrete"), frequency_hz=451127.0))
+    check("[O11] a steel wall over a concrete one: the face echo scales with |R|^2 (0.1 dB)",
+          abs(got - want) <= 0.1, f"{got:+.2f} dB vs {want:+.2f} dB")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--only", default="",
+                    help="F: only the fast-variant section [F]; L: only the labels [L]; "
+                         "O: only the solid-object section [O]")
     args = ap.parse_args()
     rng = np.random.default_rng(20261102)
     n_crops, rays = (2, 5000) if args.quick else (5, 20000)
     t_start = time.time()
+    only = {"F": fast_variant_checks, "L": label_checks, "O": object_checks}
+    if args.only:
+        if args.only not in only:
+            ap.error(f"--only {args.only!r}: one of {sorted(only)}")
+        only[args.only]()
+        print(f"\nraycast_test [{args.only}]: {PASSED} passed, {FAILED} failed, {SKIPPED} "
+              f"skipped in {time.time() - t_start:.0f} s")
+        return 1 if FAILED else 0
 
     intersection_checks(rng)
     direct_path_unit_checks()
@@ -1492,8 +2463,13 @@ def main() -> int:
     transmission_checks()
     fit_basis_checks()
     gpu_checks()
+    fast_variant_checks()
+    label_checks()
+    object_checks()
     po_closed_form_checks()
     seabed_law_checks()
+    energy_validity_checks()
+    correction_layer_checks()
     sc = synthetic_scene()
     mesh_checks(f"synthetic: {len(sc.objects)} objects, every catalog class "
                 "flat and rested on a 4 % slope", sc, None,

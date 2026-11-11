@@ -46,6 +46,7 @@ classes:
   acquisition: the six real-driver run parameters
   model_structure: switches and numerics of the model itself
   test_injection: fault-injection knobs (CM-2 corollary); test profiles only
+  empirical_correction: the ray-cast sensor's disclosed correction layer (sonar/raycast/correction.py), NOT physics; its tables live in a versioned artifact fitted on calibration sessions only
 
 # Classes whose value may differ per session inside one calibration artifact
 # (a transducer re-mounted on a field day is a real per-session change; a
@@ -660,6 +661,20 @@ parameters:
     experiment: cut or measure one weight's skin
     owner: worldgen/materials.py (_ACOUSTIC)
     source: {material: pe_cement.wall_m}
+  - name: material.tyre_tread.wall_m
+    unit: m
+    class: environment
+    status: judged
+    default: 0.012
+    tunable: false
+    meaning: "Rubber over the steel belts of a radial car tyre's tread band (tread + undertread). The reflection is the layer-on-steel formula averaged over 8-16 mm; absorption in the rubber is not modelled, so the tread's echo is an upper bound"
+    identified_by: "judgement: an 8 mm tread plus undertread; |R| stays 0.92-0.94 over the band because rubber is nearly matched to water"
+    metric: "raycast_test [O10] (tread band over the seabed)"
+    uncertainty: "the echo is an upper bound by the rubber's two-way absorption, not read at a source"
+    confounders: []
+    experiment: "a car tyre on the seabed in the heading-response experiment"
+    owner: worldgen/materials.py (_ACOUSTIC)
+    source: {material: tyre_tread.wall_m}
   - name: model.smooth_lobe_width_deg
     unit: deg
     class: environment
@@ -1576,12 +1591,12 @@ parameters:
     class: environment
     status: literature
     default: 3.04
-    bounds: [2.000001, 3.92]
+    bounds: [2.6, 3.92]
     tunable: true
     meaning: "sand roughness spectral exponent (J&R power law)"
-    identified_by: "JR07 Table 13.1; > 2 for the small-slope law"
+    identified_by: "JR07 Table 13.1 (<= 3.92); lower bound 2.6 = where the small-slope law's I_K quadrature is computable (gates amendment 4, 2026-11-04: 2.5 needs ~1.3 GB per call, 2.4 58 GB, below not at all)"
     metric: "seabed level vs grazing angle"
-    uncertainty: "(2, 3.92]"
+    uncertainty: "[2.6, 3.92]"
     confounders: [raycast.seabed.sediments.sand.w2]
     experiment: "a roughness profile of the survey bottom"
     owner: sonar/raycast/seabed_ssa.py
@@ -1621,12 +1636,12 @@ parameters:
     class: environment
     status: literature
     default: 3.29
-    bounds: [2.000001, 3.92]
+    bounds: [2.6, 3.92]
     tunable: true
     meaning: "mud roughness spectral exponent (J&R power law)"
-    identified_by: "JR07 Table 13.1; > 2 for the small-slope law"
+    identified_by: "JR07 Table 13.1 (<= 3.92); lower bound 2.6 = where the small-slope law's I_K quadrature is computable (as sand's, gates amendment 4; mud is not fitted in Phase A)"
     metric: "seabed level vs grazing angle"
-    uncertainty: "(2, 3.92]"
+    uncertainty: "[2.6, 3.92]"
     confounders: [raycast.seabed.sediments.mud.w2]
     experiment: "a roughness profile of the survey bottom"
     owner: sonar/raycast/seabed_ssa.py
@@ -1789,3 +1804,322 @@ parameters:
     experiment: "Phase-5 sweep"
     owner: sonar/raycast
     source: {python: "blueboat_sss_sim.sonar.raycast.config:PoConfig.curvature_refine"}
+  - name: raycast.sampling.refine_stretch
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 1.25
+    tunable: false
+    meaning: "Steep-cell refinement: a sheet cell is cut into ceil(stretch / this) strata per axis (rule C) [1]"
+    identified_by: "numerical setting: tools/slope_sweep.py, the §6 mean criterion on 20-70 deg ramps (eps_mu p95 <= 0.010, gate 0.02; raycast_phase4.md)"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.scatterers:REFINE_STRETCH"}
+  - name: raycast.paths.bounce_offset_m
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 0.0001
+    tunable: false
+    meaning: "Lift of a chain's bounce points off their planes before their legs are tested for visibility (CPU and GPU alike; the contributor's end uses sampling.surface_offset_m) [m]"
+    identified_by: "numerical setting: G1 (the GPU = the CPU reference; the quay + sill scene decided it, raycast_phase4.md)"
+    metric: "convergence (design §6)"
+    uncertainty: "numerical"
+    confounders: []
+    experiment: "Phase-5 sweep"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.chains:BOUNCE_OFFSET_M"}
+  - name: raycast.seabed.energy_valid_lo_db
+    unit: dB
+    class: model_structure
+    status: judged
+    default: -3.0
+    tunable: false
+    meaning: "Lower limit of the normal-incidence energy ratio E/|V(90)|^2 (JR07 eq. 13.18) for a roughness set to count as inside the lowest-order SSA's domain; a validity diagnostic that rejects sets, never fitted (seabed_ssa.normal_incidence_energy)"
+    identified_by: "gates amendment 6a (pre-registered 2026-11-06); sensitivity +-2 / +-6 dB reported"
+    metric: "JR07 13.18 (exact in the narrow-lobe limit: -0.02 dB at 30 kHz, Fig. 13.2 sand)"
+    uncertainty: "judgement: 13.18 is approximate for broad 450 kHz lobes (SAX99 -2.0 dB, Panama City 93 -4.2 dB)"
+    confounders: []
+    experiment: "none (a rule)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:ENERGY_VALID_LO_DB"}
+  - name: raycast.seabed.energy_valid_hi_db
+    unit: dB
+    class: model_structure
+    status: judged
+    default: 1.0
+    tunable: false
+    meaning: "Upper limit of the normal-incidence energy ratio E/|V(90)|^2 (JR07 eq. 13.18): more scattered than reflected energy is non-physical beyond the diagnostic's numerical tolerance"
+    identified_by: "gates amendment 6a (pre-registered 2026-11-06)"
+    metric: "JR07 13.18"
+    uncertainty: "judgement"
+    confounders: []
+    experiment: "none (a rule)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.seabed_ssa:ENERGY_VALID_HI_DB"}
+  - name: raycast.correction.enabled
+    unit: 1
+    class: empirical_correction
+    status: structural
+    default: false
+    tunable: false
+    meaning: "Switch of the ray-cast sensor's empirical correction layer (correction.py): off = the physical renderer's output, bit-identical; on = the mean power times the artifact's dB table (texture untouched)"
+    identified_by: "owner 2026-11-06 (hybrid model: physical core + separate correction layer); acceptance pre-registered in gates amendment 6b"
+    metric: "amendment 6b"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "none"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:CorrectionConfig.enabled"}
+  - name: raycast.correction.accept_engine_knobs
+    unit: 1
+    class: empirical_correction
+    status: structural
+    default: false
+    tunable: false
+    meaning: "Apply the correction artifact under the performance-only keys (config.PERFORMANCE_KEYS: ENGINE_KNOBS, paths.max_order, sampling.scatterer_spacing_m): the core check then compares the physics only. Off = strict, a fast render is refused"
+    identified_by: "owner 2026-11-10 (harbour patch); equivalence evidence: live bit-identical on the harbour route, fast [F1]-[F7] (raycast_fast_optimize_plan.md)"
+    metric: "smoke [9] ray-cast harbour patch check"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "harbour_patch/level_check.py (fast vs full engine, same poses)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:CorrectionConfig.accept_engine_knobs"}
+  - name: raycast.correction.altitude_taper_m
+    unit: m
+    class: empirical_correction
+    status: judged
+    default: 1.0
+    tunable: false
+    meaning: "Below a profile's edge-hold band (correction.altitude_hold_m) the table fades linearly to 0 over this altitude, instead of a 13-15 dB cliff in the near-nadir level (inactive without a hold band)"
+    identified_by: "judgement (2026-11-10, harbour patch): no strata below 4.77 m at the harbour acquisitions"
+    metric: "none"
+    uncertainty: "n/a"
+    confounders: []
+    experiment: "harbour strata at 3.5-4.5 m altitude, if recorded"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:CorrectionConfig.altitude_taper_m"}
+  - name: raycast.correction.onset_fade_m
+    unit: m
+    class: empirical_correction
+    status: estimated
+    default: 0.0
+    tunable: false
+    meaning: "The correction table fades in (as the square root of the distance) over this slant distance after the first seabed echo instead of standing at its maximum on the first bin; 0 = the table as fitted. Harbour profiles: 0.8"
+    identified_by: "first 1500 pings of toOptimize-harbourScan (1200 bins, 44 us, 4.4-5.7 m): the real first return starts 9.5 dB under the far seabed and climbs over 0.5-0.7 m; the physical model starts at -8.7 dB; with a square-root fade over 0.8 m the simulated profile is within 2.6 dB of it at every offset (1.4 dB rms) and the processor's tracker reads the bottom 0.28 m late (median), locked 99.7 %. Tried: smooth step 0.8 m (4.5 dB, tracker +0.49 m), square root 1.2 m (2.3 dB, +0.42 m), 0.6 m (3.0 dB, +0.20 m)"
+    metric: "10-90 % rise distance of the first return per ping; analysis/raycast_bottomline.py (tracker lock)"
+    uncertainty: "one recording, one site, one altitude band"
+    confounders: [raycast.beam.vertical_floor_amp]
+    experiment: "the same profile on harbour strata at 7-11 m"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:CorrectionConfig.onset_fade_m"}
+  - name: raycast.floor.reverberation_db
+    unit: dB
+    class: device
+    status: measured
+    default: 0.0
+    tunable: false
+    meaning: "The ray-cast's NC #15 shadow floor: a culled bin holds the seabed's own speckle this many dB under the ping's ambient lit-seabed reference (floor.ambient_reference). 0 (default) = the shadow from physics only; 18 in the harbour profiles (the geometric's measured value)"
+    identified_by: "the corpus quay: 17-25 dB under the seabed 6-12 m behind the face (analysis/wall_contrast, 2026-09-18), as model.reverberation_db; the ray-cast's own physics test D3 never ran"
+    metric: "picture_compare shadow_mean_db against the harbour anchors"
+    uncertainty: "17-25 dB (the quay's measured spread)"
+    confounders: []
+    experiment: "raycast_design.md D3 (the quay floor with the physical fill sources), once CUDA 101 is solved"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:FloorConfig.reverberation_db"}
+  - name: raycast.near_range.watercolumn_db
+    unit: dB
+    class: device
+    status: measured
+    default: 0.0
+    tunable: false
+    meaning: "The device's water-column level (Exp(1) linear mean, reported dB at gain 4) for the acquisition near_range was measured at; with near_range.ringing_db (the measured ringing) it replaces the shared model's 600-bin values (27.8 dB; 55 dB decaying 22 dB/m) at that acquisition only. 0 / ringing_db None (default) = off"
+    identified_by: "harbour_A-2026-07-22-AM toOptimize, 8372 pings at 1200 bins / 44.3 us / gain 4: 1.5-3.5 m mean of dB 14.53 -> 17.04 dB linear mean (Exp(1)); ~/ros2_ws/sim_runs/raycast/harbour_patch/near_range/"
+    metric: "the processor's FBR rule: ringing end 0.138 m and noise estimate 28.5 dB (real) vs the sim's"
+    uncertainty: "the 1.5-3.5 m profile itself falls 17.1 -> 12.5 dB; one session"
+    confounders: [model.watercolumn_noise, model.ringing_level_db]
+    experiment: "a second 1200-bin / 44.3 us harbour session"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:NearRangeConfig.watercolumn_db"}
+  # -------------------- ray-cast fast-variant engine paths (2026-11-10, config.ENGINE_KNOBS)
+  # Each defaults to today's renderer (the full and live profiles, bit-identical);
+  # only config/raycast_fast_sonar.yaml turns them on. Numerics, never fitted.
+  - name: raycast.sampling.cull_unreachable
+    unit: 1
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "Do not create scatterers no sound can reach: above the still waterline, wall points buried below the seabed, quay faces turned away from the transducer (pontoons keep every face)"
+    identified_by: "owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md)"
+    metric: "raycast_test [F1]"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "owner's live look test (fast vs full)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:SamplingConfig.cull_unreachable"}
+  - name: raycast.sampling.band_cull
+    unit: 1
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "Emit only the seabed-sheet points inside the beam band at their own range (exact when no multipath sequence is kept; near-exact otherwise)"
+    identified_by: "owner 2026-11-10 (fast variant phase 2; docs/engineering/raycast_fast_optimize_plan.md)"
+    metric: "raycast_test [F5]"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "owner's live look test (fast vs full)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:SamplingConfig.band_cull"}
+  - name: raycast.paths.reselect_every
+    unit: pings
+    class: model_structure
+    status: structural
+    default: 1
+    bounds: [1, 100]
+    tunable: false
+    meaning: "Reuse a side's echo-path selection for up to this many pings (while the sensor moved < reselect_move_m, turned < 2 deg and the boundaries in range are unchanged); 1 = select every ping"
+    identified_by: "owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md)"
+    metric: "raycast_test [F2]"
+    uncertainty: "n/a (a numerical setting)"
+    confounders: []
+    experiment: "owner's live look test (fast vs full)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:PathsConfig.reselect_every"}
+  - name: raycast.paths.reselect_move_m
+    unit: m
+    class: model_structure
+    status: structural
+    default: 0.0
+    bounds: [0.0, 5.0]
+    tunable: false
+    meaning: "A reused echo-path selection is redone once the transducer moved this far since it was made"
+    identified_by: "owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md)"
+    metric: "raycast_test [F2]"
+    uncertainty: "n/a (a numerical setting)"
+    confounders: []
+    experiment: "owner's live look test (fast vs full)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:PathsConfig.reselect_move_m"}
+  - name: raycast.diffraction.method
+    unit: enum
+    class: model_structure
+    status: structural
+    default: sampled
+    choices: [sampled, edge]
+    tunable: false
+    meaning: "Shadow-edge diffraction: the ray-traced Fresnel-Kirchhoff disc, or the closed form F(v) of the nearest free straight wall edge (same per-leg ratio and window, no ray casts)"
+    identified_by: "owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md)"
+    metric: "raycast_test [F3] (D1 knife edge, GPU = CPU)"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "owner's live look test (fast vs full)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:DiffractionConfig.method"}
+  - name: raycast.precision
+    unit: enum
+    class: model_structure
+    status: structural
+    default: fp64
+    choices: [fp64, fp32]
+    tunable: false
+    meaning: "The GPU's per-triangle visibility test in float64, or the float32 watertight test in the BVH's local frame (GPU only; the CPU reference stays float64)"
+    identified_by: "owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md)"
+    metric: "raycast_test [F4]"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "owner's live look test (fast vs full)"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:RaycastConfig.precision"}
+  # -------------------- ray-cast: review of 2026-11-11 (docs/engineering/independent_review_2026-11-11.md)
+  # Each defaults to the behaviour before that date; only the harbour profiles turn them on.
+  - name: raycast.floor.addition
+    unit: enum
+    class: model_structure
+    status: structural
+    default: power
+    choices: [power, field]
+    tunable: false
+    meaning: "How the shadow (reverberation) floor meets the diffuse echo in a lit bin. power: its independent Exp(1) intensity is added (fills the speckle's deep nulls). field: it is an independent complex Gaussian field added before detection, so a lit bin stays exponential at the summed mean; a shadow is filled alike in both"
+    identified_by: "the 2026-11-11 session: plain-seabed 1st percentile -17.0 dB re the mean with the power floor at 18 dB, real harbour -20.5 dB; Monte-Carlo -16.7 (power) / -20.0 (field)"
+    metric: "picture_compare dark_tail_db and hp_std_db on plain seabed; smoke [18]"
+    uncertainty: "n/a (a switch)"
+    confounders: [raycast.floor.reverberation_db]
+    experiment: "owner's live look test on a harbour profile"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:FloorConfig.addition"}
+  - name: raycast.labels.enabled
+    unit: 1
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "Ground-truth contacts of the ray-cast sensor (labels.py): which objects a ping insonifies, whether they are visible and the shadow each casts, read off the renderer's own mesh by its own visibility oracle. Never changes the ping"
+    identified_by: "review of 2026-11-11 (the ray-cast returned no contacts, so no labelled dataset)"
+    metric: "raycast_test [L1]-[L7]"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "a Perception dataset-mode run on a harbour profile"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:LabelsConfig.enabled"}
+  - name: raycast.labels.max_points
+    unit: 1
+    class: model_structure
+    status: structural
+    default: 512
+    tunable: false
+    meaning: "Surface points per object the label visibility test samples at most (shared out by triangle area)"
+    identified_by: "raycast_test [L2] (shadow within 2 bins of geometry) and [L7] (cost) at 512"
+    metric: "raycast_test [L2], [L7]"
+    uncertainty: "n/a (numerics)"
+    confounders: []
+    experiment: "none needed"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:LabelsConfig.max_points"}
+  - name: raycast.seed_per_run
+    unit: 1
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "The scatterer lattice (speckle realisation) takes the run's noise seed (the node's seed parameter) instead of the world seed alone: two runs of one world draw two speckle fields, and seed:=<noise_seed> replays one exactly"
+    identified_by: "review of 2026-11-11 (raycast.seed was 0 in every profile: every run of a world showed the same speckle)"
+    metric: "~/ground_truth/run_info seeds.scatterer"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "two dataset runs of one world"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:RaycastConfig.seed_per_run"}
+  - name: raycast.objects.mode
+    unit: enum
+    class: model_structure
+    status: structural
+    default: raster
+    choices: [raster, solid]
+    tunable: false
+    meaning: "How scene objects reach the ray-cast's triangle scene. raster: rough and aggregate objects are the bumps of the world's height raster, at the world's resolution. solid: the sheet is the terrain alone (depth.npz) and every object is meshed at load from the manifest as its parts (worldgen.compounds), each with its material; every part scatters diffusely and a smooth one also mirrors"
+    identified_by: "review of 2026-11-11: in a 0.2 m harbour world a pallet was ~20 raised vertices and a small weight one (15 of 29 classes take the raster path)"
+    metric: "raycast_test [O1]-[O8]"
+    uncertainty: "n/a (a switch)"
+    confounders: []
+    experiment: "owner's live look test on a harbour world with objects"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.mode"}
+  - name: raycast.objects.fouling
+    unit: fraction
+    class: environment
+    status: run_setting
+    default: 0.0
+    tunable: false
+    meaning: "Fraction of every object and wall surface covered by sediment and growth: it scatters like the seabed sediment at the local facet angle and does not mirror. 0 = clean materials. Set per run (node parameter fouling)"
+    identified_by: "not identified: no measurement of fouled objects at 450 kHz was found; SERDP project MR21-3582 (acoustic scattering from aged munitions) states that the relation between biofouling and the acoustic signature is not well understood"
+    metric: "raycast_test [O9]"
+    uncertainty: "the whole range [0, 1]: a sensitivity axis of the aspect response, clean = upper bound"
+    confounders: [object roughness]
+    experiment: "the real heading-response experiment on a fouled and a clean object"
+    owner: sonar/raycast
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.fouling"}

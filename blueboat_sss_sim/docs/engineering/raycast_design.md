@@ -2,8 +2,10 @@
 
 Second simulated sensor, `renderer: raycast`, beside the unchanged `GeometricRenderer`. Plan and gates:
 `raycast_plan.md`. Literature: `docs/literature/raycast_sonar/INDEX.md` (notes 01–10 are cited as
-[n01]–[n10]). Numbers: `~/ros2_ws/sim_runs/raycast/notes/phase0_numbers.txt`. Status 2026-11-02:
-Phase 0. Nothing here is implemented yet.
+[n01]–[n10]). Numbers: `~/ros2_ws/sim_runs/raycast/notes/phase0_numbers.txt`. Status 2026-11-07:
+Phases 0–6 built, GPU path complete, live in a slowed simulation (§11). The calibration status, including the
+harbour-first hybrid, is in `raycast_assessment.md` §13. This document is the design; the 2026-11-02 Phase-0 text
+below is kept as written.
 
 ## 1. What the sensor is
 
@@ -338,8 +340,24 @@ run and equal to CPU within G1 (summation order differs from numpy's); documente
   `motion=(v_body, w_body)`; the GPU stack is imported lazily, only when selected. The geometric path
   is byte-identical.
 * Launch `sonar_renderer:=`; GCS selector (owner decision 2026-11-02, both paths).
-* Live runs: a slower renderer lowers the ping rate (the timer cannot catch up). No slow-down mode is
-  built (owner).
+* Live runs: a slower renderer lowers the ping rate (the timer cannot catch up). **Slow-down mode built
+  2026-11-07 (owner order, superseding "none is built"):** `full_mission_launch.py real_time_factor:=`
+  (0.01-1.0) runs the whole simulation on one clock below real time (`gz sim -z`); the control
+  nodes take `time_source: ros`, the GCS processor `use_sim_time`, Perception's label wait the node
+  clock, the GCS and MCS a sim-paced station clock, so a slowed run pings at the profile's period in
+  sim time and records what a real-speed one does. MCS: Sonar model + Slow-down rows. The node logs
+  the achieved sim-time rate and the factor that would hold the period when it falls behind.
+  Implemented: node `renderer` / `raycast_backend`, launch `sonar_renderer:=`. Still open: the GCS
+  replay-path selector (`sonar_source.py`).
+* Profiles. MCS **Extra args** `sonar_config:=` picks a ray-cast profile other than the packaged one,
+  for example the harbour hybrid (`raycast_assessment.md` §13). The node builds the correction layer from
+  the profile's `raycast.correction` and checks the artifact's core fingerprint.
+* Range. The GPU working set grows with the range: on an 8 GB GPU in the harbour world it peaks at
+  2.3 GB at 20 m and 6.3 GB at 40 m, and runs out of memory at 50 m (CUDA error 101,
+  `raycast_assessment.md` §13.7). The advice is ≤ 30 m (module README). This applies to the GCS's range
+  control too, which re-ranges the node.
+* Verified end to end on 2026-11-07, harbour 20 m at x0.03: the MCS `LaunchManager`, then the
+  simulation, then the GCS App's START / Record and its seabed images (`integration_guide.md` §2b).
 
 ## 12. Needed measurements (none blocks Phases 1–6)
 
@@ -439,3 +457,21 @@ The incoherent share `1 − C` of each specular bounce (forward scatter, double 
 rendered (optional, off), for the floor as for the surface. The surface RMS default is the geometric
 profile's judged open-water 0.02 m (surface chains then fall below the cut-off); a calm site is a
 record (pool 3e-4 m, pass 4).
+
+## 15. Fast-variant engine paths (2026-11-10)
+
+Five knobs (`config.ENGINE_KNOBS`) whose defaults reproduce the renderer above exactly. Only the generated
+`raycast_fast_sonar.yaml` turns them on, and a correction artifact's core fingerprint leaves them out at their
+default. Spec, as-built notes and timings: `raycast_fast_optimize_plan.md`.
+
+- `sampling.cull_unreachable` drops scatterers no sound can reach, on the CPU and the GPU alike:
+  - above the still waterline;
+  - wall points buried below the seabed;
+  - quay faces turned away from the transducer.
+- `paths.reselect_every` / `reselect_move_m` reuse a side's echo-path selection across pings. The kept
+  chains are still evaluated every ping. GPU only.
+- `diffraction.method: edge` uses the closed-form half-plane F(v) of the nearest free straight edge of a
+  wall box, with the same per-leg ratio, window and two-way product as §14's sampled disc. Objects and relief
+  get no factor.
+- `precision: fp32` runs the float32 watertight visibility test at `seg_blocked`. GPU only.
+

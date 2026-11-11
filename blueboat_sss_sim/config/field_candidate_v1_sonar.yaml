@@ -68,6 +68,7 @@ model:
   coherent_scatterers: true
   scatterer_cell_m: 0.01
   scatterer_seed: 0
+  scatterer_anchoring: line
   reverberation_reference: ambient
   volume_scattering_coeff: 0.0
   penumbra_deg: 0.0

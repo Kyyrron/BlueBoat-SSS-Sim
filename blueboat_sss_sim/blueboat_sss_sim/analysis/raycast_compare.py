@@ -198,7 +198,15 @@ def compare(real: np.ndarray, sims: Mapping[str, np.ndarray], *, B: int = 300,
     resample of the real rows for both renderers), and the improvement of
     ``raycast`` over ``geometric`` when both are given."""
     rng = np.random.default_rng(seed)
-    point = {k: errors(real, s, rng=np.random.default_rng(1), **kw)
+
+    def _for(k):
+        """kw with ``fbr_sim`` resolved to renderer ``k``'s detections (a
+        mapping per renderer, as the bootstrap below reads it)."""
+        kk = dict(kw)
+        if isinstance(kk.get("fbr_sim"), Mapping):
+            kk["fbr_sim"] = kk["fbr_sim"].get(k)
+        return kk
+    point = {k: errors(real, s, rng=np.random.default_rng(1), **_for(k))
              for k, s in sims.items()}
     boots = {k: [] for k in sims}
     imp = []

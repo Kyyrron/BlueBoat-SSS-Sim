@@ -143,7 +143,7 @@ class HullBoxes:
         ``config/sea_states.yaml``; unknown keys raise by name."""
         known = {"mass_kg", "gazebo_box", "catamaran", "water_density",
                  "target_entity", "target_entity_type", "damping",
-                 "wave_force_clip", "hydrostatics"}
+                 "wave_force_clip", "hydrostatics", "wave_response"}
         unknown = set(cfg) - known
         if unknown:
             raise KeyError(f"Unknown hull keys: {sorted(unknown)}")
@@ -219,6 +219,11 @@ class HullBoxes:
         return force, torque
 
     # ----------------------------------------------------------- statics
+    def draft_at_trim(self) -> float:
+        """Depth of the deepest hull bottom below the still waterline at
+        the flat-water equilibrium [m] (the catamaran's 4.5 cm)."""
+        return float(-(self.equilibrium_z() + self._zbot.min()))
+
     def equilibrium_z(self) -> float:
         """Link-origin height at which the flat-plane buoyancy equals the
         weight (bisection), i.e. the still-water trim."""
@@ -234,13 +239,20 @@ class HullBoxes:
                 hi = mid
         return 0.5 * (lo + hi)
 
-    def restoring_summary(self, inertia=(2.42369, 3.9235025, 5.6403125),
+    def restoring_summary(self, inertia=(2.42369, 5.6403125, 3.9235025),
                           cog_z: float = -0.12913,
                           added_mass=(14.57, 0.12, 0.12)) -> dict:
         """Hydrostatic stiffness (finite-difference about the trim) and
         natural periods, from the URDF inertia and the Hydrodynamics
         plugin's added-mass diagonal (heave zDotW, roll kDotP, pitch
-        mDotQ) -- reported in the model doc."""
+        mDotQ) -- reported in the model doc.
+
+        ``inertia`` is the LINK-frame diagonal (Ixx, Iyy, Izz) Gazebo
+        integrates, ``sea.motion.URDF_LINK_INERTIA``: the xacro writes
+        (2.42, 3.92, 5.64) in an inertial frame rolled by π/2, so pitch
+        is 5.64 kg·m² (the default was the unrotated triple until
+        2026-11-10, which quoted the pitch period as 0.60 s instead of
+        0.72 s)."""
         flat = lambda x, y: np.zeros_like(x)  # noqa: E731
         z_eq = self.equilibrium_z()
         d = 0.002

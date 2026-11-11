@@ -294,9 +294,17 @@ class Diffraction:
         p1 = np.stack([r1 * np.cos(t0 + dth), r1 * np.sin(t0 + dth)], axis=-1)
         if m is None:
             # >= 8 samples per period of e^{-i pi s} (period 2 in s) along
-            # the chord's zone span, never fewer than 16
-            span = float(np.max(np.abs(s1 - s0))) if s0.size else 0.0
-            m = int(min(max(16, np.ceil(4.0 * span) + 16), 512))
+            # EACH chord's own zone span, never fewer than 16: per leg, so a
+            # leg's factor does not depend on the other legs of the call
+            mm = np.minimum(np.maximum(16, np.ceil(4.0 * np.abs(np.asarray(s1) - np.asarray(s0)))
+                                       + 16), 512).astype(np.int64)
+            if mm.size == 0:
+                return np.zeros(np.shape(s0), dtype=complex)
+            out = np.empty(np.shape(s0), dtype=complex)
+            for mv in np.unique(mm):
+                sel = mm == mv
+                out[sel] = self._chord_H(np.asarray(s0)[sel], np.asarray(s1)[sel], t0, dth, int(mv))
+            return out
         if s0.ndim == 1 and s0.size * m > _POINTS_PER_CALL:
             k = max(1, _POINTS_PER_CALL // m)          # memory: chunks of chords, same m
             return np.concatenate([self._chord_H(s0[a:a + k], s1[a:a + k], t0, dth, m)
@@ -362,3 +370,208 @@ class Diffraction:
         if e.size:
             out[e] = self.factor(A[e], B[e], np.asarray(d1)[e])
         return out
+
+
+# ===================================================== closed-form straight edges
+# The fast variant's diffraction method (``diffraction.method: edge``,
+# 2026-11-10, docs/engineering/raycast_fast_optimize_plan.md). The quantity is
+# the one above, the per-leg ratio U/U0 of the windowed Kirchhoff integral,
+# evaluated in closed form for the nearest straight edge of the scene's wall
+# boxes instead of being ray-traced over the disc: for a half-plane it is
+# exactly F(v) (gate D1), v = the signed clearance of the edge from the leg in
+# units of sqrt(lambda d_eff / 2) (+ in the edge's geometric shadow). The same
+# window weights it (1 inside n1 zones, a raised cosine to 0 at n2), so a lit
+# leg gets 1 + w (F - 1), a shadowed one w F, and both are continuous across
+# the shadow boundary (F(0) = 1/2) and at n2. Only straight edges with water
+# on both sides diffract: a wall box's vertical corners clipped to the water
+# column, its top edges when it lies submerged (a sill), its bottom edges where
+# it floats above the seabed (a pontoon). The waterline of a wall that rises
+# out of the water, and its toe on the seabed, are closed corners. Objects and
+# seabed relief get no factor (as with diffraction off), nor does a leg whose
+# shadow is cast by anything but exactly one wall box.
+
+#: horizontal free edges are split into pieces of at most this length [m], each
+#: kept where the water is clear beneath it (the seabed under a sill varies)
+EDGE_PIECE_M = 0.25
+
+
+def fresnel_F(v):
+    """The half-plane ratio ``F(v) = ((1+i)/2) int_v^inf exp(-i pi t^2/2) dt``
+    in this renderer's ``exp(-i omega tau)`` convention (gate D1's form)."""
+    from scipy.special import fresnel
+    S, C = fresnel(np.asarray(v, dtype=np.float64))
+    return 0.5 * (1.0 + 1.0j) * ((0.5 - C) - 1.0j * (0.5 - S))
+
+
+def edge_window(s, n1: float, n2: float):
+    """``FresnelDisc``'s taper as a function of the zone index s."""
+    t = np.clip((np.asarray(s, np.float64) - n1) / (n2 - n1), 0.0, 1.0)
+    return 0.5 * (1.0 + np.cos(np.pi * t))
+
+
+@dataclass
+class EdgeSet:
+    """The scene's free straight edges and the wall boxes that own them."""
+    a: np.ndarray            # (E, 3) edge start
+    b: np.ndarray            # (E, 3) edge end
+    box: np.ndarray          # (E,) owning box index
+    centre: np.ndarray       # (W, 3) box centre
+    axes: np.ndarray         # (W, 3, 3) rows: along the wall, across it, up
+    half: np.ndarray         # (W, 3) half extents along those axes
+
+    def near(self, P, reach: float) -> np.ndarray:
+        """Indices of the edges within ``reach`` of P."""
+        if self.a.shape[0] == 0:
+            return np.zeros(0, dtype=np.int64)
+        d = self.b - self.a
+        t = np.clip(np.einsum("ij,ij->i", P - self.a, d)
+                    / np.maximum(np.einsum("ij,ij->i", d, d), 1e-300), 0.0, 1.0)
+        dist = np.linalg.norm(self.a + t[:, None] * d - P, axis=1)
+        return np.flatnonzero(dist <= reach)
+
+
+def free_edges(rr) -> EdgeSet:
+    """The wall boxes of the renderer's mesh (``scene_mesh._wall_box``, the
+    very vertices the oracle traces) and their free edges in the water column."""
+    from .scene_mesh import _wall_box
+    m = rr.mesh
+    walls = getattr(rr._scene, "walls", None) or []
+    margin = max(float(rr._rc.sampling.surface_offset_m), 0.01)
+
+    def seabed(xy):
+        return rr.sheet._locate(np.atleast_1d(xy[..., 0]), np.atleast_1d(xy[..., 1]))[0]
+
+    A, B, own, cen, axs, hal = [], [], [], [], [], []
+    for wi, w in enumerate(walls):
+        tri = np.flatnonzero(m.wall_index == wi)
+        if tri.size == 0:
+            continue
+        vm = np.unique(m.vertices[m.triangles[tri]].reshape(-1, 3), axis=0)
+        v, _ = _wall_box(w, float(vm[:, 2].min()))
+        if not np.allclose(np.unique(v, axis=0), vm, atol=1e-9):
+            raise RuntimeError(f"wall {w.name!r}: mesh box differs from _wall_box")
+        z_base, z_top = float(v[0, 2]), float(v[4, 2])
+        bi = len(cen)
+        ux, uy = w.unit
+        cen.append(v.mean(axis=0))
+        axs.append(np.array([[ux, uy, 0.0], [-uy, ux, 0.0], [0.0, 0.0, 1.0]]))
+        hal.append(np.array([0.5 * w.length, 0.5 * float(w.thickness), 0.5 * (z_top - z_base)]))
+        for k in range(4):                                  # vertical corners
+            x, y = v[k, 0], v[k, 1]
+            z0 = max(z_base, float(seabed(np.array([x, y]))[0]) + margin)
+            z1 = min(z_top, -margin)
+            if z1 > z0 + 1e-6:
+                A.append([x, y, z0]); B.append([x, y, z1]); own.append(bi)
+        for z, below in ((z_top, False), (z_base, True)):   # top / bottom rims
+            if z >= -margin:
+                continue
+            base = 4 if not below else 0
+            for k in range(4):
+                p0, p1 = v[base + k], v[base + (k + 1) % 4]
+                n = max(int(np.ceil(np.linalg.norm(p1 - p0) / EDGE_PIECE_M)), 1)
+                ts = np.linspace(0.0, 1.0, n + 1)
+                pts = p0 + ts[:, None] * (p1 - p0)
+                clear = seabed(pts[:, :2]) < z - margin
+                for j in range(n):
+                    if clear[j] and clear[j + 1]:
+                        A.append(pts[j]); B.append(pts[j + 1]); own.append(bi)
+    f3 = lambda x: np.asarray(x, np.float64).reshape(-1, 3)        # noqa: E731
+    return EdgeSet(f3(A), f3(B), np.asarray(own, np.int64), f3(cen),
+                   np.asarray(axs, np.float64).reshape(-1, 3, 3), f3(hal))
+
+
+def segments_closest(P, X, a, b):
+    """Closest points of the segments P->X (n legs) and a->b (n edges):
+    ``(s, h)`` = the leg parameter in [0, 1] and the distance (Ericson,
+    Real-Time Collision Detection 5.1.9)."""
+    d1, d2, r = X - P, b - a, P - a
+    A = np.einsum("ij,ij->i", d1, d1)
+    E = np.einsum("ij,ij->i", d2, d2)
+    Fv = np.einsum("ij,ij->i", d2, r)
+    C = np.einsum("ij,ij->i", d1, r)
+    Bv = np.einsum("ij,ij->i", d1, d2)
+    den = A * E - Bv * Bv
+    s = np.where(den > 1e-12 * A * E, np.clip((Bv * Fv - C * E) / np.where(den > 0, den, 1.0),
+                                              0.0, 1.0), 0.0)
+    t = (Bv * s + Fv) / np.maximum(E, 1e-300)
+    lo, hi = t < 0.0, t > 1.0
+    s = np.where(lo, np.clip(-C / A, 0.0, 1.0), np.where(hi, np.clip((Bv - C) / A, 0.0, 1.0), s))
+    t = np.clip(t, 0.0, 1.0)
+    h = np.linalg.norm(P + s[:, None] * d1 - (a + t[:, None] * d2), axis=1)
+    return s, h
+
+
+def segment_crosses_box(P, X, centre, axes, half, shrink: float = 1e-4):
+    """Does the segment P->X (n legs) pass through the oriented box (slab
+    test, the box shrunk by ``shrink`` so a leg ending on a face does not)?"""
+    p = np.einsum("jk,ik->ij", axes, P - centre)
+    d = np.einsum("jk,ik->ij", axes, X - P)
+    hh = np.maximum(half - shrink, 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t1 = (-hh - p) / d
+        t2 = (hh - p) / d
+    par = np.abs(d) < 1e-300
+    tlo = np.where(par, np.where(np.abs(p) <= hh, -np.inf, np.inf), np.minimum(t1, t2))
+    thi = np.where(par, np.where(np.abs(p) <= hh, np.inf, -np.inf), np.maximum(t1, t2))
+    t0, t1_ = tlo.max(axis=1), thi.min(axis=1)
+    return (t0 < t1_) & (t1_ > 0.0) & (t0 < 1.0)
+
+
+class EdgeDiffraction:
+    """``diffraction.method: edge``: the closed-form leg factor of the
+    nearest free straight edge (module comment above); the CPU reference of
+    ``gpu_render._edge_factor_k``."""
+
+    def __init__(self, rr, lam: float, n1: float, n2: float, end_margin_m: float) -> None:
+        self.lam = float(lam)
+        self.n1, self.n2 = float(n1), float(n2)
+        self.end_margin = float(end_margin_m)
+        self.edges = free_edges(rr)
+        self.reach = float(rr.r_max) + 1.0
+
+    def leg_factors(self, P, X, blocked, lit_ok, chunk: int = 20000):
+        """Legs P -> X[i]: ``(idx, D)`` for those an edge diffracts.
+        ``blocked``: the leg is shadowed; ``lit_ok``: a clear leg that may
+        take a lit-side factor (untouched by transmission)."""
+        E = self.edges
+        near = E.near(P, self.reach)
+        cand = np.flatnonzero(blocked | lit_ok)
+        if near.size == 0 or cand.size == 0:
+            return np.zeros(0, np.int64), np.zeros(0, np.complex128)
+        used = np.unique(E.box[near])
+        out_i, out_d = [], []
+        for c0 in range(0, cand.size, chunk):
+            idx = cand[c0:c0 + chunk]
+            Xi = X[idx]
+            n = idx.size
+            Pn = np.broadcast_to(P, (n, 3))
+            L = np.linalg.norm(Xi - P, axis=1)
+            cross = np.zeros((n, used.size), dtype=bool)
+            for j, bx in enumerate(used):
+                cross[:, j] = segment_crosses_box(Pn, Xi, E.centre[bx], E.axes[bx], E.half[bx])
+            shadow = blocked[idx]
+            ncross = cross.sum(axis=1)
+            own = np.where(ncross == 1, used[np.argmax(cross, axis=1)], -1)
+            best_s = np.full(n, np.inf)
+            for e in near:
+                s, h = segments_closest(Pn, Xi, np.broadcast_to(E.a[e], (n, 3)),
+                                        np.broadcast_to(E.b[e], (n, 3)))
+                d1 = s * L
+                d2 = L - d1
+                ok = (d1 > self.end_margin) & (d2 > self.end_margin)
+                ok &= np.where(shadow, own == E.box[e], ncross == 0)
+                deff = d1 * d2 / np.maximum(L, 1e-300)
+                z = np.where(ok, h * h / (self.lam * np.maximum(deff, 1e-300)), np.inf)
+                best_s = np.minimum(best_s, z)
+            hit = best_s < self.n2
+            if not hit.any():
+                continue
+            s_ = best_s[hit]
+            v = np.sqrt(2.0 * s_) * np.where(shadow[hit], 1.0, -1.0)
+            F = fresnel_F(v)
+            w = edge_window(s_, self.n1, self.n2)
+            out_i.append(idx[hit])
+            out_d.append(np.where(shadow[hit], w * F, 1.0 + w * (F - 1.0)))
+        if not out_i:
+            return np.zeros(0, np.int64), np.zeros(0, np.complex128)
+        return np.concatenate(out_i), np.concatenate(out_d)

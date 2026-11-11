@@ -34,7 +34,7 @@ relevant doc (the wall and sea numbers belong in `docs/sonar_model.md` §11 and
 
 | # | Command | Expected |
 |---|---|---|
-| A1 | `cd BlueBoat-SSS-Sim/blueboat_sss_sim && python3 -m test.smoke_test` | `ALL CHECKS PASSED` (434 checks as of 2026-10-09, ~165 s — the Stop hook's timeout is 330 s over the script's `SUITE_TIMEOUT_S` 300 s; `[2f]` needs the corpus at `~/ros2_ws/data/SSS_data`; concurrent runs wait on a lock) |
+| A1 | `cd BlueBoat-SSS-Sim/blueboat_sss_sim && python3 -m test.smoke_test` | `ALL CHECKS PASSED` (496 checks on the system python as of 2026-11-07, ~4 min — the Stop hook's timeout is 450 s over the script's `SUITE_TIMEOUT_S` 420 s; `[2f]` needs the corpus at `~/ros2_ws/data/SSS_data`; concurrent runs wait on a lock) |
 | A2 | `QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke` | `GUI SMOKE PASSED` |
 | A3 | `cd BlueBoat-SSS/blueboat_sss && QT_QPA_PLATFORM=offscreen python3 -m pytest -q` | all pass (31 assembly tests need the sourced workspace; 9 throughput tests) |
 | A4 | `python3 -m blueboat_gcs.analysis.ping_bench --pings 4000 --turn` (same dir) | ingest ≤ 2 ms/ping, mosaic render ≤ 15 ms, waterfall ≤ 20 ms, cell ≈ 0.026 → 0.053 m after one budget coarsening, RSS flat |

@@ -23,6 +23,25 @@ sonar_seed      sensor-noise seed for the node (default 0: a fresh seed from
                 OS entropy, which the node logs and reports as
                 ``noise_seed`` on ~/ground_truth/sensor, so any run can be
                 replayed by passing that value here)
+sonar_renderer  ``geometric`` | ``raycast`` | "" (default: the profile's own
+                ``renderer:`` key, else geometric). ``raycast`` without an
+                explicit ``sonar_config`` resolves the profile to the package's
+                ``config/raycast_default_sonar.yaml`` (2026-11-07,
+                ``raycast_design.md`` §11). The ray-cast is far slower than the
+                ping period: run the simulation slowed down
+                (``full_mission_launch.py real_time_factor:=``)
+sonar_fouling   ray-cast: fouled fraction of object and wall surfaces for this
+                run, 0..1 (default -1: the profile's ``raycast.objects.fouling``)
+sonar_hold_sim  ``auto`` | ``when_needed`` | ``always`` | ``off`` (default ``auto``:
+                ``when_needed`` for the ray-cast). Pause the Gazebo world
+                ``gz_world_name`` while a ping cycle overruns its wall budget
+                (``ping period / real_time_factor``), so no ping is skipped
+                (2026-11-09, ``core/sim_hold.py``). Without a world name (a
+                standalone sonar, the GCS's bag-replay sonar) nothing is held.
+gz_world_name   the running Gazebo world's ``<world name>`` (default '';
+                ``full_mission_launch.py`` passes it)
+real_time_factor  the simulation's real-time factor (default 1.0;
+                ``full_mission_launch.py`` passes its own): the hold's budget
 auto_ping       enable pinging automatically at startup       (default true)
 quiet           route helper one-shot output to log           (default true)
 
@@ -72,9 +91,24 @@ if sl is not None:
     sl.declare_arg("sonar_seed", default_value="0",
                    description="sensor-noise seed; 0 = fresh, logged and "
                                "reported as noise_seed")
+    sl.declare_arg("sonar_renderer", default_value="",
+                   description="geometric | raycast | '' (the profile's "
+                               "renderer: key, else geometric)")
+    sl.declare_arg("sonar_fouling", default_value="-1",
+                   description="ray-cast: fouled fraction of object and wall "
+                               "surfaces, 0..1; -1 = the profile's")
     sl.declare_arg("with_mavros_shim", default_value=True)
     sl.declare_arg("sim_origin_lat", default_value="")
     sl.declare_arg("sim_origin_lon", default_value="")
+    sl.declare_arg("sonar_hold_sim", default_value="auto",
+                   description="auto | when_needed | always | off: pause Gazebo "
+                               "while a ping cycle overruns (2026-11-09)")
+    sl.declare_arg("gz_world_name", default_value="",
+                   description="the running Gazebo world's name (the hold's "
+                               "/world/<name>/control); '' = no hold")
+    sl.declare_arg("real_time_factor", default_value="1.0",
+                   description="the simulation's real-time factor (the hold's "
+                               "wall budget per ping)")
     sl.declare_arg("auto_ping", default_value=True)
     sl.declare_arg("quiet", default_value=True)
     for _a in ACQUISITION_ARGS:
@@ -83,10 +117,15 @@ if sl is not None:
                                    "sonar profile's value")
 
 
-def resolve_sonar_config(world_dir, sonar_config=None) -> str:
-    """The sonar profile in force: explicit > the folder's own frozen
-    ``sonar.yaml`` (legacy bundles) > the package default. Module scope,
-    launch-free, so the smoke test exercises the same resolution.
+#: The ray-cast sensor's packaged profile (``renderer: raycast``).
+RAYCAST_PROFILE = "raycast_default_sonar.yaml"
+
+
+def resolve_sonar_config(world_dir, sonar_config=None, renderer="") -> str:
+    """The sonar profile in force: explicit > (``renderer`` ``raycast``: the
+    package's ray-cast profile) > the folder's own frozen ``sonar.yaml``
+    (legacy bundles) > the package default. Module scope, launch-free, so
+    the smoke test exercises the same resolution.
 
     An explicit bare file name that is not a file in the working directory
     (``sonar_config:=field_candidate_v1_sonar.yaml``) resolves against the
@@ -103,6 +142,8 @@ def resolve_sonar_config(world_dir, sonar_config=None) -> str:
             if packaged.exists():
                 return str(packaged)
         return str(given) if given.exists() else str(sonar_config)
+    if str(renderer or "").strip().lower() == "raycast":
+        return str(Path(find_default_sonar_yaml()).parent / RAYCAST_PROFILE)
     frozen = Path(world_dir) / "sonar.yaml"
     if frozen.exists():
         return str(frozen)
@@ -161,7 +202,9 @@ def launch_setup():
     # Simulated sonar (drop-in replacement for the real sss_node.py).
     # Acquisition comes from the resolved profile, passed explicitly, so
     # the run images what a named file records, never silent defaults.
-    sonar_yaml = resolve_sonar_config(world_dir, sl.arg("sonar_config"))
+    renderer = str(sl.arg("sonar_renderer") or "").strip().lower()
+    sonar_yaml = resolve_sonar_config(world_dir, sl.arg("sonar_config"),
+                                      renderer)
     acquisition = resolve_acquisition(
         sonar_yaml, {a: sl.arg(a) for a in ACQUISITION_ARGS})
     sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
@@ -171,6 +214,13 @@ def launch_setup():
                 "odom_topic": "/blueboat/odom",
                 "publish_ground_truth": True,
                 "seed": int(str(sl.arg("sonar_seed") or 0)),
+                "renderer": renderer,
+                "fouling": float(str(sl.arg("sonar_fouling") or -1)),
+                # Additive (2026-11-09): hold the simulation while a slow
+                # ping renders (sss_sim_node module doc).
+                "hold_sim_while_rendering": str(sl.arg("sonar_hold_sim") or "auto"),
+                "gz_world_name": str(sl.arg("gz_world_name") or ""),
+                "real_time_factor": float(str(sl.arg("real_time_factor") or 1.0)),
                 **acquisition,
             })
 

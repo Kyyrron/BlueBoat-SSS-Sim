@@ -68,6 +68,30 @@ def hydrostatics_from_config(hull_cfg) -> str:
     return v
 
 
+#: ``hull.wave_response`` defaults: how the wave field is built for the hull
+#: and whether its pressure is read at the draft. Absent from a presets
+#: file, the pre-2026-11-10 behaviour holds bit for bit (equal-energy
+#: bins, surface pressure).
+WAVE_RESPONSE_DEFAULTS = {"discretisation": "equal_energy", "f_max_hz": 3.0,
+                          "draft_decay": False}
+
+
+def wave_response_from_config(hull_cfg) -> dict:
+    """``hull.wave_response`` of ``config/sea_states.yaml``; unknown keys
+    raise by name."""
+    raw = dict((hull_cfg or {}).get("wave_response") or {})
+    unknown = set(raw) - set(WAVE_RESPONSE_DEFAULTS)
+    if unknown:
+        raise KeyError(f"Unknown hull.wave_response keys: {sorted(unknown)}")
+    out = {**WAVE_RESPONSE_DEFAULTS, **raw}
+    if out["discretisation"] not in ("equal_energy", "hybrid"):
+        raise ValueError("hull.wave_response.discretisation must be "
+                         f"'equal_energy' or 'hybrid', got {out['discretisation']!r}")
+    out["f_max_hz"] = float(out["f_max_hz"])
+    out["draft_decay"] = bool(out["draft_decay"])
+    return out
+
+
 def _flat(x, y):
     return np.zeros_like(x)
 
@@ -94,6 +118,15 @@ class SeaModel:
         #: whenever ``update`` is given the boat's twist (sea/motion.py).
         self.damping = (damping if damping is not None
                         else hull_damping_from_config(presets.hull))
+        #: How the field is built and read (``hull.wave_response``,
+        #: 2026-11-10): the hybrid discretisation resolves the slope
+        #: spectrum to ``f_max_hz``; with ``draft_decay`` the hull feels the
+        #: pressure at its draft (each component x cosh(k(h-d))/cosh(kh)).
+        self.wave_response = wave_response_from_config(presets.hull)
+        _hull = getattr(excitation, "hull", None)
+        self.decay_depth_m = (_hull.draft_at_trim()
+                              if self.wave_response["draft_decay"]
+                              and hasattr(_hull, "draft_at_trim") else 0.0)
         self.depth_m = float(depth_m)
         self.seed = int(seed)
         self.ramp_s = float(ramp_s)
@@ -123,9 +156,13 @@ class SeaModel:
     # ----------------------------------------------------------- builders
     def _build(self, state: SeaState) -> dict:
         w = state.waves
+        wr = self.wave_response
+        n_freq = 24 if wr["discretisation"] == "hybrid" else self.n_freq
         field = WaveField(w.hs_m, w.tp_s, w.gamma, w.from_deg, w.spread_s,
-                          self.depth_m, self.n_freq, self.n_dir,
-                          rng=np.random.default_rng(self.seed))
+                          self.depth_m, n_freq, self.n_dir,
+                          rng=np.random.default_rng(self.seed),
+                          discretisation=wr["discretisation"],
+                          f_max_hz=wr["f_max_hz"])
         return {"state": state, "field": field}
 
     def _retarget(self, state: SeaState, t: float, ramp: float) -> None:
@@ -242,33 +279,49 @@ class SeaModel:
                              False, w, self._next_change(ts),
                              ev.current_event(t_sim), parts, True)
 
-        def surface(x, y):
-            if w >= 1.0:
-                base = fb.elevation(x, y, t_sim)
-            elif w <= 0.0:
-                base = fa.elevation(x, y, t_sim)
-            else:
-                base = ((1.0 - w) * fa.elevation(x, y, t_sim)
-                        + w * fb.elevation(x, y, t_sim))
-            return base + ev.elevation(x, y, t_sim) if ev.active else base
+        d = self.decay_depth_m
 
-        def slope(x, y):
+        def both(x, y, depth):
+            """(η, ∂η/∂x, ∂η/∂y) of the blended field + live wave groups,
+            one phase evaluation per field."""
             if w >= 1.0:
-                sx, sy = fb.slope(x, y, t_sim)
+                e, sx, sy = fb.elevation_and_slope(x, y, t_sim, depth)
             elif w <= 0.0:
-                sx, sy = fa.slope(x, y, t_sim)
+                e, sx, sy = fa.elevation_and_slope(x, y, t_sim, depth)
             else:
-                ax, ay = fa.slope(x, y, t_sim)
-                bx, by = fb.slope(x, y, t_sim)
+                ea, ax, ay = fa.elevation_and_slope(x, y, t_sim, depth)
+                eb, bx, by = fb.elevation_and_slope(x, y, t_sim, depth)
+                e = (1.0 - w) * ea + w * eb
                 sx, sy = (1.0 - w) * ax + w * bx, (1.0 - w) * ay + w * by
             if ev.active:
-                ex_, ey_ = ev.slope(x, y, t_sim)
+                e = e + ev.elevation(x, y, t_sim, depth)
+                ex_, ey_ = ev.slope(x, y, t_sim, depth)
                 sx, sy = sx + ex_, sy + ey_
+            return e, sx, sy
+
+        # The hull samples the surface and its slope at the same column
+        # points within one excitation call: evaluate the field once for
+        # both (the cache lives for this tick only).
+        _cache: dict = {}
+
+        def _at(x, y):
+            key = (np.asarray(x).__array_interface__["data"][0],
+                   np.asarray(y).__array_interface__["data"][0], np.shape(x))
+            if _cache.get("key") != key:
+                _cache["key"], _cache["val"] = key, both(x, y, d)
+            return _cache["val"]
+
+        def surface(x, y):
+            return _at(x, y)[0]
+
+        def slope(x, y):
+            _e, sx, sy = _at(x, y)
             return sx, sy
 
         force, torque = self.excitation(boat, surface, slope)
         xb, yb = np.array([boat.x]), np.array([boat.y])
-        eta = float(surface(xb, yb)[0])
+        # The readback is the TRUE surface at the boat (no draft decay).
+        eta = float(both(xb, yb, 0.0)[0][0])
         orb = ((1.0 - w) * fa.orbital_velocity(xb, yb, t_sim)[0]
                + w * fb.orbital_velocity(xb, yb, t_sim)[0])
         if ev.active:

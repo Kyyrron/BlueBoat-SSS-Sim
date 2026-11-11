@@ -6,11 +6,18 @@ diffuse scatterers, exact visibility by the scene oracle). Further paths
 (surface, bottom, wall, dihedral, image comb), diffraction, transmission and
 the PO patches of smooth bodies are added one at a time behind their gates.
 
+Ground truth (2026-11-11): with ``raycast.labels.enabled`` the contacts of a
+ping are read off this renderer's own mesh and oracle (``labels.py``); off,
+``RenderedPing.contacts`` is empty, as before.
+
 Output contract (``raycast_design.md`` §2.1, §11): ``Ping.power`` is the
 exact mean ``E|E|^2``; ``Ping.texture`` the realisation over the mean, so the
 shared ``noise.apply_ping_noise`` (speckle on, coherent scatterers, one look)
-reproduces ``|E|^2``; ``specular``, ``unoccluded`` and ``ambient`` are None
-(the shadow floor must come from physics, ``reverberation_db: 0``).
+reproduces ``|E|^2``; ``specular`` carries only the transmit ringing,
+``unoccluded`` is None, and ``ambient`` is None (the shadow floor from
+physics, ``reverberation_db: 0``) unless ``raycast.floor`` is on (harbour
+profiles, 2026-11-10): then the ping's own lit-seabed reference
+(``floor.ambient_reference``) for the noise stage's NC #15 floor.
 
 ROS-free, Qt-free, numpy only.
 """
@@ -30,8 +37,9 @@ from . import propagation as _prop
 from .config import RaycastConfig
 from .receiver import BinGrid, envelope_for
 from .scattering import DiffuseLaw
-from .scatterers import Scatterers, SheetSampler, planar_sample
-from .scene_mesh import (KIND_WALL, SceneOracle, TriangleScene,
+from .scatterers import (Scatterers, SheetSampler, cull_wall_triangle, planar_sample,
+                         wall_is_quay)
+from .scene_mesh import (KIND_SMOOTH_OBJECT, KIND_SOLID, KIND_WALL, SceneOracle, TriangleScene,
                          build_scene_mesh)
 
 
@@ -47,7 +55,29 @@ class RaycastRenderer(SonarRenderer):
         self._cfg = model
         self._rc = config or RaycastConfig()
         rc = self._rc
-        self.mesh = mesh if mesh is not None else build_scene_mesh(scene, world_dir)
+        #: the shadow floor's smoothed reference slope, per side (floor.py)
+        self._floor_state: dict = {}
+        #: the measured near-range ringing of this acquisition mode
+        #: (raycast.near_range, harbour patch v2), or None: the shared model's
+        self._near = (rc.near_range if rc.near_range.applies(
+            acquisition, float(getattr(model, "max_ping_rate_hz", 0.0))) else None)
+        if rc.near_range.ringing_db is not None and self._near is None:
+            import logging
+            logging.getLogger(__name__).warning(
+                "raycast.near_range was measured at %s bins / %s us, not this acquisition "
+                "(%d bins): the shared model's ringing and water column are used",
+                rc.near_range.num_results, rc.near_range.pulse_us, acquisition.num_results)
+        from ...worldgen.materials import MaterialLibrary
+        snap = getattr(scene, "config_snapshot", None) or {}
+        #: the scene's materials: the defaults with its world's overrides
+        self.lib = MaterialLibrary(snap.get("materials") or None)
+        self.mesh = mesh if mesh is not None else build_scene_mesh(
+            scene, world_dir, objects_mode=str(rc.objects.mode), lib=self.lib,
+            frequency_hz=float(OMNISCAN_FREQ_HZ))
+        #: "raster" or "solid": how THIS mesh carries the objects (the mode in
+        #: force: a world without depth.npz stays raster; a shared mesh says
+        #: what it was built as)
+        self.objects_mode = str(getattr(self.mesh, "objects_mode", "raster"))
         self.oracle = (oracle if oracle is not None
                        else SceneOracle(self.mesh, backend=rc.backend))
         self.water = _prop.Water(rc.water.temperature_c, rc.water.salinity_ppt,
@@ -68,6 +98,13 @@ class RaycastRenderer(SonarRenderer):
         if not 0.224 <= L <= 0.310:
             raise ValueError(f"aperture length {L:.3f} m outside [0.224, 0.310] m "
                              "(datasheet far field / CAD housing)")
+        from .correction import for_config as _correction_for
+        #: the empirical correction layer, or None (off: bit-identical output)
+        self._correction = _correction_for(rc.correction)
+        if self._correction is not None:
+            # an artifact applies only to the physical core it was fitted on
+            self._correction.check_core(
+                rc, model, accept_engine=bool(rc.correction.accept_engine_knobs))
         vf = float(rc.beam.vertical_floor_amp)
         if not 0.0 <= vf <= 0.3:
             raise ValueError(f"vertical_floor_amp {vf} outside [0, 0.3]")
@@ -80,8 +117,14 @@ class RaycastRenderer(SonarRenderer):
                                      rc.receiver.bin_integration,
                                      model.max_ping_rate_hz,
                                      rc.receiver.filter_pulse_ratio)
+        solid = self.objects_mode == "solid"
+        objects = list(getattr(scene, "objects", None) or [])
+        #: fraction of every object and wall surface covered by sediment and
+        #: growth (raycast.objects.fouling): diffuse like the seabed, no mirror
+        self.fouling = float(rc.objects.fouling)
         self.law = DiffuseLaw(rc.seabed, self.mesh.material_names, self.k,
-                              float(OMNISCAN_FREQ_HZ), self.c)
+                              float(OMNISCAN_FREQ_HZ), self.c, lib=self.lib,
+                              objects=objects, split=solid, fouling=self.fouling)
         seed = (int(getattr(scene, "seed", 0) or 0) * 1_000_003
                 + int(rc.seed)) & 0xFFFFFFFFFFFFFFFF
         self.seed = seed
@@ -92,26 +135,43 @@ class RaycastRenderer(SonarRenderer):
         # True slant range that can still reach the last bin through the
         # envelope. The device maps time to range with ITS speed of sound,
         # so its last bin lies at range_max * c_true / c_device in true range
-        # (20.24 m for a 20 m setting at c = 1518 m/s), plus half the
-        # envelope.
+        # (20.55 m for a 20 m setting at the profiles' c = 1541 m/s), plus
+        # half the envelope.
         self.r_max = (acquisition.range_max_m / SPEED_OF_SOUND_MPS
                       + 0.5 * self.envelope.half_support_s) * self.c * 1.001
         self._R_tab, self._w_tab = self._strip_table()
-        self._walls = np.flatnonzero(self.mesh.kind == KIND_WALL)
+        # The triangles sampled in their own plane (diffuse scatterers): the
+        # walls, and in objects.mode solid every object triangle (none
+        # otherwise, so this is the wall list of before).
+        self._walls = np.flatnonzero(np.isin(
+            self.mesh.kind, (KIND_WALL, KIND_SOLID) + ((KIND_SMOOTH_OBJECT,) if solid else ())))
         zmin = float(self.mesh.vertices[:, 2].min())
         self._zmin = zmin
-        # Smooth solids (NC #17): their coherent PO patches, from the facet
-        # layer's own placement and tessellation (sonar/facets.py), cached.
-        from ...worldgen.materials import MaterialLibrary
+        # The coherent channel of smooth surfaces (NC #17): Kirchhoff patches,
+        # cached. One entry per object and material: its owner, its parts
+        # (None in raster mode: the facet layer's own placement and
+        # tessellation, sonar/facets.py), |R|, RMS height, and whether its
+        # faces also serve as bounce mirrors (an object that is one solid).
         from ...worldgen.objects import is_facet_object, object_roughness_m
         from ..facets import object_reflection
-        self._facet_objs = [o for o in getattr(scene, "objects", [])
-                            if is_facet_object(o)]
-        snap = getattr(scene, "config_snapshot", None) or {}
-        lib = MaterialLibrary(snap.get("materials") or None)
-        self._facet_R = [object_reflection(o, lib, float(OMNISCAN_FREQ_HZ))
-                         for o in self._facet_objs]
-        self._facet_sigma = [object_roughness_m(o) for o in self._facet_objs]
+        facets = []
+        if solid:
+            by_id = {int(o.object_id): o for o in objects}
+            for oid, surfaces in self.mesh.parts.items():
+                groups: dict = {}
+                for sf in surfaces:
+                    if sf.coherent:
+                        groups.setdefault(sf.material, []).append(sf)
+                facets += [(by_id[oid], g, g[0].reflection, g[0].rms_m, len(surfaces) == 1)
+                           for g in groups.values()]
+        else:
+            facets = [(o, None, object_reflection(o, self.lib, float(OMNISCAN_FREQ_HZ)),
+                       object_roughness_m(o), True) for o in objects if is_facet_object(o)]
+        self._facet_objs = [f[0] for f in facets]
+        self._facet_parts = [f[1] for f in facets]
+        self._facet_R = [f[2] * (1.0 - self.fouling) for f in facets]
+        self._facet_sigma = [f[3] for f in facets]
+        self._facet_faces = [f[4] for f in facets]
         self._facet_cache: dict[int, object] = {}
         # The seabed sheet's coherent (mean-field) channel: the bottom path's
         # specular return (specular.py; FBR imaged, NC #4).
@@ -123,12 +183,29 @@ class RaycastRenderer(SonarRenderer):
                 self.mesh, scene, self.k, float(OMNISCAN_FREQ_HZ),
                 sc.window_n1, sc.window_n2, sc.patch_phase_rad,
                 sc.patch_min_m, sc.patch_max_m,
-                sediments=getattr(self.law, "sediments", None))
-        self._set_layers(lib)
+                sediments=getattr(self.law, "sediments", None), lib=self.lib)
+        self._set_layers(self.lib)
         self.multipath = None
         if rc.paths.enabled and int(rc.paths.max_order) > 0:
             from .multipath import Multipath
             self.multipath = Multipath(self)
+        #: ``backend: warp`` runs the per-contributor stages on the device
+        #: (gpu_render.py); False keeps the CPU reference stages on the GPU
+        #: oracle (the G-gates compare the two).
+        self.use_gpu_pipeline = rc.backend == "warp"
+        if int(rc.paths.reselect_every) > 1 and not self.use_gpu_pipeline:
+            raise ValueError("raycast.paths.reselect_every > 1 is a GPU-pipeline path "
+                             "(backend: warp); the CPU reference selects every ping")
+        self._gpu = None
+        self._gpu_mp = None
+        #: GPU stage timing (``last_timing``) synchronises at every stage;
+        #: the live node turns it off (no value depends on it, 2026-11-10).
+        self.stage_timing = True
+        #: Ground-truth contacts (``labels.py``, 2026-11-11): on with
+        #: ``raycast.labels.enabled``; the node turns them off when nobody
+        #: can read them. Never changes ``Ping.power`` or ``Ping.texture``.
+        self.labels_on = bool(rc.labels.enabled)
+        self._labels = None
 
     def _set_layers(self, lib) -> None:
         """Flooded thin shells (a material backed by water, e.g. ``pp_shell``,
@@ -138,7 +215,6 @@ class RaycastRenderer(SonarRenderer):
         an input (raycast_design §3)."""
         from ...worldgen.materials import (WATER_DENSITY_KGM3,
                                            WATER_SOUND_SPEED_MPS)
-        from .scene_mesh import KIND_SMOOTH_OBJECT
         m = self.mesh
         nt = m.n_triangles
         mask = np.zeros(nt, dtype=bool)
@@ -251,17 +327,49 @@ class RaycastRenderer(SonarRenderer):
     def _scatterers(self, P: np.ndarray, e_a: np.ndarray, e_n: np.ndarray
                     ) -> Scatterers:
         lo, hi, y0 = self._sheet_region(P, e_a, e_n)
-        parts = [self.sheet.sample(0.0, 0.0, lo, hi, y0)]
-        if self._walls.size:
+        cull = bool(self._rc.sampling.cull_unreachable)
+        sheet = self.sheet.sample(0.0, 0.0, lo, hi, y0)
+        if cull:            # nothing above the still waterline (fast variant)
+            sheet = sheet.take(sheet.pos[:, 2] <= 0.0)
+        if bool(self._rc.sampling.band_cull) and len(sheet):
+            # only inside the beam band at its own range (fast variant)
+            d = sheet.pos - P
+            R = np.linalg.norm(d, axis=1)
+            sheet = sheet.take((R <= self.r_max) & (np.abs(d @ e_a) <= self._band_width(R)))
+        parts = [sheet]
+        walls = self._walls
+        if walls.size and cull:
+            # whole triangles: above the waterline, or quay faces turned away
+            tv = self.mesh.vertices[self.mesh.triangles[walls]]
+            dn = np.einsum("ij,ij->i", P - tv[:, 0], self.mesh.normals()[walls])
+            zlo = tv[:, :, 2].min(axis=1)
+            walls = walls[[not cull_wall_triangle(q, d, z) for q, d, z in
+                           zip(wall_is_quay(self, walls), dn, zlo)]]
+        if walls.size:
+            offset = float(self._rc.sampling.surface_offset_m)
+
             def keep(pos, _P=P, _ea=e_a):
                 d = pos - _P
                 R = np.linalg.norm(d, axis=1)
-                return (R <= self.r_max) & (np.abs(d @ _ea)
-                                            <= self._band_width(R))
-            parts.append(planar_sample(self.mesh, self._walls, self.seed,
+                ok = (R <= self.r_max) & (np.abs(d @ _ea) <= self._band_width(R))
+                if cull:    # in the water, not buried under the seabed
+                    zs = self.sheet._locate(pos[:, 0], pos[:, 1])[0]
+                    ok &= (pos[:, 2] <= 0.0) & (pos[:, 2] >= zs - offset)
+                return ok
+            parts.append(planar_sample(self.mesh, walls, self.seed,
                                        self._rc.sampling.scatterer_spacing_m,
-                                       keep))
+                                       keep, P, self.r_max))
         return Scatterers.concat(parts)
+
+    def release_device(self) -> None:
+        """Drop the GPU pipeline's device buffers (scene scatterers, tables)
+        and its reused echo-path selections (``paths.reselect_every``); the
+        next render rebuilds them. Results are unchanged (a reused selection
+        is simply made afresh). The fit keeps
+        renderers cached long after their bases are built, and pinned
+        buffers would hold device memory for nothing."""
+        self._gpu = None
+        self._gpu_mp = None
 
     # -------------------------------------------------------------- render
     def render(self, side: Side, vehicle_pose: Pose3D, t_sim: float,
@@ -274,10 +382,30 @@ class RaycastRenderer(SonarRenderer):
                                                self.tilt)
         grid = BinGrid(acq, self.envelope, self.omega, SPEED_OF_SOUND_MPS)
         if self.multipath is not None:
-            self.multipath.diffuse(P, e_a, e_n, e_v, grid)
-            self.multipath.facets(P, e_a, e_n, e_v, grid, grid.mean)
+            if self.use_gpu_pipeline:
+                if self._gpu_mp is None:
+                    from .gpu_render import GpuMultipath
+                    self._gpu_mp = GpuMultipath(self.multipath)
+                self._gpu_mp.timing = bool(self.stage_timing)
+                self._gpu_mp.diffuse(P, e_a, e_n, e_v, grid, key=side)
+            else:
+                self.multipath.diffuse(P, e_a, e_n, e_v, grid)
+            import time as _time
+            t0 = _time.perf_counter()
+            if self.use_gpu_pipeline:
+                self._gpu_mp.facets(P, e_a, e_n, e_v, grid, grid.mean, key=side)
+            else:
+                self.multipath.facets(P, e_a, e_n, e_v, grid, grid.mean)
+            t1 = _time.perf_counter()
             if self.specular is not None:
-                self.multipath.floor_coherent(P, e_a, e_n, e_v, grid, grid.mean)
+                if self.use_gpu_pipeline:
+                    self._gpu_mp.floor_coherent(P, e_a, e_n, e_v, grid, grid.mean, key=side)
+                else:
+                    self.multipath.floor_coherent(P, e_a, e_n, e_v, grid, grid.mean)
+            #: per-stage wall time of the last render (seconds)
+            self.last_timing = dict(getattr(self._gpu_mp, "last_timing", {}) if
+                                    self.use_gpu_pipeline else {},
+                                    facets=t1 - t0, floor_coherent=_time.perf_counter() - t1)
         else:
             self.direct_path(P, e_a, e_n, e_v, grid)
             self.facet_path(P, e_a, e_n, e_v, grid)
@@ -298,7 +426,12 @@ class RaycastRenderer(SonarRenderer):
         # the encoder adds calibration_db_offset (this sensor's system gain)
         # back, so the reported level is the measured one.
         specular = None
-        if self._cfg.ringing_level_db > 0.0:
+        if self._near is not None:
+            # the device's MEASURED ringing at this acquisition (near_range)
+            r_dev = grid.start_m + (np.arange(grid.n) + 0.5) * grid.bin_m
+            specular = 10.0 ** ((self._near.ringing_at(r_dev)
+                                 - self._cfg.calibration_db_offset) / 10.0)
+        elif self._cfg.ringing_level_db > 0.0:
             r_dev = grid.start_m + (np.arange(grid.n) + 0.5) * grid.bin_m
             ring_db = (self._cfg.ringing_level_db
                        - self._cfg.ringing_decay_db_per_m * r_dev)
@@ -306,11 +439,81 @@ class RaycastRenderer(SonarRenderer):
                                 / 10.0)
         down = self.oracle.closest(P, np.array([[0.0, 0.0, -1.0]]))
         altitude = float(down.t[0]) if np.isfinite(down.t[0]) else 0.0
+        if self.objects_mode == "solid":
+            # Objects are their own meshes here: the altitude (water column,
+            # the correction's u = r / altitude and its domain) is the SEABED
+            # under the transducer, not the top of an object the boat passes
+            # over -- which would also switch the correction off for those
+            # pings (its nadir gate), a 13-15 dB step at u = 1.
+            zt, _ = self.sheet._locate(np.array([P[0]]), np.array([P[1]]))
+            altitude = max(float(P[2] - zt[0]), 0.0)
+        uncorrected = None
+        if self._correction is not None:
+            # the EMPIRICAL correction layer (correction.py; not physics): the
+            # mean only, the texture untouched; the physical mean is kept.
+            # Outside its domain it is off and the ping is the physical one.
+            from .correction import bin_ranges
+            uncorrected = power
+            seabed, mat = (self.nadir_terrain(P) if self.objects_mode == "solid"
+                           else self.nadir_surface(down))
+            power, status = self._correction.correct(
+                power, bin_ranges(acq), altitude, acq, nadir_material=mat,
+                nadir_is_seabed=seabed, max_ping_rate_hz=self._cfg.max_ping_rate_hz)
+        # The NC #15 shadow floor's reference (raycast.floor, harbour patch
+        # 2026-11-10): the ping's own lit-seabed level, fitted on its mean
+        # (floor.py; CPU, O(bins)). None when the floor is off: the noise
+        # stage then has no reference and the output is bit-identical.
+        ambient = None
+        if float(self._rc.floor.reverberation_db) > 0.0:
+            from .correction import bin_ranges as _bin_ranges
+            from .floor import ambient_reference
+            ambient = ambient_reference(
+                power, _bin_ranges(acq), altitude, physical=uncorrected,
+                state=self._floor_state.setdefault(side.value, {}))
         ping = Ping(side=side, power=power, pose=sensor, altitude_m=altitude,
                     t_sim=t_sim, start_mm=acq.range_start_mm,
                     length_mm=acq.range_length_mm, texture=texture,
-                    specular=specular, unoccluded=None, ambient=None)
-        return RenderedPing(ping=ping, contacts=[])
+                    specular=specular, unoccluded=None, ambient=ambient)
+        if uncorrected is not None:
+            ping.power_uncorrected = uncorrected
+            ping.correction_status = status
+        contacts = []
+        if self.labels_on:
+            if self._labels is None:
+                from .labels import LabelOracle
+                self._labels = LabelOracle(self, int(self._rc.labels.max_points))
+            contacts = self._labels.contacts(side, P, e_a, e_n, float(acq.bin_size_m))
+        return RenderedPing(ping=ping, contacts=contacts)
+
+    def nadir_surface(self, hits) -> tuple[bool, str | None]:
+        """``(seabed?, material name)`` of the first surface straight below
+        the transducer, from an ``oracle.closest`` result: what the empirical
+        correction's domain gate needs (``correction.py``). Never used by the
+        physics."""
+        from .scene_mesh import KIND_SEABED
+        if not np.isfinite(hits.t[0]) or int(hits.tri[0]) < 0:
+            return False, None
+        m, tri = self.mesh, int(hits.tri[0])
+        return (int(m.kind[tri]) == KIND_SEABED and not bool(m.dry[tri]),
+                m.material_names[int(m.material[tri])])
+
+    def nadir_terrain(self, P: np.ndarray) -> tuple[bool, str | None]:
+        """:meth:`nadir_surface` on the terrain sheet under ``P`` (objects.mode
+        solid: an object under the boat does not change what the seabed is)."""
+        _, tri = self.sheet._locate(np.array([P[0]]), np.array([P[1]]))
+        t = int(tri[0])
+        if t < 0:
+            return False, None
+        m = self.mesh
+        return (not bool(m.dry[t]), m.material_names[int(m.material[t])])
+
+    def nadir_below(self, sensor: Pose3D) -> tuple[bool, str | None]:
+        """:meth:`nadir_surface` for a transducer pose (the calibration
+        engine's correction path, ``calib.cached_render``)."""
+        P = np.array([sensor.x, sensor.y, sensor.z])
+        if self.objects_mode == "solid":
+            return self.nadir_terrain(P)
+        return self.nadir_surface(self.oracle.closest(P, np.array([[0.0, 0.0, -1.0]])))
 
     def diffuse_contributions(self, P, e_a, e_n, e_v) -> dict:
         """The direct path's diffuse scatterers, seen: their deterministic
@@ -410,16 +613,23 @@ class RaycastRenderer(SonarRenderer):
             from ..facets import object_patches
             from ...core.geometry import bilinear_sample
             from .scene_mesh import seabed_height
-            zs = seabed_height(self._scene)
+            # the sheet the mesh was built on: the terrain in objects.mode
+            # solid, else the stamped raster (as before)
+            zs = (self.sheet.z if self.objects_mode == "solid"
+                  else seabed_height(self._scene))
             g = self._scene.grid
 
             def seabed(x, y, _z=zs, _g=g):
                 return bilinear_sample(_z, _g, x, y, fill=float(_z.min()))
             patch = float(self._rc.po.patch_m) or float(self._cfg.facet_patch_m)
-            # k enters object_patches only through the tessellation's
-            # curvature criterion: refined here (PoConfig.curvature_refine).
-            p = object_patches(self._facet_objs[i], seabed, patch,
-                               self.k * float(self._rc.po.curvature_refine))
+            # k enters only through the tessellation's curvature criterion:
+            # refined here (PoConfig.curvature_refine).
+            kc = self.k * float(self._rc.po.curvature_refine)
+            if self._facet_parts[i] is None:
+                p = object_patches(self._facet_objs[i], seabed, patch, kc)
+            else:
+                from .object_mesh import part_patches
+                p = part_patches(self._facet_parts[i], seabed, patch, kc)
             self._facet_cache[i] = p
         return p
 

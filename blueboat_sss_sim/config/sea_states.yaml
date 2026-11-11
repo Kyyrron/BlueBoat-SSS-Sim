@@ -59,6 +59,15 @@ hull:
   # that rides its wave (a +0.1 m crest is 2.2 g); it removes the slam a
   # buried demihull would otherwise publish (5.7 g measured pinned).
   wave_force_clip: {knee_g: 2.5, width_g: 1.0}
+  # How the hull feels the waves (2026-11-10, docs/sea_state_model.md §4.2, §5):
+  # `hybrid` resolves the wave-SLOPE spectrum up to f_max_hz (the old
+  # equal-energy bins lumped the whole short-wave tail into one component and
+  # had nothing above ~0.9 Hz at 'smooth'; the real BlueBoat rocks at ~1.1 Hz);
+  # 3 Hz = where the 0.15 m demihull beam averages the waves out. `draft_decay`
+  # reads the Froude-Krylov pressure at the 4.5 cm draft (cosh(k(h-d))/cosh(kh):
+  # 0.83 at 1 Hz, 0.49 at 2 Hz), which the old surface pressure ignored.
+  # Without this block the pre-2026-11-10 behaviour holds bit for bit.
+  wave_response: {discretisation: hybrid, f_max_hz: 3.0, draft_decay: true}
 
 # How much the current wanders around its configured mean (sea/current.py).
 # Fractions are of the MEAN SPEED: sigma_speed = sigma_speed_frac * U,
@@ -167,9 +176,14 @@ waves:
   # wake groups half as frequent as before and spectrally broad (the
   # user's "too often, too regular"; the boat's own 1.6 Hz ringing was
   # the 20 Hz pose hold, fixed in sea/motion.py, not the sea),
-  # Tp on the upper DNV band plus the swell/wake influence
-  # every harbour has (DNV-RP-C205 §3.5.10 gives 3.6-5 √Hs for pure wind
-  # sea; a basin open to a channel carries longer energy), and an
+  # Tp = 3.6 √Hs for every level since 2026-11-10 (owner's decision; was 2-4.5 s,
+  # "the upper DNV band plus swell/wake influence"): the fetch-limited young-sea
+  # relation -- JONSWAP (Hasselmann 1973) and Kahma & Calkoen 1992 give
+  # Tp/√Hs = 3.0-4.0 for a harbour (U10 4-10 m/s over 0.3-2 km), the lower DNV
+  # bound is 3.6 -- and the value that reproduces the real BlueBoat's attitude
+  # spectrum at Shiraishi-jima (config/corpus_attitude_targets.yaml: roll/pitch
+  # centred at ~1.1 Hz; the old 2.8 s 'smooth' rocked the boat at ~0.65 Hz).
+  # Long-period energy (wakes, swell trains) lives in the `events:` groups. And an
   # `events:` block: random wave groups -- passing-vessel wakes and swell
   # trains -- as a Poisson process (sea/events.py; Soomere 2007,
   # Appl. Mech. Rev. 60(3), doi:10.1115/1.2730847, for wake groups; the
@@ -183,41 +197,51 @@ waves:
     reference: "WMO No. 306 code table 3700 / Douglas sea scale"
   rippled:
     hs_m: 0.05
-    tp_s: 2.0
+    tp_s: 0.80
     gamma: 1.5
     spread_s: 3.0
     douglas: 1
     events: {rate_per_hour: 4.0, hs_m: 0.08, tp_s: 5.0, duration_s: 25.0, from_spread_deg: 60.0}
     label: "Ripples (0.05 m)"
-    description: "Light ripples: under a degree of roll, millimetres of heave, barely visible in the sonar image."
-    reference: "Hasselmann et al. 1973 (JONSWAP); DNV-RP-C205 §3.5.10 (Tp); Soomere 2007 (wakes)"
+    description: "Light ripples: about half a degree of roll and pitch at ~1.3 Hz, a centimetre of heave; a faint jitter of the seabed line."
+    reference: "Hasselmann et al. 1973 (JONSWAP); Kahma & Calkoen 1992 (fetch-limited Tp); DNV-RP-C205 §3.5.10; Soomere 2007 (wakes)"
+  harbour_chop:
+    hs_m: 0.07
+    tp_s: 0.95
+    gamma: 1.5
+    spread_s: 3.0
+    douglas: 1
+    events: {rate_per_hour: 5.0, hs_m: 0.10, tp_s: 5.0, duration_s: 25.0, from_spread_deg: 60.0}
+    label: "Harbour chop (site, 0.07 m)"
+    description: "The chop of the Shiraishi-jima harbour recordings: the boat rocks about once a second (~1.1 Hz), about a degree of roll and pitch, a centimetre of heave. Fine jitter of the seabed line and port/starboard banding at that rate."
+    reference: "Inverse estimate: reproduces the real BlueBoat attitude spectrum (config/corpus_attitude_targets.yaml) -- not a wave measurement; Tp = 3.6 sqrt(Hs) (Hasselmann 1973; Kahma & Calkoen 1992); Soomere 2007"
   smooth:
     hs_m: 0.15
-    tp_s: 2.8
+    tp_s: 1.39
     gamma: 1.5
     spread_s: 3.0
     douglas: 2
     events: {rate_per_hour: 6.0, hs_m: 0.12, tp_s: 5.5, duration_s: 25.0, from_spread_deg: 60.0}
     label: "Light chop (0.15 m)"
-    description: "Ordinary harbour chop: the boat rolls and pitches one to two degrees and bobs a few centimetres. The waterfall shows port/starboard brightness banding and a wavy seabed line."
-    reference: "WMO 3700 code 2; Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007"
+    description: "A stronger harbour chop: the boat rolls and pitches about two degrees at ~0.9 Hz and bobs three centimetres. Clear port/starboard banding, a wavy seabed line, targets stretched or repeated along track."
+    reference: "WMO 3700 code 2; Hasselmann et al. 1973; Kahma & Calkoen 1992; DNV-RP-C205 §3.5.10; Soomere 2007"
   slight:
     hs_m: 0.35
-    tp_s: 3.6
+    tp_s: 2.13
     gamma: 1.5
     spread_s: 3.0
     douglas: 2
     events: {rate_per_hour: 8.0, hs_m: 0.25, tp_s: 6.0, duration_s: 25.0, from_spread_deg: 45.0}
     label: "Choppy (0.35 m)"
-    description: "A fresh breeze across the basin: clear rolling and pitching, heave of ten centimetres or more. Strong banding, the seabed line wobbles, features shift and repeat along the track."
-    reference: "Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007"
+    description: "A fresh breeze across the basin: three to five degrees of roll and pitch, heave of about eight centimetres. Strong banding, the seabed line wobbles, features shift and repeat along the track."
+    reference: "Hasselmann et al. 1973; Kahma & Calkoen 1992; DNV-RP-C205 §3.5.10; Soomere 2007"
   rough:
     hs_m: 0.60
-    tp_s: 4.5
+    tp_s: 2.79
     gamma: 1.5
     spread_s: 3.0
     douglas: 3
     events: {rate_per_hour: 15.0, hs_m: 0.35, tp_s: 7.0, duration_s: 30.0, from_spread_deg: 45.0}
     label: "Rough (0.6 m) -- stress test"
-    description: "The most an enclosed basin raises and more than a 1.2 m boat should survey in: large rolling and heaving, the sonar geometry breaks down at times."
-    reference: "Hasselmann et al. 1973; DNV-RP-C205 §3.5.10; Soomere 2007; stress level"
+    description: "The most an enclosed basin raises and more than a 1.2 m boat should survey in: about four degrees of roll and pitch, twelve centimetres of heave; the sonar geometry breaks down at times."
+    reference: "Hasselmann et al. 1973; Kahma & Calkoen 1992; DNV-RP-C205 §3.5.10; Soomere 2007; stress level"

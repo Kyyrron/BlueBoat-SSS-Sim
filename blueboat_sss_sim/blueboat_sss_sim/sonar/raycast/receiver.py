@@ -3,7 +3,8 @@
 The response of one point scatterer in the bin stream is the transmit pulse
 (a CW tone burst of duration ``tau``, amplitude 1 -- so a longer pulse puts
 more energy on the seabed, as the device's does) convolved with the receive
-filter (``filter_duration_percent`` of the round-trip window, unit DC gain)
+filter (``filter_pulse_ratio`` x the pulse when set, the profiles' 1.4; else
+``filter_duration_percent`` of the round-trip window; unit DC gain)
 and with the bin's own integration (one bin width, averaging). Three
 rectangles convolved: a bell, not the boxcar of the geometric renderer
 (pass 4 measured its lag-2/3 correlation too high, hand-off §4). Centred, so a

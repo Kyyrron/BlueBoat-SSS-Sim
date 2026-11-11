@@ -1,12 +1,44 @@
+import importlib.util
+import json
+import os
 from glob import glob
 
 from setuptools import find_packages, setup
+from setuptools.command.build_py import build_py as _build_py
 
 package_name = "blueboat_sss_sim"
+VERSION = "1.0.0"
+
+
+class _StampedBuildPy(_build_py):
+    """Write ``blueboat_sss_sim/_build_stamp.json`` into the BUILD (never the
+    source tree): when this copy was built, from which source root, at which
+    git state and code digest (``core/provenance.py``). The sonar node
+    publishes it and warns when the installed copy is older than the source
+    tree -- the package installs by copy, and a stale install once produced a
+    session that did not show the current code (review of 2026-11-11)."""
+
+    def run(self):
+        super().run()
+        here = os.path.dirname(os.path.abspath(__file__))
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "_blueboat_sss_sim_provenance",
+                os.path.join(here, package_name, "core", "provenance.py"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            out = os.path.join(self.build_lib, package_name, mod.STAMP_NAME)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            with open(out, "w", encoding="utf-8") as f:
+                json.dump(mod.make_stamp(here, version=VERSION), f, indent=1)
+        except Exception as e:  # noqa: BLE001 -- a stamp must never break a build
+            print(f"[{package_name}] build stamp not written: {e}")
+
 
 setup(
     name=package_name,
-    version="1.0.0",
+    version=VERSION,
+    cmdclass={"build_py": _StampedBuildPy},
     packages=find_packages(exclude=["test"]),
     data_files=[
         ("share/ament_index/resource_index/packages",

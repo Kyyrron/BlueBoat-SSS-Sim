@@ -27,8 +27,14 @@ _WALL_SCHEMA = (
      "above it look over."),
     ("draft_m", "Draft (pontoon) [m]", "float", 0.4, 0.05, 5.0,
      "How deep a pontoon's floats reach below the waterline; ignored for a quay."),
+    ("material", "Built of", "choice:concrete|metal", "concrete", None, None,
+     "Concrete: a gravity quay (caisson or block), the most common kind; "
+     "metal: a steel sheet-pile wall. The ray-cast sonar scatters from this "
+     "material like from any object."),
     ("reflectivity", "Reflectivity (concrete ~0.65)", "float", 0.65, 0.0, 1.0,
-     "Energy fraction the face returns per bounce; mirror ghosts carry its square."),
+     "Energy fraction the face returns per bounce; mirror ghosts carry its "
+     "square. Read by the geometric sonar only; the ray-cast one uses the "
+     "material."),
     ("roughness_m", "Face roughness [m]", "float", 0.003, 0.0, 0.1,
      "RMS roughness of the face: at 450 kHz a few millimetres already turn "
      "most of the mirror reflection into faint diffuse scatter."),

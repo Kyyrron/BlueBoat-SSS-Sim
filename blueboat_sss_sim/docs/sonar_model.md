@@ -2,7 +2,9 @@
 
 How the synthetic Omniscan 450 imagery is produced, what is modeled, what
 is deliberately not, and which parameter controls what. Implementation:
-`blueboat_sss_sim/sonar/`.
+`blueboat_sss_sim/sonar/`. This document is the **geometric** renderer (the default and the
+calibrated comparison model). The second sensor, the 3-D ray-cast (`sonar/raycast/`), is described
+in `docs/engineering/raycast_design.md`, and its calibration status in `raycast_assessment.md`.
 
 ## 1. Geometry
 

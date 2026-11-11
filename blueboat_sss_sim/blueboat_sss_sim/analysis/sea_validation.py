@@ -38,6 +38,9 @@ CLI::
         OUT/current OUT/waves OUT/both --out OUT
     python3 -m blueboat_sss_sim.analysis.sea_validation svlog FILE \\
         --altitude 1.4 --out OUT
+    python3 -m blueboat_sss_sim.analysis.sea_validation targets
+        # -> config/corpus_attitude_targets.yaml (the real boat's motion
+        #    spectrum: roll/pitch peak, centroid, 0.8-2 Hz fraction, yaw rate)
 """
 
 from __future__ import annotations
@@ -332,6 +335,256 @@ def spectrum_summary(t: np.ndarray, v: np.ndarray) -> dict:
             "ring_fraction": float(spec[(f > 1.4) & (f < 1.8)].sum() / tot)}
 
 
+# ------------------------------------------------- attitude spectra (2026-11-10)
+#: How :func:`attitude_spectra` estimates the motion spectrum -- written
+#: into ``config/corpus_attitude_targets.yaml`` with the numbers, so the
+#: targets and every simulated run are measured the same way. Welch
+#: averaging of Hann windows on straight, under-way segments, after a
+#: boxcar high-pass that removes trim, turns and slow heading changes.
+SPECTRA_SETTINGS: dict[str, Any] = {
+    "segment_s": 20.0,             # Welch window length
+    "overlap": 0.5,
+    "highpass_s": 10.0,            # boxcar removed before everything
+    "band_hz": [0.8, 2.0],         # "the boat's own band" fraction
+    "centroid_band_hz": [0.15, 5.0],
+    "yaw_rate_hf_hz": 1.2,         # yaw-rate power above this
+    "straight_max_rate_dps": 3.0,  # smoothed heading rate on a line
+    "straight_min_s": 25.0,
+    "heading_smooth_s": 6.0,
+    "min_speed_mps": 0.5,          # under way (where speed is known)
+    "max_speed_mps": 1.6,
+}
+
+#: Where ``targets`` writes by default: the package's own config folder
+#: (installed with the package; ``test/gazebo_sea_test.py`` gates on it).
+TARGETS_FILE = Path(__file__).resolve().parents[2] / "config" / "corpus_attitude_targets.yaml"
+
+#: The four live-clock Shiraishi-jima harbour recordings the targets are
+#: measured on (the three processor-written files freeze the autopilot
+#: clock, so their ATTITUDE has no time base).
+CORPUS_TARGET_FILES = ("toOptimize-harbourScan.svlog",
+                       "fullHarbourCleanExample.svlog",
+                       "OneLineHarbourClean70m.svlog",
+                       "diffDepthCompensation.svlog")
+
+
+def _boxcar_highpass(v: np.ndarray, n: int) -> np.ndarray:
+    """``v`` minus its centred ``n``-sample moving average (edge-normalised)."""
+    if n < 3 or v.size < 3:
+        return v - v.mean()
+    k = np.ones(n)
+    num = np.convolve(v, k, mode="same")
+    den = np.convolve(np.ones_like(v), k, mode="same")
+    return v - num / den
+
+
+def _welch(v: np.ndarray, fs: float, seg_s: float, overlap: float
+           ) -> tuple[np.ndarray, np.ndarray, int]:
+    """One-sided Welch PSD (Hann windows); returns (f, P, n_windows)."""
+    n = int(round(seg_s * fs))
+    if v.size < n or n < 16:
+        return np.zeros(0), np.zeros(0), 0
+    step = max(int(round(n * (1.0 - overlap))), 1)
+    w = np.hanning(n)
+    scale = 1.0 / (fs * float((w ** 2).sum()))
+    acc = np.zeros(n // 2 + 1)
+    k = 0
+    for i in range(0, v.size - n + 1, step):
+        s = v[i:i + n]
+        acc += np.abs(np.fft.rfft((s - s.mean()) * w)) ** 2
+        k += 1
+    p = acc / k * scale
+    p[1:-1] *= 2.0
+    return np.fft.rfftfreq(n, d=1.0 / fs), p, k
+
+
+def straight_segments(t: np.ndarray, yaw: np.ndarray, *,
+                      speed_t: np.ndarray | None = None,
+                      speed: np.ndarray | None = None,
+                      settings: dict | None = None) -> list[tuple[float, float]]:
+    """Time intervals on which the smoothed heading turns slower than
+    ``straight_max_rate_dps`` for at least ``straight_min_s`` and, when a
+    speed series is given, the boat is under way (speed in
+    ``[min_speed_mps, max_speed_mps]``)."""
+    st = {**SPECTRA_SETTINGS, **(settings or {})}
+    if t.size < 32:
+        return []
+    fs = 1.0 / float(np.median(np.diff(t)))
+    tu = np.arange(t[0], t[-1], 1.0 / fs)
+    yu = np.interp(tu, t, np.unwrap(yaw))
+    n = max(int(round(st["heading_smooth_s"] * fs)), 3)
+    ys = np.convolve(yu, np.ones(n) / n, mode="same")
+    rate = np.degrees(np.gradient(ys, 1.0 / fs))
+    ok = np.abs(rate) < st["straight_max_rate_dps"]
+    ok[: n // 2] = False
+    ok[-(n // 2):] = False
+    if speed_t is not None and speed is not None and speed_t.size > 1:
+        sp = np.interp(tu, speed_t, speed)
+        ok &= (sp >= st["min_speed_mps"]) & (sp <= st["max_speed_mps"])
+    out: list[tuple[float, float]] = []
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], ok.astype(int), [0]])))
+    for a, b in zip(edges[::2], edges[1::2]):
+        if (b - a) / fs >= st["straight_min_s"]:
+            out.append((float(tu[a]), float(tu[b - 1])))
+    return out
+
+
+def attitude_spectra(t: np.ndarray, roll: np.ndarray, pitch: np.ndarray,
+                     yaw: np.ndarray, *,
+                     segments: list[tuple[float, float]] | None = None,
+                     settings: dict | None = None) -> dict:
+    """Motion-spectrum statistics of an attitude record (angles in rad,
+    ``t`` in s): per roll and pitch the std after the high-pass, the peak
+    and centroid frequency and the fraction of power in ``band_hz``; for
+    the yaw rate its std and the fraction above ``yaw_rate_hf_hz``.
+
+    The same estimator reads the field corpus (``targets``) and a
+    simulated run, so the comparison is like for like. ``segments`` are
+    (t0, t1) intervals (straight survey lines); default: the whole record.
+    """
+    st = {**SPECTRA_SETTINGS, **(settings or {})}
+    t = np.asarray(t, dtype=np.float64)
+    order = np.argsort(t, kind="stable")
+    t = t[order]
+    keep = np.concatenate([[True], np.diff(t) > 1e-6])
+    t = t[keep]
+    series = {"roll": np.asarray(roll)[order][keep],
+              "pitch": np.asarray(pitch)[order][keep],
+              "yaw": np.unwrap(np.asarray(yaw)[order][keep])}
+    empty = {"segments": 0, "duration_s": 0.0}
+    if t.size < 64:
+        return empty
+    fs = float(np.round(1.0 / float(np.median(np.diff(t))), 3))
+    segs = segments if segments is not None else [(float(t[0]), float(t[-1]))]
+    nhp = max(int(round(st["highpass_s"] * fs)), 3)
+    trim = nhp // 2
+    acc: dict[str, np.ndarray] = {}
+    nwin = 0
+    samples: dict[str, list] = {"roll": [], "pitch": [], "yaw_rate": []}
+    used, dur = 0, 0.0
+    f = np.zeros(0)
+    for t0, t1 in segs:
+        tu = np.arange(t0, t1, 1.0 / fs)
+        if tu.size < int(st["segment_s"] * fs) + 2 * trim:
+            continue
+        hp = {k: _boxcar_highpass(np.interp(tu, t, series[k]), nhp)
+              for k in series}
+        hp["yaw_rate"] = np.gradient(hp.pop("yaw"), 1.0 / fs)
+        hp = {k: v[trim:-trim] for k, v in hp.items()}
+        k_used = 0
+        for k, v in hp.items():
+            f, p, k_used = _welch(np.degrees(v), fs, st["segment_s"], st["overlap"])
+            if k_used == 0:
+                break
+            acc[k] = acc.get(k, 0.0) + p * k_used
+            samples[k].append(np.degrees(v))
+        if k_used == 0:
+            continue
+        nwin += k_used
+        used += 1
+        dur += float(tu[-1] - tu[0])
+    if used == 0:
+        return empty
+    lo, hi = st["centroid_band_hz"]
+    hi = min(hi, 0.5 * fs * 0.98)
+    cb = (f >= lo) & (f <= hi)
+    out: dict[str, Any] = {"segments": used, "duration_s": round(dur, 1),
+                           "fs_hz": fs}
+    b0, b1 = st["band_hz"]
+    for k in ("roll", "pitch"):
+        p = acc[k] / nwin
+        tot = max(float(p[cb].sum()), 1e-30)
+        out[k] = {"std_deg": round(float(np.concatenate(samples[k]).std()), 3),
+                  "peak_hz": round(float(f[cb][int(np.argmax(p[cb]))]), 3),
+                  "centroid_hz": round(float((f[cb] * p[cb]).sum() / tot), 3),
+                  "frac_band": round(float(p[cb & (f >= b0) & (f <= b1)].sum()
+                                           / tot), 3)}
+    p = acc["yaw_rate"] / nwin
+    tot = max(float(p[cb].sum()), 1e-30)
+    out["yaw_rate"] = {
+        "std_dps": round(float(np.concatenate(samples["yaw_rate"]).std()), 3),
+        "frac_hf": round(float(p[cb & (f > st["yaw_rate_hf_hz"])].sum() / tot), 3)}
+    return out
+
+
+def svlog_attitude_spectra(path: str | Path, settings: dict | None = None) -> dict:
+    """:func:`attitude_spectra` of a live-clock ``.svlog``'s id-150
+    ATTITUDE on its straight, under-way segments (speed from
+    LOCAL_POSITION_NED). A frozen autopilot clock has no time base and
+    returns ``{"error": ...}``."""
+    from .svlog_reader import read_svlog  # noqa: PLC0415
+    s = read_svlog(path)
+    att = s.attitude
+    if len(att) < 64:
+        return {"file": Path(path).name, "error": "no ATTITUDE records"}
+    t = np.array([a.time_boot_ms for a in att], dtype=np.float64) / 1000.0
+    if s.clock_frozen or np.ptp(t) <= 0:
+        return {"file": Path(path).name, "error": "frozen autopilot clock"}
+    roll = np.array([a.roll for a in att])
+    pitch = np.array([a.pitch for a in att])
+    yaw = np.array([a.yaw for a in att])
+    sp_t = sp = None
+    if len(s.positions) > 10:
+        pt = np.array([p.time_boot_ms for p in s.positions], dtype=np.float64) / 1000.0
+        o = np.argsort(pt, kind="stable")
+        pt = pt[o]
+        px = np.array([p.x for p in s.positions])[o]
+        py = np.array([p.y for p in s.positions])[o]
+        u = np.concatenate([[True], np.diff(pt) > 1e-6])
+        pt, px, py = pt[u], px[u], py[u]
+        if pt.size > 10:
+            # Speed over 2 s, robust to the 5-25 Hz position cadence.
+            tu = np.arange(pt[0], pt[-1], 0.5)
+            xu, yu = np.interp(tu, pt, px), np.interp(tu, pt, py)
+            sp_t, sp = tu, np.hypot(np.gradient(xu, 0.5), np.gradient(yu, 0.5))
+            sp = np.convolve(sp, np.ones(4) / 4, mode="same")
+    o = np.argsort(t, kind="stable")
+    segs = straight_segments(t[o], yaw[o], speed_t=sp_t, speed=sp, settings=settings)
+    res = attitude_spectra(t, roll, pitch, yaw, segments=segs, settings=settings)
+    res["file"] = Path(path).name
+    if sp is not None and sp.size:
+        res["speed_median_mps"] = round(float(np.median(sp)), 3)
+    return res
+
+
+def corpus_targets(files: list[str | Path], settings: dict | None = None) -> dict:
+    """The targets document (format ``blueboat_attitude_targets/1``): per
+    file its sha256 and :func:`svlog_attitude_spectra`, and the band
+    (min, max over the files) of every number."""
+    import hashlib  # noqa: PLC0415
+    from datetime import date  # noqa: PLC0415
+    st = {**SPECTRA_SETTINGS, **(settings or {})}
+    per = []
+    for fp in files:
+        fp = Path(fp)
+        h = hashlib.sha256()
+        with open(fp, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        r = svlog_attitude_spectra(fp, st)
+        r["sha256"] = h.hexdigest()
+        per.append(r)
+    ok = [r for r in per if "error" not in r]
+    keys = [("roll", "std_deg"), ("roll", "peak_hz"), ("roll", "centroid_hz"),
+            ("roll", "frac_band"), ("pitch", "std_deg"), ("pitch", "peak_hz"),
+            ("pitch", "centroid_hz"), ("pitch", "frac_band"),
+            ("yaw_rate", "std_dps"), ("yaw_rate", "frac_hf")]
+    bands = {}
+    for a, b in keys:
+        vals = [r[a][b] for r in ok if a in r]
+        if vals:
+            bands[f"{a}_{b}"] = [round(float(min(vals)), 3), round(float(max(vals)), 3)]
+    return {"format": "blueboat_attitude_targets/1",
+            "generated": date.today().isoformat(),
+            "generator": "python3 -m blueboat_sss_sim.analysis.sea_validation targets",
+            "note": ("Regenerated, never hand-edited. Real BlueBoat attitude "
+                     "(id-150 ATTITUDE, 25 Hz) on straight under-way lines of the "
+                     "live-clock Shiraishi-jima harbour recordings; the reference "
+                     "the sea state's motion is gated against "
+                     "(docs/sea_state_model.md §9)."),
+            "estimator": st, "files": per, "bands": bands}
+
+
 def track_metrics(run: RunData, lines: list[Line]) -> dict:
     tr = run.track
     vx, vy = tr.velocity()
@@ -402,6 +655,14 @@ def attitude_metrics(run: RunData, lines: list[Line]) -> dict:
                              spectrum_summary(t, tr.z[sel]).items()}
     out["roll_spectrum"] = {k: round(v, 3) for k, v in
                             spectrum_summary(t, tr.roll[sel]).items()}
+    # The corpus estimator on the same samples (2026-11-10): the survey
+    # lines' contiguous stretches, so a run is compared with
+    # config/corpus_attitude_targets.yaml like for like.
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], sel.astype(int), [0]])))
+    segs = [(float(tr.t[a]), float(tr.t[b - 1]))
+            for a, b in zip(edges[::2], edges[1::2]) if b - a > 1]
+    out["spectra"] = attitude_spectra(tr.t, tr.roll, tr.pitch, tr.yaw,
+                                      segments=segs)
     return out
 
 
@@ -1166,8 +1427,31 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--altitude", type=float, default=2.0,
                    help="seabed altitude for the footprint displacement [m]")
     s.add_argument("--out", required=True)
+    g = sub.add_parser("targets", help="corpus attitude-spectrum targets "
+                       "(writes config/corpus_attitude_targets.yaml)")
+    g.add_argument("--corpus", default="",
+                   help="corpus folder (default $BLUEBOAT_SSS_CORPUS or "
+                        "~/ros2_ws/data/SSS_data)")
+    g.add_argument("--files", nargs="*", default=list(CORPUS_TARGET_FILES))
+    g.add_argument("--out", default=str(TARGETS_FILE))
     args = ap.parse_args(argv)
     out = Path(args.out).expanduser()
+
+    if args.cmd == "targets":
+        import os  # noqa: PLC0415
+        corpus = Path(args.corpus or os.environ.get(
+            "BLUEBOAT_SSS_CORPUS", Path.home() / "ros2_ws/data/SSS_data")).expanduser()
+        doc = corpus_targets([corpus / f for f in args.files])
+        out.parent.mkdir(parents=True, exist_ok=True)
+        header = ("# GENERATED by `python3 -m blueboat_sss_sim.analysis.sea_validation "
+                  "targets` -- never hand-edit;\n# regenerate instead "
+                  "(docs/sea_state_model.md §9).\n")
+        out.write_text(header + yaml.safe_dump(doc, sort_keys=False, width=100))
+        for r in doc["files"]:
+            print(json.dumps({k: v for k, v in r.items() if k != "sha256"}))
+        print("bands:", json.dumps(doc["bands"]))
+        print("wrote", out)
+        return 0
 
     if args.cmd == "run":
         if args.run_dir:

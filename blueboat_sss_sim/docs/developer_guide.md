@@ -215,9 +215,11 @@ minimum.)
 
 ### Replace the acoustic model
 Subclass `SonarRenderer` (`render(side, pose, t_sim) -> RenderedPing`) and
-instantiate it in `sss_sim_node._start_pinging`. Everything downstream
-(noise, encoding, topics, metrics) is renderer-agnostic. Keep
-ground-truth contact emission if you want the metrics to survive.
+select it in `sss_sim_node` (the `renderer` parameter, re-read on every enable; see
+`_resolve_renderer_kind` / `_build_raycast` for the ray-cast, imported lazily only when selected).
+Everything downstream (noise, encoding, topics, metrics) is renderer-agnostic. Keep
+ground-truth contact emission if you want the metrics to survive (the ray-cast does not emit
+contacts yet: `RenderedPing.contacts` is `[]`, so no Perception labels from a ray-cast run).
 
 ### Add a reflecting boundary
 Declare it under `walls:` in the world config (`kind: quay` for a face
@@ -255,9 +257,9 @@ All noise/physics knobs are in the sonar YAML (`configuration_guide.md
 ## 4. Testing
 
 * `python3 -m test.smoke_test` — the offline gate (geo → world folder →
-  render → encode → decode → metrics → calibration; 439 checks with the
-  corpus and the BlueBoat-SSS checkout beside it, fewer with visible SKIPs
-  without them), artifacts in `/tmp/blueboat_sss_smoke/`. Run it after any
+  render → encode → decode → metrics → calibration; 496 checks on the system python with the
+  corpus and the BlueBoat-SSS checkout beside it, 493 + one visible SKIP on the venv, fewer with
+  visible SKIPs without them; ~4 min), artifacts in `/tmp/blueboat_sss_smoke/`. Run it after any
   change; it needs numpy/scipy/yaml/PIL, and PySide6 with a working
   `libEGL.so.1` for `[12]` (a container without it crashes there:
   `apt-get install libegl1`). `[15]` pins the 2026-10-21 consistency fixes
@@ -272,6 +274,11 @@ All noise/physics knobs are in the sonar YAML (`configuration_guide.md
   including `[g8]` screen adaptation — every page's layout minimum fits a
   1000×600 display, tool rows wrap, previews rescale, and a page
   compresses to the window before any scroll bar appears.
+* Ray-cast sensor (not in the smoke gate): `python3 -m test.raycast_test [--quick]` (its phase
+  gates, CPU vs GPU G1, the correction layer CL1–CL11); GPU work needs `warp-lang==1.19.0`.
+  Engineering tools, fits and validation live outside the repository
+  (`~/ros2_ws/sim_runs/raycast/tools/`, results in `~/calib/raycast/`); entry document
+  `docs/engineering/raycast_assessment.md`. Never run CUDA under `ulimit -v`.
 * Frame-level: `parse_frame(encode(...))` round-trips are the contract
   for the raw stream; extend those checks if you touch `encoder.py`.
 * Metrics: `mission_metrics --world <dir> --trajectory <yaml> --out <dir>`
@@ -284,11 +291,12 @@ All noise/physics knobs are in the sonar YAML (`configuration_guide.md
   texture statistics the 2026-09-02 fidelity work was judged by
   (`compare.md` + `compare.json`); run it on every model change.
 * In-graph: `ros2 topic hz /side_scan_sonar/port/profile` should match
-  `ping_period_s()` — **20 Hz** at the default 20 m free-run, the device's own cap
-  (`max(50 ms, 2R/c + 3 ms)`, measured on all seven corpus recordings;
-  the "45 Hz / 22 ms" this line used to claim was a misreading, retired
-  2026-09-02) — and
-  `ros2 topic echo --once .../raw | head` should start with `[66, 82,`
+  `ping_period_s()` — **20 Hz** at the default 20 m with `msec_per_ping` 50, SonarView's command
+  (`max(msec_per_ping, 2R/c + 3 ms)`; since 2026-10-27 the 50 ms is known to be SonarView's
+  command, not a device cap: free-running, the device pings at 34.5 Hz at 20 m). In a slowed
+  ray-cast run, `ros2 topic hz` measures wall time, so it shows about 20 × `real_time_factor`. The
+  "45 Hz / 22 ms" this line once claimed was a misreading, retired 2026-09-02. Also check that
+  `ros2 topic echo --once .../raw | head` starts with `[66, 82,`
   (`'B'`, `'R'`).
 
 ## 5. Performance notes
