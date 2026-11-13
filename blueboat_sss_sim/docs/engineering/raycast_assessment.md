@@ -308,12 +308,13 @@ and the GCS / MCS run on clocks paced by `/clock`. It was verified end to end wi
 - Its dataset mode labels the simulator's seabed images from ground truth.
 - The detector defaults to a dummy. The YOLO adapter exists but has no trained weights.
 
-**Not built** (superproject `CLAUDE.md` §1): **Belief, Replanner, Evaluation**. Their package, nodes
-and topics do not exist.
+**Built but not yet usable for this experiment** (superproject `CLAUDE.md` §1): **Belief** and the
+**Replanner** exist, but they have never run with a trained detector or in a replanner-owned
+Gazebo run (built worlds cannot host one yet, Control R-3). **Evaluation** is not built.
 
 So the paired experiment that would answer "do the adaptive-replanning conclusions survive the
-sonar-model uncertainty" cannot be run yet. It is specified here so it can be run as soon as those
-modules exist:
+sonar-model uncertainty" cannot be run yet. It is specified here so it can be run as soon as a
+trained detector and a replanner-owned Gazebo run exist, with an Evaluation module to score it:
 - **Scenarios:**
   - the same World-Builder worlds and object layouts;
   - the same vehicle conditions and sea states (seeded);

@@ -40,8 +40,8 @@ is hit; the heightfield remains the fast path everywhere else.
 Sample the pose at per-bin receive times instead of once per ping;
 convolve along-track with the horizontal beam footprint. Makes turns
 smear realistically — relevant for imagery taken while the vehicle
-maneuvers (turns, and the revisit passes of an adaptive replanner, which is
-planned, not built).
+maneuvers (turns, and the revisit passes of the adaptive replanner,
+BlueBoat-Replanner, not yet run in Gazebo).
 
 ## 5. Bottom-type speckle spectra (low)
 Correlated speckle shipped 2026-09-02: `Exp(1)` comes from the coherent

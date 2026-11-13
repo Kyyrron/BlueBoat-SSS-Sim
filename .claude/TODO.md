@@ -438,6 +438,106 @@ RTX 4060 8 GB:
   - release every cached renderer's buffers before a retry;
   - process the per-ping scatterer pipeline in range segments. This is exact, and needs G1.
 
+### [P1] Simulator analysis with the beach box validation: `sim-report/` (2026-11-12, evening)
+`sim-report/simulator_analysis.md` (+ `.pdf`, `figures/`) takes over `sim-status-report.md` and adds the real
+Nafco box of 2026-09-07 (`beach_sept/object_boite*.svlog`), replayed offline on the real boat track with the
+geometric, harbour-fast and harbour-live sensors. Evidence: `~/ros2_ws/sim_runs/beach_box_validation/` (README in
+the report's section 13). **This opened the ray-cast's sealed beach hold-out (owner's sign-off, 2026-11-12): the
+nine `beach_sept/object*` files can no longer serve as an untouched test of the ray-cast.** No simulator source
+was changed. Verdict: harbour-fast is suitable for the harbour experiments with stated limits; the flash at an
+aligned face (level and width) is not validated by any real datum and needs a heading experiment with the
+object's yaw surveyed (report section 11.3).
+
+Corrections to this module's records (not yet applied to the documents that carry them):
+- **The field box's position was 19 m off.** `sonar_model.md` section 12, `analysis/object_signature.py`
+  (docstring, `--at -15.9 17.7`), the entry "the box is still ~6 dB hot" history and
+  `sim_review_work/object_physics_2026_09_28/build_field_world.py` place it at GPS 33.9307498 N, 130.73129505 E.
+  The pings put it 16.0 m west and 5.5 m north of the beach anchor, in 1.10 m of water (not 1.50 m): the old
+  images were georeferenced with the ping's own heading field. The numbers of `sonar_model.md` section 12
+  ("34 of 36 headings within 2 dB", transducer 1.35 m over the seabed) describe a geometry the box was not in;
+  the report's section 8 replaces them. Smoke `[14]` uses those field numbers as targets: to review.
+- **The box is in the last three object runs only** (`object_boiteVsDistance`, `object_boiteEncore`,
+  `object_boite_shobbit`); the six earlier `object*` runs pass the same lines with no box there (controls).
+- **The worlds `~/worlds/plage_bathymetry2/plage*` and the 2026-09-28 sessions cited below no longer exist.**
+
+Found by the beach validation, all open:
+- **Ray-cast:** a hollow shell is opaque. Real box shadow: mean -8 to -11 dB, darkest part -8 to -14 dB;
+  harbour-fast: up to 4 dB deeper in the mean, about -20 dB at its darkest (on the 18 dB floor), dark stretch
+  0.5-1.1 m shorter. Category "acceptable limitation" in the report.
+- **Flash width differs between the renderers**: at 6 m (8 deg grazing) a box face is visible within ~1 deg
+  (geometric, Gaussian beam weight) or 3-5 deg (ray-cast, aperture side lobes). On the object ladder at 23-37
+  deg the geometric was the wider one for cylinders. Unvalidated either way.
+- **Harbour profiles at beach depth** (sonar altitude < 3.5 m): seabed 1-9 dB too dark, as their own rule
+  implies. Only matters if beach images must match real levels.
+- **Geometric:** +2 to +4 dB from 10 m at the beach; seabed without patches (real control passes show dark
+  patches in 13 of 18; the empty simulated world in none).
+- **Perception's label rule** (`core/sim_labels.ping_object_bins`): on a rising seabed at low grazing the
+  label's shadow part is 2-4 m too long (the flat-floor tip wins over the renderer's mask); 51-77 % of its bins
+  are dark. Fine on flat floors. A request for Perception, not an edit here.
+
+### [P1] Sensor comparison for the thesis: `sim-status-report.md` (2026-11-12); the owner decides
+The three sensors (geometric, ray-cast harbour-fast, harbour-live) against the real
+`toOptimize-harbourScan` run and on a line of 28 test objects: `sim-status-report.md` (git root).
+Ranking for harbour-depth water at 20 m: harbour-fast, harbour-live (same pictures), geometric. It
+rests on appearance; no measured aspect response exists yet. **Owner's decision (report §8.4):** the
+model that makes the detector's training images must be the one the beach heading experiment
+bounds; the harbour profiles are not valid at 1–3 m. Three ways: a ray-cast beach calibration and
+the sealed hold-out opened once; the geometric everywhere with its gaps closed; or both, stated.
+`.claude/CLAUDE.md` §3.1 and `docs/simulator_justification.md` state the sensors' status differently
+and were not edited.
+
+Open items the comparison found (numbers and sections in the report §8.6):
+- **Geometric:** seabed ~4 dB hot at 1200 bins / 44.3 µs (pulse-length term, already listed);
+  nadir crest +8–9 dB and water column +12–14 dB (the 600-bin near range used at 1200 bins);
+  speckle without deep fades (dark tail 4 dB short); rough blocks at the receiver's ceiling and
+  drawn as a rim (+8 to +12 dB against the real mooring blocks); open-frame classes as blobs with a
+  solid's shadow.
+- **Ray-cast (both harbour profiles):** a hollow shell is opaque (storage box shadow −13 to −15 dB
+  where the field box measured −7.4 / −8.2 dB); the dark stretch behind a solid is 4–28 % shorter
+  than the flat-floor geometry (cause not established); 2 of 28 labels mark objects with no visible
+  trace (mesh crate 0°, bicycle 90°: Perception's dataset needs a minimum-signal rule); rope has no
+  verified parameters (sand law, logged).
+- **Harbour-fast:** stripes along range at 39 m (none at 18–27 m).
+- **Harbour-live:** rows 10–20 dB too dark inside the shadow of the 2.8 m mooring block, deeper in
+  the sea run. Not diagnosed.
+- **All three:** no highlight on an upright 200 L drum (the wall-seabed corner path is not
+  modelled); `.svlog` time stamps on a 10 ms grid (a 55 ms period is written 50 / 60 ms); uniform
+  seabed (ping-to-ping correlation 0.02–0.03, real 0.15).
+- **Geometric against ray-cast:** the broadside flash of a pipe or cylinder has a different width
+  at the scale of 1° (0.4–1.5° off: geometric still at the ceiling, ray-cast +2.5 to +6.7 dB).
+- **Not the sensor (Control, add-only: a request, not an edit):** the boat's heading jumps by ~3°
+  in 0.5 s each time it crosses ±180° (due west) and wanders up to 3.3° about a westward line
+  (MPC); on an eastward line it holds 0.01°. It images an object twice and changes the aspect of
+  mirroring objects. Every westward survey line is affected.
+
+### [P1] Harbour validation runs recorded (2026-11-12)
+The real `toOptimize-harbourScan` path on a world of the real harbour, three sensors, calm and with
+low waves + current: `~/ros2_ws/sim_runs/harbour_validation/README.md` (world, path, range plan, the
+sessions `SSS_data/sessions/harbourval_*`, the real reference in the same format, the object ladder,
+the analysis). Recorded with the superproject's `tools/sim_record`. **Correction:** in the first
+six runs the third range change was 31 m early (162.9 m instead of 194.4 m; `cost_probe.py` searched
+80 m ahead at most): fixed, and repeated as `calm_geometric_r2` / `calm_harbour_fast_r2`. Found on
+the way, all open:
+- **Harbour-live cannot follow a real path at the real ranges under 2 h.** Whole path, 18–39 m:
+  4 h predicted. The time is `diffraction.factor` (sampled edge diffraction): 3–8 s per ping within
+  ~15 m of a 4 m mooring block (steep terrain), ~3 s per ping wherever a quay is in range, 0.15 s in
+  open water (`world_src/cost_probe*.json`). The fast variant's closed-form edge needs 14 min.
+- **A range change during a run leaves a ping gap**: 0.6 s geometric (the GCS's off / set / on),
+  ~3 s harbour-fast at x2. The ray-cast rebuilds for the new acquisition at re-enable while Gazebo
+  runs on; the hold only covers a render. The real device has no gap. Fix candidate: pause the
+  world during the rebuild.
+- **At 38–39 m the device pulse is 64 µs**, outside the harbour profiles' measured near range
+  (44–50 µs): the shared model's ringing and water column apply there (logged). The real harbour
+  run spends 232 of its 478 s at those ranges.
+- **The boat spawns heading east, whatever the path.** The world launch has no spawn yaw; a path
+  starting southwards was followed 5.8 m wide over its first 35 m (MPC). Worked round with a
+  lead-in in the path; a `spawn_yaw` for the world launch would remove it.
+- **World facts for this harbour** (the owner's older Shiraishijima worlds differ): the pier's end
+  is a floating pontoon, not a quay to the seabed (real `OneLineHarbourClean70m`: the seabed behind
+  it is 2–6 dB weaker, not shadowed); the survey's two 4 m "mounds" are the pontoon's real mooring
+  blocks (real sonar: 3.9 m along-track, 1.7 m by the shadow) and need no correction, contrary to
+  `sim_runs/waves_review/REPORT.md`.
+
 ### [P2] Re-stamping a saved rested object is not idempotent (found 2026-11-02)
 `objects._rasterize_solid` writes the settled pose back into the object, including the bank tilt.
 A second stamp of a saved object on a slope therefore tilts it twice: up to 0.89 m height

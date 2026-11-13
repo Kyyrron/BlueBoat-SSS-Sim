@@ -24,8 +24,9 @@ below the git root.
 
 The thesis tests *aspect-aware adaptive replanning* for SSS survey from a
 surface vehicle; its headline result is a model-conditional **simulated**
-comparison against a seriously tuned two-pass orthogonal survey (Replanner and
-Evaluation are planned, not built; superproject `.claude/CLAUDE.md` §1), so
+comparison against a seriously tuned two-pass orthogonal survey (the Replanner is
+built but has not yet run in Gazebo; Evaluation is planned, not built; superproject
+`.claude/CLAUDE.md` §1), so
 output must be defensible as evidence, not merely plausible imagery. A
 built-world run cannot yet host a replanner-owned run (Control
 `docs/REQUESTS.md` R-3). **Worlds in, SSS data
