@@ -210,7 +210,19 @@ near-nadir table edge-held to 4.5 m, the NC #15 floor 18 dB under a smoothed per
 reference, the near range -- ringing, water column -- measured at 1200 bins / 44.3 µs; since
 2026-11-11 the table fades in over 0.8 m after the first echo, `correction.onset_fade_m`)
 -- provisional, harbour worlds only, never the comparison profile; details and limits in
-`.claude/raycast-live.md`.
+`.claude/raycast-live.md`. **Since 2026-11-14 (completion round, session 01):**
+`raycast_harbour_fast` is the **production sensor** for harbour worlds (altitude 4.5–11.3 m,
+range ≤ 30 m, refused beyond), `raycast_harbour_live` the slow **reference** for convergence,
+the geometric renderer **legacy**; the generic `raycast_default / live / fast` warn when loaded
+on a scene with objects. The harbour profiles now carry a 2 cm sea surface, solid (elastic)
+shell walls, face waviness 0.5° / 0.10 m with a 1.5° draft, and two phase-convention fixes;
+`…_flash_narrow` / `…_flash_wide` / `…_shell_opaque` are the bracket ends for the sensitivity
+study and `raycast_harbour_{fast,live}_20261112_sonar.yaml` the frozen copies of the
+2026-11-12 state (regression only). Physics and inputs: `docs/sonar_model.md` section 15;
+what to know before an edit: the last entry of `.claude/raycast-live.md`. The whole-engine
+verification (V1–V9 of the acceptance criteria) runs on the GPU from
+`~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics/` (this machine only), not in the smoke
+gate; smoke `[19]` holds the closed forms and conventions it rests on.
 
 **Installation, vertical datum, pose path: moved to `.claude/sensor-pose.md`.** Read it
 before touching the pose path (`sss_sim_node` pose handling, `renderer._sensor_pose` /

@@ -7,6 +7,85 @@ cross-module risk · **[P2]** realism / project value.
 
 ---
 
+## Ray-cast harbour sensor — open after the completion round, session 01 (2026-11-14)
+
+Evidence and commands: `~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics/handoff_01.md` (this machine only).
+Physics and inputs: `docs/sonar_model.md` section 15.
+
+### [P1] The corner path on sand rests on an untested roughness rule
+An upright face on sand returns 28 dB more than the face alone through the seabed bounce
+(`chains.py:FloorBoundary.factor`: only roughness above the Fresnel-zone wavenumber destroys the mirror, so a
+patch close to the floor sees a nearly smooth bottom). Verified as implemented (V4, 0.5 dB); no recording tests
+the rule itself. It is the largest term of an upright object's echo. Bracket it for the sensitivity study (a key
+that scales the coherent floor bounce between 0 and the rule's value would do it; not added: the code was
+frozen for the final batch) and state it with the model-conditional results.
+
+### [P1] The beam could not be measured on the corpus
+Main lobe and side lobes on real reflectors: yaw sweeps the beam as fast as travel and the heading is not known
+to 0.05 deg on the ping clock (evidence `beam/beam_measurement.md`). The aperture is the vendor's 0.5 deg
+two-way statement. A corner reflector at mid-water on a straight line, attitude on the sonar's clock, would
+settle it. The elevation pattern and the 20 deg tilt were not re-examined (the Makurazaki roll response could
+bound them).
+
+### [P1] A thin plastic shell's shadow is a bracket, not a number
+Elastic wall, measured constants: no shadow at harbour grazing; low end of the documented constants: -11 dB;
+fluid wall: -13 dB. The real box (beach, SEEN) reads -8 to -11 dB. Missing: polypropylene shear absorption
+below 1 MHz, a coupon measurement, ribs / lid / trapped air. Only `plastic_box` is a shell in the catalogue;
+drums, tins, pipes, crates and polytanks are solids (request to the catalogue's owner session).
+
+### [P2] Layers and classes not covered by V5
+Rubber and the steel-belted tyre wall (no absorption or shear speed at 0.2-1 MHz could be read at a source; the
+tread echo stays an upper bound), rope constants.
+
+### [P2] Shadow fill is still the measured 18 dB stand-in
+The engine's own physics (side lobes, diffraction, first-order multipath, receiver noise) leaves -23 to -27 dB
+behind a 0.6 m object and -38 to -48 dB behind a 2.4 m one, against the corpus quay's 17-25 dB; volume and
+incoherent surface reverberation are not modelled and no sourced volume scattering strength at 450 kHz was
+obtained (evidence `shadowfill/shadow_fill.md`). The stand-in stays, bracket 17-25 dB. Seen on it: the shadow
+reads -18.4 to -19.3 dB at 8 m but -13.8 dB at 14 m in 6 m of water, because the floor follows a smoothed
+per-ping ambient level (`floor.ambient_reference`): refer it to the local range if that 4 dB matters.
+
+### [P1] Flash bracket (R1): the wide end removes the box flash at 6 m, it does not widen it to ±5 deg
+Atlas of 2026-11-14 (evidence `atlas/atlas_half_widths.json`, handoff 2.18), 5 m of water, PP container's long
+face, half-width with the highlight >= 3 dB over the seabed: narrow ±0.5 deg (+8.9 dB), production ±0.25 deg
+(+6.5 dB), wide none (+0.7 dB) at 6 m; ±2.5 / ±1.0 / ±5.0 deg at 16 m. Cylinders at 6 m: ±0.5-1.0 to
+±2.5-4.5 deg. The acceptance text asks for "about ±1 to ±5 deg for the box face at 6 m"; that ±5 deg was the
+legacy renderer's own error at beach geometry (handoff 2.15). Session 05 judges it. If a wider visible flash at
+short range is wanted it needs a physical reason (a measured face, ribs), never a level.
+
+### [P1] Live ray-cast run: 99.90 % of nominal pings, not 100 %
+Headless run of 2026-11-14 (harbour world, harbour-fast, 20 m, requested factor 2, hold `when_needed`; evidence
+`throughput/live/c2_live_harbour_fast_20m/c2_live_summary.json`, handoff 2.17): real-time factor 1.19, ping
+numbers consecutive on both sides, but one 470 ms gap between pings 1.4 s after the first one (a 239 ms cycle
+at start-up; the node warns "behind the sim clock although the simulation is held") and 44 intervals of 40 or
+60 ms among 9 612. To do: one run with `hold_sim_while_rendering:=always` and its cost; find why a ping tick
+lands 10 ms early or late (sim step against the timer); or have the recorder start after a warm-up.
+
+### [P2] V3 away from the flash
+Ray-cast and independent reference agree on the flash (peak within 0.53 dB, half-width within 0.05 deg) but
+differ by 4-11 dB at a few aspects 37-46 dB under the peak: a cylinder end-on (the staircase outline of its
+end cap), a plate and a box at 10 deg (cause not isolated). Under the seabed level in every harbour picture.
+
+### [P2] Path selection is redone on most pings among many objects
+With 20 objects in reach the set of object faces within range changes at almost every 5 cm step, so the
+selection reuse (`paths.reselect_every`) rarely applies. Cheap since the 2026-11-14 pre-test (about 60 ms per
+ping-side with 30 objects in the scene); a reuse key on the faces that pass the pre-test would remove the rest,
+but changes which pings reuse a selection: prove it on `throughput/facet_cost.py` and V9 first.
+
+### [P2] Face waviness is assumed
+0.5 deg over 0.10 m in production, bracket 0 to 2 deg over 0.05 m; no measurement of a real container's face.
+A straightedge and feeler gauge on the real containers, or the real heading-response experiment.
+
+### [P2] Port is brighter than starboard on every harbour file
++0.1 to +1.3 dB at u 1.4-2, not consistent in size (evidence `portstbd/`). Not modelled.
+
+### [P2] `owner_measurements.yaml` does not exist
+Mount values are the pass-3 ones. The day it exists: values into `config/default_sonar.yaml` `model:`,
+regenerate the ray-cast profiles, re-baseline the render fixture, rerun V7. Change requests for the processor
+and GCS fore/aft arm (0.0 against -0.345 m): evidence `inputs/lever_arm.md`.
+
+---
+
 ## World builder (2026-09 rework) — open points
 
 ### [P1] Live Gazebo + GUI pass on a builder world
@@ -448,7 +527,9 @@ was changed. Verdict: harbour-fast is suitable for the harbour experiments with 
 aligned face (level and width) is not validated by any real datum and needs a heading experiment with the
 object's yaw surveyed (report section 11.3).
 
-Corrections to this module's records (not yet applied to the documents that carry them):
+Corrections to this module's records (**applied 2026-11-14**, session 01 of the completion round: dated
+correction notes in `analysis/object_signature.py`, the smoke `[14]` comment and `docs/sonar_model.md`
+section 12; `sim_review_work/.../build_field_world.py` is outside the module and keeps the old position):
 - **The field box's position was 19 m off.** `sonar_model.md` section 12, `analysis/object_signature.py`
   (docstring, `--at -15.9 17.7`), the entry "the box is still ~6 dB hot" history and
   `sim_review_work/object_physics_2026_09_28/build_field_world.py` place it at GPS 33.9307498 N, 130.73129505 E.

@@ -6,6 +6,13 @@ argued here. Every number below was measured in this repository; where a choice 
 judgement it says so. The detailed records are `docs/engineering/raycast_assessment.md`,
 `docs/engineering/independent_review_2026-11-11.md` and `.claude/raycast-live.md`.
 
+**Updated 2026-11-14** (completion round, session 01): section 8 reports the verification of
+the sensor against an independent reference, two sign errors it found, the inputs that
+changed, and the bracket on what no recording can settle. Where section 8 and an earlier
+section differ on objects (rows of §1, §3.2, §6 item 1), section 8 is the current one. The
+numbers of §4 were measured on the 2026-11-12 state, which the frozen profiles
+`raycast_harbour_{fast,live}_20261112_sonar.yaml` still reproduce.
+
 ## 1. Verdict
 
 | Use in the thesis | Verdict | Why |
@@ -237,3 +244,160 @@ the date shown.
 - [Cer17] Cerqueira et al., Computers & Graphics 68:66, 2017. doi:10.1016/j.cag.2017.08.008 ✓ record only
 - [Cer20] Cerqueira et al., Graphical Models 111:101086, 2020. doi:10.1016/j.gmod.2020.101086
 - [BF21] Bore, Folkesson, IEEE J. Ocean. Eng. 46(1):195, 2021. doi:10.1109/JOE.2020.2980456
+
+## 8. Update 2026-11-14: verification, inputs and the flash bracket
+
+No new field experiment will be made. The sensor's object response therefore has to stand
+as physics: the code computes what its equations say (verification), its inputs have
+sources, its numerical settings are converged, and what stays undetermined is stated as a
+range. The full record is `~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics/handoff_01.md`
+(this machine); the physics is in `docs/sonar_model.md` section 15.
+
+### 8.1 Sensor roles
+
+| Sensor | Role |
+|---|---|
+| `raycast_harbour_fast` | **Production** sensor for harbour worlds: 4.5–11.3 m of altitude, range ≤ 30 m (a longer range is refused) |
+| `raycast_harbour_live` | Slow **reference**: the same physics at finer numerical settings, for the convergence test |
+| Geometric renderer | **Legacy**. At 1.1 m of water its flash on a box is ±5.8° wide against ±0.7° for the Kirchhoff integral of the same box, and it keeps +8 dB at every aspect: an error of its facet layer near grazing. At harbour geometry it is ±1.0° |
+| `raycast_default / live / fast` | Generic profiles with a provisional level; they warn when loaded on a scene with objects and are not for results |
+
+### 8.2 What was verified, and against what
+
+An independent reference solver was written for this purpose (numpy and a float64 GPU
+twin; it imports nothing from the package): the Kirchhoff integral over a surface meshed at
+an eighth of a wavelength, exact distances to every point of the transmit and receive
+apertures, the pulse applied in time, and for the corner path the image of the aperture in
+the floor. It reproduces the far-field closed forms of a plate, a cylinder and a sphere
+[Kno04] within 0.5 dB. The production sensor was then compared with it on the GPU.
+
+| Test | What is compared | Result | Limit |
+|---|---|---|---|
+| V1 | Small rigid target on axis, 5–20 m; absorption against [JR07] App. B | −0.04 to −0.06 dB; 3e-17 dB/m | 0.5 dB |
+| V2 | Two-way beam pattern in azimuth (0.05° steps) and elevation, 5–20 m, down to −40 dB | 0.0002 dB; lobe positions to 0.001 % | 0.5 dB; 5 % |
+| V3 | Plate, box, cylinder, sphere against aspect at three geometries (ideal faces) | Peak within 0.53 dB; −10 dB half-width within 0.05° | 1 dB; 10 % or 0.2° |
+| V4 | Vertical plate standing on a flat floor (corner path), mirror floor and sand | −0.06 dB and −0.43 dB at broadside; half-width within 0.005° | 1 dB; 10 % or 0.2° |
+| V5 | Wall of a polypropylene shell: transmission and reflection, 0–60° | 1e-12 dB | 0.5 dB |
+| V6 | Seabed mean against the implemented law, 5–51° grazing; speckle on 10 872 samples | 0.07 dB; std 1.025, KS p 0.58 | 0.5 dB; 1 ± 0.05, p > 0.01 |
+| V7 | Range bin of a point target | 0 bins | ± 1 |
+| V8 | Same seed twice; another seed | 3e-16; correlation 0.016 | 1e-6; 0.05 |
+| V9 | Production against reference settings under recorded harbour motion: seabed level, speckle, lag-1, nine object families | Seabed 0.0002 dB; objects ≤ 0.90 dB; largest spectral peak 2.7 dB (real harbour seabed: 3.2 dB) | 0.3 dB; 1 dB; 6 dB |
+
+V5 covers the polypropylene shell only: no usable constants were found for tyre rubber, the
+steel-belted tyre wall or rope. Away from the flash (37–46 dB under its peak) the sensor
+and the reference differ by 4–11 dB at a few aspects of V3 (a cylinder seen end-on: the
+staircase outline of its end cap; a plate and a box at 10°: not isolated). V3 judges the
+peak and the width of the flash, which agree.
+
+### 8.3 Two errors the verification found
+
+Both were phase signs, both invisible in the seabed level and in every earlier gate, both
+fixed (the frozen 2026-11-12 profiles keep the old signs by two legacy switches).
+
+1. **Aperture pattern.** The near-field pattern carried the conjugate phase. For a point
+   target and for the seabed nothing changes. For a flat plate 0.72 m long at 6 m the flash
+   was 5 dB too weak at the normal and 9–12 dB too strong 1–2° off it: a −10 dB half-width
+   of about 1.8° where the reference gives 0.6°.
+2. **Seabed and wall reflection coefficient.** The coefficient of [JR07] eq. 8.49 was used
+   in the opposite time convention to the engine's carrier. The magnitude was right; the
+   phase of every coherent bounce was the conjugate. Seabed mean unchanged to 0.0000 dB.
+
+The review's "dark upright drum" was the first error on the 2026-11-12 profile: on the
+production profile the drum reads +7.6 to +9.6 dB over the seabed at 0–45°.
+
+### 8.4 Inputs that changed in the harbour profiles
+
+| Input | Value | Status | Source |
+|---|---|---|---|
+| Sea surface roughness | 2 cm RMS (was 1 mm) | A (owner's choice) | The 1 mm mirror surface produced the zig-zag "chevron" bands of the 2026-11-12 review by interference of each path with its surface image. Any value above 5 mm gives the same sonar inside 20 m at 5–10 m of altitude |
+| Wall of a flooded plastic shell | Elastic plate: polypropylene 916 kg/m³, 2583 m/s, shear 1273 m/s; absorption 46 dB/m | C; absorption scaled from 5 MHz in proportion to frequency (A) | [Fra25] Table 1; [Sel85] Table I; the plate problem as in [FL77], solved from its boundary conditions and checked three ways (V5) |
+| Face flatness of smooth objects | Slope 0.5° RMS over 0.10 m; draft 1.5° on moulded plastics | A (waviness), D (draft) | No measurement of a real container's face was found; moulders' guides give 1–2° of draft |
+| Aperture weighting | Uniform | D | The maker's drawing gives a 250 ± 3 mm window; only a weak taper (pedestal ≥ 0.819) fits it, and it moves the flash half-width by ≤ 5 % |
+
+The beam could **not** be measured on the recordings: nine compact reflectors qualify, two
+are resolved, and the fitted width scatters from 0.30 to 1.38 of the model's, because the
+boat's yaw (RMS 4–8°/s) sweeps the beam as fast as its travel. The pattern is the maker's
+statement.
+
+### 8.5 What stays undetermined: the bracket
+
+How wide a flash is — the aspect window in which a flat face or a cylinder stands out of
+the seabed — depends on the face's flatness, for which no measurement exists. So the
+production profile is bracketed by two profiles that differ from it only in documented
+inputs: `raycast_harbour_fast_flash_narrow` (ideal faces, the strongest aperture taper the
+250 mm window allows) and `raycast_harbour_fast_flash_wide` (face slope 2° RMS over
+0.05 m). An atlas of 2 208 straight passes per profile (six objects, 5 and 10 m of water,
+6 / 10 / 16 m of ground range, aspect every 0.25° near the normals) gives, in 5 m of water,
+the highlight at the normal and the half-width over which it stays ≥ 3 dB over the seabed:
+
+| Object, ground range | Narrow end | Production | Wide end |
+|---|---|---|---|
+| PP container 50 L (long face), 6 m | +8.9 dB, ±0.5° | +6.5 dB, ±0.25° | +0.7 dB, no flash |
+| PP container, 10 m | +16.3 dB, ±0.75° | +13.6 dB, ±0.5° | +7.4 dB, ±2.0° |
+| PP container, 16 m | +25.4 dB, ±2.5° | +17.8 dB, ±1.0° | +17.5 dB, ±5.0° |
+| Tin 18 L, 6 m | +8.3 dB, ±0.75° | +7.1 dB, ±1.0° | +2.8 dB, no flash |
+| PVC pipe 1 m, 6 m | +10.9 dB, ±0.5° | +9.0 dB, ±1.25° | +5.5 dB, ±2.5° |
+| Steel tube 1.5 m, 6 m | +11.8 dB, ±1.0° | +10.9 dB, ±1.5° | +7.2 dB, ±4.5° |
+
+Three things to read from it. A wavy face does not widen a weak flash, it removes it: at
+6 m the wide end leaves the container without a highlight. The flash grows with range,
+because an upright face returns through the corner path with the seabed and the grazing
+angle falls from 40° at 6 m to 17° at 16 m; in 10 m of water at 6 m no box shows a flash in
+any profile. And one face is one draw: the opposite face of the same object, with its own
+seeded waviness, differs by 0.7 dB in the median and up to 5.6 dB. The half-width here is a
+detection width (it grows with the peak level), not the −10 dB width of the verification
+tests. A study that depends on flashes must be run on both ends.
+
+The ±5° that the 2026-11-12 review reported for the box face came from the legacy
+geometric renderer at the beach geometry (1.1 m of water), where it is ten times wider
+than the independent reference for the same ideal box; at harbour geometry that renderer
+gives ±1°. It is an error of the legacy facet layer near grazing, not a bound on the
+physics.
+
+Three further limits, each stated with its range:
+
+- **The shadow of a thin plastic shell** is not fixed by the constants available. With the
+  measured shear speed a clean flooded 2 mm box casts −0.1 dB at harbour grazing angles; at
+  the low end of the documented range (shear 1000 m/s, higher loss) −11 dB; as a fluid wall
+  −13 dB. The one real box (beach, 1.1 m of water, a recording already seen) shows −8 to
+  −11 dB against −5 to −6 dB computed there. Nothing was tuned towards it;
+  `raycast_harbour_fast_shell_opaque` is the opaque end.
+- **The corner path on sand.** An upright face on sand gains +28 dB from the path by the
+  floor's image. The gain rests on the engine's rule for how much of a rough floor still
+  reflects coherently over a small Fresnel zone; the rule is verified as implemented (V4)
+  and untested by data.
+- **Shadow depth.** The engine's own physics (side lobes, diffraction, first-order
+  multipath, receiver noise) leaves −23 to −27 dB behind an object 0.6 m long and −38 to
+  −48 dB behind one 2.4 m long. Quay shadows in the recordings measure 17–25 dB. The
+  difference is reverberation the engine does not model, so the measured 18 dB stand-in
+  stays (§3.4).
+
+### 8.6 Throughput
+
+Measured on the operator laptop (RTX 4060, 8 GB) with `raycast_harbour_fast` at 20 m,
+1 200 bins, both sides every 50 ms.
+
+Offline, the sensor alone: 22 ms per ping and side next to a quay of the real-harbour world
+(38 % of the cycles exceed 50 ms), 12 ms in open water, 60 ms on flat sand with 30 objects
+in the scene. The last figure was 1 250 ms before a geometric pre-test stopped each
+object's echo-path selection from testing every face of every other object; the pre-test
+is conservative and the rendered pings are unchanged to the device's own run-to-run
+difference (7e-16).
+
+Live, one headless run (Gazebo, simulated sonar, the MPC controller, the GCS and its
+processor; the 374 m path of the real-harbour world; requested real-time factor 2): 473.9 s
+of simulated time in 397 s of wall-clock, a real-time factor of 1.19, 50 s per simulated
+minute. A mission of 20 simulated minutes takes about 17 min: about 84 missions per 24 h in
+that world, about 29 per 24 h at the 30-object cost.
+
+Ping fidelity in that run: 9 613 pings per side with consecutive ping numbers and the two
+sides in step; 99.90 % of the nominal 20 Hz. The shortfall is one gap of 470 ms between
+two pings 1.4 s after the first one (a cycle that took 239 ms while the simulation was
+held only "when needed") and 44 intervals of 40 or 60 ms among 9 612. A campaign should
+start its record a few seconds after the pings, or run with
+`hold_sim_while_rendering:=always`, and check the stamp intervals of each recording.
+
+### 8.7 References added
+
+- [Fra25] Frawley, Kennedy, Jordan, Ramprasad, Thadhani, "Dynamic Spall Failure of Polymers", J. Dyn. Behav. Mater. 11(3):398–410, 2025. doi:10.1007/s40870-025-00468-8 ✓ Table 1 and method read (2026-11-14). One commercial sheet per polymer; a moulded container's grade may differ, hence the range.
+- [Sel85], [FL77], [Kno04], [JR07], [Wil10]: as in §7. Read status in this session (`inputs/references.md` of the evidence folder): [Sel85] Table I read on the page images; [FL77] abstract and introduction only (the equations are not legible in the extracted text); [Kno04] record only; [JR07] App. B.3 read; [Wil10] abstract only: it measured 1–30 kHz, where sand is a mirror, so it supports the image method and not the size of the gain at 450 kHz.

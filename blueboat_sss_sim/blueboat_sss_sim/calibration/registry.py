@@ -27,7 +27,18 @@ _PKG_ROOT = Path(__file__).resolve().parents[2]
 _REQUIRED = ("name", "unit", "class", "status", "default", "tunable",
              "meaning", "identified_by", "metric", "uncertainty",
              "confounders", "experiment", "owner")
-_OPTIONAL = ("bounds", "choices", "doc_label", "source", "tolerance")
+_OPTIONAL = ("bounds", "choices", "doc_label", "source", "tolerance", "i6",
+             "bracket")
+#: Acceptance-criteria tags (I6, completion round 2026-11): how a
+#: result-affecting parameter is known. ``n/a`` = a numerical setting, a
+#: switch or a run setting: not a physical input.
+I6_TAGS = ("MEASURED", "LITERATURE", "DERIVED", "ASSUMED", "n/a")
+#: The tag a parameter gets from its ``status`` when it states no ``i6``.
+I6_FROM_STATUS = {
+    "measured": "MEASURED", "spec": "LITERATURE", "literature": "LITERATURE",
+    "physical": "LITERATURE", "derived": "DERIVED", "joint": "DERIVED",
+    "estimated": "DERIVED", "judged": "ASSUMED", "undetermined": "ASSUMED",
+    "structural": "n/a", "run_setting": "n/a"}
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
 #: A ``key: value`` line whose plain (unquoted) value contains " #".
 _UNQUOTED_HASH = re.compile(r"^\s*-?\s*([A-Za-z_][A-Za-z0-9_]*):[ \t]+"
@@ -73,6 +84,11 @@ class Parameter:
     doc_label: str = ""
     source: dict = field(default_factory=dict)
     tolerance: float = 0.0
+    #: explicit I6 tag (``I6_TAGS``); "" = from the status (:func:`i6_tag`)
+    i6: str = ""
+    #: the documented range of an ASSUMED value when ``bounds`` is not it
+    #: (free text with the two ends and what sets them)
+    bracket: str = ""
 
     @property
     def section(self) -> str:
@@ -205,7 +221,10 @@ def load_registry(path: str | Path | None = None) -> Registry:
             choices=tuple(e["choices"]) if e.get("choices") else None,
             doc_label=str(e.get("doc_label", "")),
             source=dict(e.get("source") or {}),
-            tolerance=float(e.get("tolerance", 0.0)))
+            tolerance=float(e.get("tolerance", 0.0)),
+            i6=str(e.get("i6", "")), bracket=str(e.get("bracket", "")))
+        if p.i6 and p.i6 not in I6_TAGS:
+            errors.append(f"{where}: i6 must be one of {list(I6_TAGS)}")
         try:
             p.check_value(p.default)
         except ValueError as exc:
@@ -233,12 +252,13 @@ def load_registry(path: str | Path | None = None) -> Registry:
 # ------------------------------------------------------------- code values
 def _python_value(spec: str) -> Any:
     """``"pkg.module:ATTR"``, ``"pkg.module:ATTR[key]"``,
-    ``"pkg.module:ATTR[key].attr"`` or ``"pkg.module:Dataclass.field"``
-    (the field's default)."""
+    ``"pkg.module:ATTR[key][i]"``, ``"pkg.module:ATTR[key].attr"`` or
+    ``"pkg.module:Dataclass.field"`` (the field's default)."""
     mod_name, _, expr = spec.partition(":")
     mod = importlib.import_module(mod_name)
     m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?"
                  r"(?:\[(-?\d+|'[^']*'|\"[^\"]*\")\])?"
+                 r"(?:\[(-?\d+)\])?"
                  r"(?:\.([A-Za-z_][A-Za-z0-9_]*))?$", expr)
     if not m:
         raise ValueError(f"cannot parse python source {spec!r}")
@@ -252,8 +272,10 @@ def _python_value(spec: str) -> Any:
     if m.group(3) is not None:
         k = m.group(3)
         obj = obj[int(k)] if k.lstrip("-").isdigit() else obj[k.strip("'\"")]
-    if m.group(4):                       # an attribute of the indexed item
-        obj = getattr(obj, m.group(4))
+    if m.group(4) is not None:           # a second, integer index
+        obj = obj[int(m.group(4))]
+    if m.group(5):                       # an attribute of the indexed item
+        obj = getattr(obj, m.group(5))
     return obj
 
 
@@ -356,15 +378,45 @@ def drift_report(reg: Registry,
             "implicit": implicit, "profile": str(profile_path)}
 
 
+def i6_tag(p: Parameter) -> str:
+    """The acceptance tag of ``p``: its own ``i6``, else from its status."""
+    return p.i6 or I6_FROM_STATUS.get(p.status, "ASSUMED")
+
+
+def has_bracket(p: Parameter) -> bool:
+    """An ASSUMED value is bracketed by numeric ``bounds``, by ``choices``
+    or by a stated ``bracket``."""
+    return p.bounds is not None or p.choices is not None or bool(p.bracket)
+
+
+def i6_report(reg: Registry) -> dict:
+    """Counts per tag and the ASSUMED parameters that state no bracket
+    (acceptance criterion I6: there must be none)."""
+    counts: dict[str, int] = {}
+    missing: list[str] = []
+    for p in reg:
+        t = i6_tag(p)
+        counts[t] = counts.get(t, 0) + 1
+        if t == "ASSUMED" and not has_bracket(p):
+            missing.append(p.name)
+    return {"ok": not missing, "counts": counts,
+            "assumed_without_bracket": sorted(missing)}
+
+
 def registry_markdown(reg: Registry) -> str:
     """A compact markdown table of the registry (the human view in
     ``docs/engineering/parameter_registry.md`` is generated from this)."""
-    rows = ["| Name | Value | Unit | Class | Status | Tunable | Identified by "
-            "| Confounders |", "|---|---|---|---|---|---|---|---|"]
+    rows = ["| Name | Value | Unit | Class | Status | I6 | Tunable | "
+            "Identified by | Confounders |", "|---|---|---|---|---|---|---|---|---|"]
     for p in sorted(reg, key=lambda q: (q.cls, q.name)):
         conf = ", ".join(f"`{c}`" if "." in c and " " not in c else c
                          for c in p.confounders) or "--"
+        tag = i6_tag(p)
+        if tag == "ASSUMED":
+            tag += (" [" + (p.bracket or (f"{p.bounds[0]:g} .. {p.bounds[1]:g}"
+                                           if p.bounds else "choices")) + "]"
+                    if has_bracket(p) else " (NO BRACKET)")
         rows.append(f"| `{p.name}` | {p.default} | {p.unit} | {p.cls} | "
-                    f"{p.status} | {'yes' if p.tunable else 'no'} | "
+                    f"{p.status} | {tag} | {'yes' if p.tunable else 'no'} | "
                     f"{p.identified_by} | {conf} |")
     return "\n".join(rows) + "\n"

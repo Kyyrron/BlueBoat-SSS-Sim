@@ -669,16 +669,22 @@ class SceneOracle:
     layer = None
 
     def set_layers(self, mask: np.ndarray, rho_ratio: np.ndarray,
-                   c_ratio: np.ndarray, thickness: np.ndarray, k1: float) -> None:
+                   c_ratio: np.ndarray, thickness: np.ndarray, k1: float,
+                   tables=None, tab_of=None) -> None:
         """Triangles that are flooded thin shells: a crossing transmits by
-        :func:`layer_transmission` instead of blocking."""
+        :func:`layer_transmission` instead of blocking. ``tables`` /
+        ``tab_of`` (``objects.layer_model: elastic``): per triangle the index
+        of its solid-wall table (``layers.WallTable``), -1 = the fluid
+        formula."""
         if not np.any(mask):
             self.layer = None
             return
         self.layer = dict(mask=np.asarray(mask, bool),
                           rho=np.asarray(rho_ratio, float),
                           c=np.asarray(c_ratio, float),
-                          d=np.asarray(thickness, float), k1=float(k1))
+                          d=np.asarray(thickness, float), k1=float(k1),
+                          tables=list(tables) if tables else None,
+                          tab_of=None if tab_of is None else np.asarray(tab_of, np.int32))
 
     def transmit(self, p0, p1, eps: float = 1e-6, max_cross: int = 12
                  ) -> np.ndarray:
@@ -721,8 +727,14 @@ class SceneOracle:
                 if nrm is None:
                     nrm = self.mesh.normals()
                 cos1 = np.abs(np.einsum("ij,ij->i", nrm[tt], u[hit][thin]))
-                T[it] *= layer_transmission(cos1, lay["rho"][tt], lay["c"][tt],
-                                            lay["d"][tt], lay["k1"])
+                fac = layer_transmission(cos1, lay["rho"][tt], lay["c"][tt],
+                                         lay["d"][tt], lay["k1"])
+                if lay.get("tab_of") is not None:      # the solid wall, tabulated
+                    ti = lay["tab_of"][tt]
+                    for q in np.unique(ti[ti >= 0]):
+                        sq = ti == q
+                        fac[sq] = lay["tables"][int(q)].transmission(cos1[sq])
+                T[it] *= fac
                 p0[it] = p0[it] + (h.t[hit][thin] + 10 * eps)[:, None] * u[hit][thin]
         return T
 

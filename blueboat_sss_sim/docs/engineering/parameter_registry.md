@@ -81,126 +81,174 @@ Not yet registered, but worth adding when they become identifiable:
   BlueBoat-Control's `blueboat_description`; register them by reference
   only.
 
+## Acceptance tags (I6, completion round 2026-11)
+
+Every parameter carries one of **MEASURED / LITERATURE / DERIVED / ASSUMED** (or **n/a** for a numerical
+setting, a switch or a run setting), shown in the table's `I6` column. A parameter may state it (`i6:`);
+otherwise it follows from the status: measured → MEASURED; spec, literature, physical → LITERATURE; derived,
+joint, estimated → DERIVED; judged, undetermined → ASSUMED; structural, run_setting → n/a. An ASSUMED value
+must be bracketed: numeric `bounds`, `choices`, or a stated `bracket:` with its two ends.
+`python3 -m blueboat_sss_sim.calibration registry --i6` prints the counts and exits 1 when an ASSUMED
+parameter has no bracket (2026-11-14: 16 MEASURED, 24 LITERATURE, 21 DERIVED, 41 ASSUMED, 54 n/a; none
+without a bracket).
+
 ## The registry today (generated)
 
-| Name | Value | Unit | Class | Status | Tunable | Identified by | Confounders |
-|---|---|---|---|---|---|---|---|
-| `acquisition.gain_index` | -1 | index | acquisition | run_setting | no | run setting | -- |
-| `acquisition.msec_per_ping` | 50 | ms | acquisition | run_setting | no | run setting (SonarView's, 2026-10-27) | -- |
-| `acquisition.num_results` | 1200 | bins | acquisition | run_setting | no | run setting | -- |
-| `acquisition.pulse_len_percent` | 0.00125 | fraction | acquisition | run_setting | no | run setting | -- |
-| `acquisition.range_length_mm` | 20000 | mm | acquisition | run_setting | no | run setting | -- |
-| `model.dropped_ping_prob` | 0.0 | probability | augmentation | run_setting | no | n/a | -- |
-| `model.gain_drift_amp` | 0.0 | fraction | augmentation | run_setting | no | n/a | -- |
-| `model.scatterer_seed` | 0 | 1 | augmentation | run_setting | no | run setting | -- |
-| `device.pulse_min_s` | 4.43e-05 | s | device | measured | no | every corpus recording, 13 settings, within 1 us | -- |
-| `encoder.analog_gain_0` | 20.0 | linear | device | estimated | no | none (estimate) | -- |
-| `encoder.analog_gain_4` | 74.55 | linear | device | measured | no | receiver-floor steps across indices 4-7 (+5.6/+4.6/+5.7 dB) | -- |
-| `encoder.analog_gain_7` | 464.625 | linear | device | measured | no | receiver-floor steps | -- |
-| `model.array_length_m` | 0.0 | m | device | estimated | yes | corpus along-track texture lag-1 correlation (0.36-0.66); inside ~3 m undetermined | `model.horizontal_aperture_deg`, vehicle speed |
-| `model.beam_sidelobe_floor` | 0.004 | fraction | device | judged | yes | judgement (spec-like sidelobe level) | `model.beam_tilt_deg`, `model.vertical_aperture_deg` |
-| `model.calibration_db_offset` | 81.1 | dB | device | joint | yes | two-altitude fit (bath3 1.40 m + reflectionEvidenceFullharbour 7.33 m), seabed tail past 1.4 x altitude | `model.tvg_compensation`, `model.lambert_exponent`, `model.spreading_exponent` |
-| `model.filter_duration_percent` | 0.0015 | fraction | device | spec | no | real driver setting (Cerulean typical) | `acquisition.pulse_len_percent` |
-| `model.max_ping_rate_hz` | 0.0 | Hz | device | measured | no | ping period on seven SonarView corpus recordings + our driver's free-running 2026-10-27 recordings | `acquisition.msec_per_ping` |
-| `model.max_span_db` | 90.0 | dB | device | measured | no | direct reading of min/max_pwr_db | -- |
-| `model.noise_floor` | 3.39e-09 | linear power (renderer units) | device | measured | yes | far-decile reported dB, re-expressed at the current offset | `model.calibration_db_offset` |
-| `model.ping_level_jitter_db` | 0.0 | dB | device | undetermined | yes | per-ping level anomaly std beyond speckle averaging (corpus: port/starboard uncorrelated) | `model.texture_k_inv_shape` |
-| `model.pulse_level_exponent` | 0.0 | 1 | device | undetermined | yes | within-file pulse changes at matched side and altitude band: +0.93 dB/dB [0.66, 1.17] (validation-role files; calibration sessions hold one pulse each) | `model.calibration_db_offset`, `model.tvg_compensation`, `model.specular_pulse_exponent` |
-| `model.receive_window_level` | False | bool | device | undetermined | no | pool FIT (our driver): predicts -2.16 vs measured -1.7..-2.4 dB in 2-8 m; field VAL (SonarView files): measured step -0.01 dB median vs +0.81 predicted -> refuted there | `model.pulse_level_exponent`, `model.calibration_db_offset` |
-| `model.receive_window_reference_pulse_s` | 4.43e-05 | s | device | derived | no | measured pulse law (sonar_model.md section 5) | -- |
-| `model.receive_window_reference_s` | 4e-05 | s | device | derived | no | the comparison acquisition (20 m / 1200) | -- |
-| `model.receiver_ceiling_db` | 67.9 | dB | device | measured | yes | max_pwr_db pile-up on bath1-3 (66.5 us): 67.9 dB at gains 4-7 (calibration session) | `model.receiver_ceiling_pulse_exponent` |
-| `model.receiver_ceiling_pulse_exponent` | 1.0 | 1 | device | undetermined | yes | 26 piled acquisition groups, both sites: 0.91, residual sd 0.18 dB (needs files beyond the calibration sessions) | `model.receiver_ceiling_db` |
-| `model.reverberation_db` | 18.0 | dB | device | measured | yes | corpus quay deep shadow 6-12 m behind the face (17-25 dB under the seabed) | environment.wall geometry, `model.noise_floor` |
-| `model.ringing_decay_db_per_m` | 22.0 | dB/m | device | measured | yes | diffDepthCompensation.svlog (55 -> 33 dB over 1 m) | `model.watercolumn_noise` |
-| `model.ringing_level_db` | 55.0 | dB | device | measured | yes | diffDepthCompensation.svlog (one recording); real 54.4 dB at bin 0 vs simulated 51.8 | `model.watercolumn_noise` |
-| `model.specular_looks` | 25 | 1 | device | undetermined | yes | not determined; held at the NC #4-gated value | vehicle heave/roll statistics |
-| `model.specular_pulse_exponent` | 0.0 | 1 | device | undetermined | yes | within-file FBR crest vs pulse: +1.07 dB/dB [0.70, 1.38], 49 groups (validation-role files) | `model.specular_strength`, `model.pulse_level_exponent` |
-| `model.specular_spreading_exponent` | 2.0 | 1 | device | joint | yes | reported-peak altitude law over 19 gain-4 recordings (device 66.60 - 11.28 log10 alt) | `model.specular_strength`, `model.specular_width_deg`, `model.beam_tilt_deg` |
-| `model.specular_strength` | 1.75 | 1 | device | estimated | yes | detector-located FBR crest of the harbour calibration anchor (1.36, pass 2, 2026-10-30), raised to the NC #4 FBR-envelope bound over seagrass (1.75); was 12, fitted to max_pwr_db | `model.specular_width_deg`, `model.specular_spreading_exponent`, `model.beam_sidelobe_floor` |
-| `model.tvg_compensation` | 0.3 | fraction | device | joint | yes | same two-altitude fit; only spreading_exponent*(1-tvg) enters the diffuse curve | `model.lambert_exponent`, `model.spreading_exponent`, `model.calibration_db_offset` |
-| `model.watercolumn_noise` | 4.68e-06 | linear power (renderer units) | device | measured | yes | corpus water-column band, re-expressed at the current offset | `model.ringing_level_db`, `model.calibration_db_offset` |
-| `raycast.beam.aperture_length_m` | 0.0 | m | device | derived | no | datasheet two-way 0.5 deg; owner CAD 318 x 29 x 20 mm | -- |
-| `raycast.beam.vertical_floor_amp` | 0.0 | 1 | device | undetermined | yes | unpublished; NC #4 step; Phase-7 fit with roll to separate it from the seabed law | `raycast.seabed.sediments.sand.w2` |
-| `raycast.receiver.filter_pulse_ratio` | 1.4 | 1 | device | measured | no | X2 2026-11-03: speckle range correlation lags 1-3, structure floor removed, calibration median 1.43 | -- |
-| `raycast.receiver.tvg_k` | 0.0 | dB/decade | device | estimated | yes | NC #4 step provisional k = 12 (geometric fit: partial compensation 0.30 x 40); Phase-7 fit | `raycast.system_gain_db` |
-| `raycast.system_gain_db` | 126.6 | dB | device | joint | yes | provisional: flat sand at the bath3 geometry matched to the calibrated geometric renderer (raycast_phase2.md App. D); Phase-7 fit on calibration sessions | `raycast.receiver.tvg_k`, `raycast.seabed.sediments.sand.w2` |
-| `material.gravel.reflectivity` | 0.7 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
-| `material.mud.reflectivity` | 0.3 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
-| `material.pe_cement.wall_m` | 0.006 | m | environment | judged | no | inferred from the maker's mass (6.0 kg) and size (228 x 94 mm) with cement 2.0-2.3 g/cm3; not published | `material.pe_cement.roughness_m` |
-| `material.pp_shell.roughness_m` | 0.0001 | m | environment | judged | yes | judged from manufacture | `model.smooth_lobe_width_deg` |
-| `material.pp_shell.transmission` | 0.11 | fraction (two-way) | environment | measured | yes | field box shadow, re-measured through the facet renderer within 0.25 dB | `model.reverberation_db` |
-| `material.rocks.reflectivity` | 0.85 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
-| `material.sand.reflectivity` | 0.55 | 1 | environment | judged | yes | judged nominal; level absorbed by calibration_db_offset | `model.calibration_db_offset` |
-| `material.seagrass.reflectivity` | 0.22 | 1 | environment | judged | yes | judged | `material.sand.reflectivity` |
-| `model.absorption_db_per_m` | 0.1 | dB/m | environment | physical | no | nominal physical value; check against a temperature/salinity model for the site | `model.tvg_compensation` |
-| `model.floor_rms_height_m` | -1.0 | m | environment | estimated | yes | pool overlay 1.0e-5 m (FIT W2 grid, at the lower literature bound: smooth at lambda) | `model.surface_rms_height_m` |
-| `model.lambert_exponent` | 1.0 | 1 | environment | joint | yes | two-altitude fit; 0.75 and 1.25 scored worse (RMS 1.29, 0.94 vs 0.92) | `model.tvg_compensation`, `model.calibration_db_offset`, `model.beam_tilt_deg` |
-| `model.sand_lambert_mu_db` | -12.0 | dB | environment | literature | yes | literature; site spread +-5 dB | material reflection coefficients |
-| `model.seabed_lambert_exponent` | -1.0 | 1 | environment | estimated | yes | pool painted concrete on FIT (pass 4 step 7) | `model.seabed_level_db`, `model.seabed_comb_enabled` |
-| `model.seabed_level_db` | 0.0 | dB | environment | estimated | yes | pool painted concrete: a site nuisance estimated on FIT (pass 4 step 7); confounded with calibration_db_offset by construction | `model.calibration_db_offset`, `model.seabed_lambert_exponent` |
-| `model.seabed_material` | sand | enum | environment | structural | no | structural (the pool overlay sets painted_concrete) | -- |
-| `model.smooth_lobe_width_deg` | 0.0 | deg | environment | undetermined | yes | undetermined (field box pair carries unknown yaw and burial) | material roughness table |
-| `model.specular_width_deg` | 8.0 | deg | environment | undetermined | yes | not determined by the corpus; held at the NC #4-gated value | `model.specular_strength`, `model.beam_tilt_deg` |
-| `model.surface_rms_height_m` | 0.02 | m | environment | judged | yes | default: judged wind-ruffled open water (coherent fraction ~0 at comb angles: the comb is ~a no-op at sea). Pool environment overlay: 3.0e-4 m, FIT-identified on the wall tail profile (pass 4 W2 grid, rms 1.5 dB); 1e-3 m already removes the tail | `model.floor_rms_height_m` |
-| `model.texture_k_cell_m` | 0.5 | m | environment | undetermined | yes | track and range correlation beyond the speckle cell | `model.texture_k_inv_shape` |
-| `model.texture_k_inv_shape` | 0.0 | 1 | environment | undetermined | yes | seabed fluctuation statistics (power-minus-dB, per-bin and high-pass std) vs the corpus | `model.ping_level_jitter_db`, `model.texture_k_cell_m` |
-| `model.volume_scattering_coeff` | 0.0 | 1 | environment | undetermined | no | undetermined | `model.lambert_exponent`, `model.calibration_db_offset` |
-| `model.wall_diffuse_fraction` | 0.04 | fraction | environment | estimated | yes | set against the corpus far-ghost level | `wall.roughness_m`, `wall.reflectivity` |
-| `model.wall_echo_strength` | 30.0 | 1 | environment | estimated | yes | fullHarbourCleanExample quay (face +22.8/+18.9 dB vs model +21.8) | `model.wall_face_diffuse`, `wall.reflectivity` |
-| `model.wall_face_diffuse` | 0.5 | 1 | environment | judged | yes | judged | `model.wall_echo_strength` |
-| `model.wall_pontoon_specular` | 0.15 | 1 | environment | judged | yes | judged | `model.wall_echo_strength` |
-| `raycast.paths.surface_rms_m` | 0.02 | m | environment | judged | no | the geometric profile's judged surface_rms_height_m; pass-4 pool overlay 3e-4 | -- |
-| `raycast.seabed.sediments.mud.gamma2` | 3.29 | 1 | environment | literature | yes | JR07 Table 13.1; > 2 for the small-slope law | `raycast.seabed.sediments.mud.w2` |
-| `raycast.seabed.sediments.mud.sigma2` | 0.002 | 1/dB | environment | literature | yes | JR07 eq. 14.9 typical range; mid-range default | -- |
-| `raycast.seabed.sediments.mud.w2` | 0.000464 | m^(4-gamma2) | environment | literature | yes | JR07 Table 13.1 Key West at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held | `raycast.seabed.sediments.mud.gamma2`, `raycast.system_gain_db` |
-| `raycast.seabed.sediments.sand.gamma2` | 3.04 | 1 | environment | literature | yes | JR07 Table 13.1; > 2 for the small-slope law | `raycast.seabed.sediments.sand.w2` |
-| `raycast.seabed.sediments.sand.sigma2` | 0.002 | 1/dB | environment | literature | yes | JR07 eq. 14.9 typical range; mid-range default | -- |
-| `raycast.seabed.sediments.sand.w2` | 4.33e-05 | m^(4-gamma2) | environment | literature | yes | JR07 Table 13.1 SAX99 at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held | `raycast.seabed.sediments.sand.gamma2`, `raycast.system_gain_db` |
-| `raycast.water.salinity_ppt` | 35.0 | ppt | environment | literature | no | J&R App. B.3 standard seawater | -- |
-| `raycast.water.temperature_c` | 27.3 | degC | environment | literature | no | OISST v2.1 per site and date (harbour 28.5, beach 27.5, pool 26.0), band +-3 degC | -- |
-| `wall.roughness_m` | 0.003 | m | environment | judged | yes | judged; fitted only through the far-ghost level | `model.wall_diffuse_fraction` |
-| `waveguide.painted_concrete_rms_height_m` | 0.0001 | m | environment | judged | no | micro-texture Ra 1-5 um by stylus (Courard, Garbacz & Gorka, ICPIC 2004); trowel waviness sub-mm; pool W2 FIT prefers the lower bound | `model.surface_rms_height_m` |
-| `waveguide.sand_density_ratio` | 2.0 | 1 | environment | literature | no | J&R 2007 Table 5.1 medium sand (SAX99 rho 2.066 g/cm3 vs 1.024), doi:10.1007/978-0-387-36945-7 | `waveguide.sand_speed_ratio` |
-| `waveguide.sand_rms_height_m` | 0.01 | m | environment | judged | no | J&R 2007 ch. 4 roughness spectra (cm-scale relief of sand); not measured here | -- |
-| `waveguide.sand_speed_ratio` | 1.15 | 1 | environment | literature | no | J&R 2007 Table 5.1 medium sand (Vp ratio 1.13-1.16) | `waveguide.sand_density_ratio` |
-| `device.speed_of_sound_mps` | 1500.0 | m/s | hardware_fixed | physical | no | nominal; the device reports 1500 m/s too | -- |
-| `model.horizontal_aperture_deg` | 0.5 | deg | hardware_fixed | spec | no | specification | `model.array_length_m` |
-| `model.sonar_frequency_hz` | 450000.0 | Hz | hardware_fixed | spec | no | nominal 450 kHz (the wire reports 451 127 Hz, never used in physics) | -- |
-| `model.spreading_exponent` | 4.0 | 1 | hardware_fixed | physical | no | physics (not separable from tvg_compensation) | `model.tvg_compensation` |
-| `model.vertical_aperture_deg` | 50.0 | deg | hardware_fixed | spec | no | specification; widening did not improve the fit | `model.beam_tilt_deg` |
-| `model.beam_tilt_deg` | 20.0 | deg | installation | estimated | yes | sss_calibration_report --fit-tilt over one recording (diffDepthCompensation), 5.88 dB RMS minimum of 11 scored tilts | `model.vertical_aperture_deg`, `model.beam_sidelobe_floor`, `model.specular_strength` |
-| `model.mount_x_m` | -0.345 | m | installation | judged | yes | operator (2026-11-01): brackets on the rear-most hull mounting holes; BlueBoat.dae puts them 0.345 m aft of the hull centre. Data tension: the pool walls under fast yaw give -0.60 m relative to the reported navigation position (FIT, -0.75..-0.45; VALIDATION -0.71), i.e. -0.10..-0.21 m from the centre if the GPS sat 0.10 m behind the bow as stated -- the acoustic centre may sit forward of the bolts, or the EKF reference is not the antenna (unresolved) | `installation.timing_latency_s` |
-| `model.mount_y_abs_m` | 0.285 | m | installation | spec | yes | drawing (570 mm / 2); confirm with a tape measure | -- |
-| `model.sensor_depth_m` | 0.22 | m | installation | measured | yes | pass 3 (2026-11-01): rear-most hull holes 0.030 m above the keel (BlueBoat.dae), waterline 0.216-0.241 m above the keel at 16-22 kg (BlueBoat.stl buoyancy) -> 0.20-0.23 m; the pool (floor 0.90 m, operator) reproduces every run's FBR altitude with 0.22 m, sim - real median 0.000, p10/p90 -0.017/+0.027 m over 36 run-sides (~/calib/pass3/phase2/transducer_mount.json); operator: same holes for every corpus | `node.base_link_rest_z_m`, `bathymetry.datum_offset_m` |
-| `node.base_link_rest_z_m` | -0.11078 | m | installation | derived | no | HullBoxes.gazebo_box().equilibrium_z() from the BlueBoat xacro buoyancy box | `model.sensor_depth_m` |
-| `model.alongtrack_beam_lines` | 5 | lines | model_structure | structural | no | structural | -- |
-| `model.ghost_share_split` | False | bool | model_structure | structural | no | DB1: the ghost's first-leg occlusion painted object shadows beyond the quay face at the full shell transmission (-9.6 dB) although C ~ 0 at a 3 mm wall | -- |
-| `model.image_formation` | energy | enum | model_structure | derived | no | derived, verified to leave the calibration within 0.67 dB | -- |
-| `model.layover_gain_max_db` | 20.0 | dB | model_structure | judged | no | judged (device dynamic range) | -- |
-| `model.pulse_level_reference_s` | 6.65e-05 | s | model_structure | structural | no | structural | -- |
-| `model.receiver_ceiling` | True | 1 | model_structure | structural | no | structural | -- |
-| `model.receiver_ceiling_knee_db` | 1.0 | dB | model_structure | judged | no | judged (pile-up pings show more bins within 1 dB of the maximum) | -- |
-| `model.reverberation_reference` | ambient | enum | model_structure | structural | no | structural | -- |
-| `model.scatterer_cell_m` | 0.01 | m | model_structure | structural | no | structural | -- |
-| `model.seabed_comb_enabled` | False | bool | model_structure | structural | no | pass 4: turns the pool's 15 dB range-shape error into a near-flat level offset (FIT, expected mode) | `model.surface_rms_height_m`, `model.seabed_level_db` |
-| `model.seabed_comb_max_order` | 30 | 1 | model_structure | structural | no | numerical setting | -- |
-| `model.speckle_looks` | 1 | 1 | model_structure | structural | no | corpus single-look contrast 5.5-6.7 dB (gate [2g]) | -- |
-| `model.waveguide_comb_enabled` | False | bool | model_structure | structural | no | pass 4 W/W2: closed form of the incoherent ideal-waveguide image sum (smoke [17]); pool wall tail FIT+VAL (~/calib/pass4/step4) | `model.surface_rms_height_m`, `model.floor_rms_height_m`, `model.wall_face_diffuse` |
-| `model.waveguide_face_step_m` | 0.01 | m | model_structure | structural | no | numerical setting | -- |
-| `model.waveguide_facet_comb` | False | bool | model_structure | structural | no | pass 4: pool box echo extent 0.10 -> 0.77 m (real 1.11), excess 16.8 -> 28.4 dB (real 22.3) on 12 FIT passes | `model.surface_rms_height_m`, `model.floor_rms_height_m` |
-| `model.waveguide_facet_max_order` | 2 | 1 | model_structure | structural | no | numerical setting (cost) | -- |
-| `model.waveguide_max_order` | 30 | 1 | model_structure | structural | no | numerical setting | -- |
-| `model.waveguide_rel_cut` | 0.0001 | 1 | model_structure | structural | no | numerical setting (cost) | -- |
-| `raycast.beam.floor_db` | -40.0 | dB | model_structure | structural | no | design §3 (uniform-aperture sidelobes -26.5 dB two-way); Phase-5 convergence | -- |
-| `raycast.diffraction.end_margin_m` | 0.05 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `raycast.diffraction.sectors` | 16 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `raycast.paths.cutoff_db` | 10.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `raycast.po.curvature_refine` | 16.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `raycast.sampling.scatterer_spacing_m` | 0.005 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `raycast.specular.window_n1` | 8.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `raycast.specular.window_n2` | 30.0 | 1 | model_structure | structural | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
-| `sea.hull.damping.heave_ns_per_m` | 245.0 | N s/m | vehicle_control | judged | yes | judged | `sea.hull.mass_kg` |
-| `sea.hull.damping.pitch_nms_per_rad` | 13.0 | N m s/rad | vehicle_control | judged | yes | judged | -- |
-| `sea.hull.damping.roll_nms_per_rad` | 20.0 | N m s/rad | vehicle_control | judged | yes | judged | -- |
-| `sea.hull.mass_kg` | 16.15 | kg | vehicle_control | spec | yes | URDF value; weigh the boat as surveyed | `sea.hull.damping.heave_ns_per_m` |
+| Name | Value | Unit | Class | Status | I6 | Tunable | Identified by | Confounders |
+|---|---|---|---|---|---|---|---|---|
+| `acquisition.gain_index` | -1 | index | acquisition | run_setting | n/a | no | run setting | -- |
+| `acquisition.msec_per_ping` | 50 | ms | acquisition | run_setting | n/a | no | run setting (SonarView's, 2026-10-27) | -- |
+| `acquisition.num_results` | 1200 | bins | acquisition | run_setting | n/a | no | run setting | -- |
+| `acquisition.pulse_len_percent` | 0.00125 | fraction | acquisition | run_setting | n/a | no | run setting | -- |
+| `acquisition.range_length_mm` | 20000 | mm | acquisition | run_setting | n/a | no | run setting | -- |
+| `model.dropped_ping_prob` | 0.0 | probability | augmentation | run_setting | n/a | no | n/a | -- |
+| `model.gain_drift_amp` | 0.0 | fraction | augmentation | run_setting | n/a | no | n/a | -- |
+| `model.scatterer_seed` | 0 | 1 | augmentation | run_setting | n/a | no | run setting | -- |
+| `device.pulse_min_s` | 4.43e-05 | s | device | measured | MEASURED | no | every corpus recording, 13 settings, within 1 us | -- |
+| `encoder.analog_gain_0` | 20.0 | linear | device | estimated | DERIVED | no | none (estimate) | -- |
+| `encoder.analog_gain_4` | 74.55 | linear | device | measured | MEASURED | no | receiver-floor steps across indices 4-7 (+5.6/+4.6/+5.7 dB) | -- |
+| `encoder.analog_gain_7` | 464.625 | linear | device | measured | MEASURED | no | receiver-floor steps | -- |
+| `model.array_length_m` | 0.0 | m | device | estimated | DERIVED | yes | corpus along-track texture lag-1 correlation (0.36-0.66); inside ~3 m undetermined | `model.horizontal_aperture_deg`, vehicle speed |
+| `model.beam_sidelobe_floor` | 0.004 | fraction | device | judged | ASSUMED [0 .. 0.05] | yes | judgement (spec-like sidelobe level) | `model.beam_tilt_deg`, `model.vertical_aperture_deg` |
+| `model.calibration_db_offset` | 81.1 | dB | device | joint | DERIVED | yes | two-altitude fit (bath3 1.40 m + reflectionEvidenceFullharbour 7.33 m), seabed tail past 1.4 x altitude | `model.tvg_compensation`, `model.lambert_exponent`, `model.spreading_exponent` |
+| `model.filter_duration_percent` | 0.0015 | fraction | device | spec | LITERATURE | no | real driver setting (Cerulean typical) | `acquisition.pulse_len_percent` |
+| `model.max_ping_rate_hz` | 0.0 | Hz | device | measured | MEASURED | no | ping period on seven SonarView corpus recordings + our driver's free-running 2026-10-27 recordings | `acquisition.msec_per_ping` |
+| `model.max_span_db` | 90.0 | dB | device | measured | MEASURED | no | direct reading of min/max_pwr_db | -- |
+| `model.noise_floor` | 3.39e-09 | linear power (renderer units) | device | measured | MEASURED | yes | far-decile reported dB, re-expressed at the current offset | `model.calibration_db_offset` |
+| `model.ping_level_jitter_db` | 0.0 | dB | device | undetermined | ASSUMED [0 .. 6] | yes | per-ping level anomaly std beyond speckle averaging (corpus: port/starboard uncorrelated) | `model.texture_k_inv_shape` |
+| `model.pulse_level_exponent` | 0.0 | 1 | device | undetermined | ASSUMED [0 .. 2] | yes | within-file pulse changes at matched side and altitude band: +0.93 dB/dB [0.66, 1.17] (validation-role files; calibration sessions hold one pulse each) | `model.calibration_db_offset`, `model.tvg_compensation`, `model.specular_pulse_exponent` |
+| `model.receive_window_level` | False | bool | device | undetermined | ASSUMED [off (shipped) .. on: a level step of -2.2 dB between a 10 m and a 20 m window; geometric renderer only] | no | pool FIT (our driver): predicts -2.16 vs measured -1.7..-2.4 dB in 2-8 m; field VAL (SonarView files): measured step -0.01 dB median vs +0.81 predicted -> refuted there | `model.pulse_level_exponent`, `model.calibration_db_offset` |
+| `model.receive_window_reference_pulse_s` | 4.43e-05 | s | device | derived | DERIVED | no | measured pulse law (sonar_model.md section 5) | -- |
+| `model.receive_window_reference_s` | 4e-05 | s | device | derived | DERIVED | no | the comparison acquisition (20 m / 1200) | -- |
+| `model.receiver_ceiling_db` | 67.9 | dB | device | measured | MEASURED | yes | max_pwr_db pile-up on bath1-3 (66.5 us): 67.9 dB at gains 4-7 (calibration session) | `model.receiver_ceiling_pulse_exponent` |
+| `model.receiver_ceiling_pulse_exponent` | 1.0 | 1 | device | undetermined | ASSUMED [0 .. 2] | yes | 26 piled acquisition groups, both sites: 0.91, residual sd 0.18 dB (needs files beyond the calibration sessions) | `model.receiver_ceiling_db` |
+| `model.reverberation_db` | 18.0 | dB | device | measured | MEASURED | yes | corpus quay deep shadow 6-12 m behind the face (17-25 dB under the seabed) | environment.wall geometry, `model.noise_floor` |
+| `model.ringing_decay_db_per_m` | 22.0 | dB/m | device | measured | MEASURED | yes | diffDepthCompensation.svlog (55 -> 33 dB over 1 m) | `model.watercolumn_noise` |
+| `model.ringing_level_db` | 55.0 | dB | device | measured | MEASURED | yes | diffDepthCompensation.svlog (one recording); real 54.4 dB at bin 0 vs simulated 51.8 | `model.watercolumn_noise` |
+| `model.specular_looks` | 25 | 1 | device | undetermined | ASSUMED [1 .. 200] | yes | not determined; held at the NC #4-gated value | vehicle heave/roll statistics |
+| `model.specular_pulse_exponent` | 0.0 | 1 | device | undetermined | ASSUMED [0 .. 2] | yes | within-file FBR crest vs pulse: +1.07 dB/dB [0.70, 1.38], 49 groups (validation-role files) | `model.specular_strength`, `model.pulse_level_exponent` |
+| `model.specular_spreading_exponent` | 2.0 | 1 | device | joint | DERIVED | yes | reported-peak altitude law over 19 gain-4 recordings (device 66.60 - 11.28 log10 alt) | `model.specular_strength`, `model.specular_width_deg`, `model.beam_tilt_deg` |
+| `model.specular_strength` | 1.75 | 1 | device | estimated | DERIVED | yes | detector-located FBR crest of the harbour calibration anchor (1.36, pass 2, 2026-10-30), raised to the NC #4 FBR-envelope bound over seagrass (1.75); was 12, fitted to max_pwr_db | `model.specular_width_deg`, `model.specular_spreading_exponent`, `model.beam_sidelobe_floor` |
+| `model.tvg_compensation` | 0.3 | fraction | device | joint | DERIVED | yes | same two-altitude fit; only spreading_exponent*(1-tvg) enters the diffuse curve | `model.lambert_exponent`, `model.spreading_exponent`, `model.calibration_db_offset` |
+| `model.watercolumn_noise` | 4.68e-06 | linear power (renderer units) | device | measured | MEASURED | yes | corpus water-column band, re-expressed at the current offset | `model.ringing_level_db`, `model.calibration_db_offset` |
+| `raycast.beam.aperture_length_m` | 0.0 | m | device | derived | DERIVED | no | datasheet two-way 0.5 deg; owner CAD 318 x 29 x 20 mm | -- |
+| `raycast.beam.taper_pedestal` | 1.0 | 1 | device | judged | ASSUMED [0.819 .. 1] | no | vendor: 0.5 deg two-way; the transducer window on the vendor drawing is 250 +- 3 mm, so only p >= 0.819 fits (L 250.6 mm, first side lobe -14.5 dB one-way against -13.3 dB uniform). The real weighting is not published and could not be measured on the corpus (session 01, beam/beam_measurement.md) | `raycast.objects.face_tilt_rms_deg` |
+| `raycast.beam.vertical_floor_amp` | 0.0 | 1 | device | undetermined | ASSUMED [0 .. 0.3] | yes | unpublished; NC #4 step; Phase-7 fit with roll to separate it from the seabed law | `raycast.seabed.sediments.sand.w2` |
+| `raycast.floor.reverberation_db` | 0.0 | dB | device | measured | MEASURED | no | the corpus quay: 17-25 dB under the seabed 6-12 m behind the face (analysis/wall_contrast, 2026-09-18), as model.reverberation_db; the ray-cast's own physics test D3 never ran | -- |
+| `raycast.near_range.watercolumn_db` | 0.0 | dB | device | measured | MEASURED | no | harbour_A-2026-07-22-AM toOptimize, 8372 pings at 1200 bins / 44.3 us / gain 4: 1.5-3.5 m mean of dB 14.53 -> 17.04 dB linear mean (Exp(1)); ~/ros2_ws/sim_runs/raycast/harbour_patch/near_range/ | `model.watercolumn_noise`, `model.ringing_level_db` |
+| `raycast.receiver.filter_pulse_ratio` | 1.4 | 1 | device | measured | MEASURED | no | X2 2026-11-03: speckle range correlation lags 1-3, structure floor removed, calibration median 1.43 | -- |
+| `raycast.receiver.tvg_k` | 0.0 | dB/decade | device | estimated | DERIVED | yes | NC #4 step provisional k = 12 (geometric fit: partial compensation 0.30 x 40); Phase-7 fit | `raycast.system_gain_db` |
+| `raycast.system_gain_db` | 126.6 | dB | device | joint | DERIVED | yes | provisional: flat sand at the bath3 geometry matched to the calibrated geometric renderer (raycast_phase2.md App. D); Phase-7 fit on calibration sessions | `raycast.receiver.tvg_k`, `raycast.seabed.sediments.sand.w2` |
+| `raycast.correction.accept_engine_knobs` | False | 1 | empirical_correction | structural | n/a | no | owner 2026-11-10 (harbour patch); equivalence evidence: live bit-identical on the harbour route, fast [F1]-[F7] (raycast_fast_optimize_plan.md) | -- |
+| `raycast.correction.altitude_taper_m` | 1.0 | m | empirical_correction | judged | ASSUMED [0 (a cliff) .. 4.5 m; acts only below 4.5 m of altitude, outside the thesis domain: no effect inside it] | no | judgement (2026-11-10, harbour patch): no strata below 4.77 m at the harbour acquisitions | -- |
+| `raycast.correction.enabled` | False | 1 | empirical_correction | structural | n/a | no | owner 2026-11-06 (hybrid model: physical core + separate correction layer); acceptance pre-registered in gates amendment 6b | -- |
+| `raycast.correction.onset_fade_m` | 0.0 | m | empirical_correction | estimated | DERIVED | no | first 1500 pings of toOptimize-harbourScan (1200 bins, 44 us, 4.4-5.7 m): the real first return starts 9.5 dB under the far seabed and climbs over 0.5-0.7 m; the physical model starts at -8.7 dB; with a square-root fade over 0.8 m the simulated profile is within 2.6 dB of it at every offset (1.4 dB rms) and the processor's tracker reads the bottom 0.28 m late (median), locked 99.7 %. Tried: smooth step 0.8 m (4.5 dB, tracker +0.49 m), square root 1.2 m (2.3 dB, +0.42 m), 0.6 m (3.0 dB, +0.20 m) | `raycast.beam.vertical_floor_amp` |
+| `material.gravel.reflectivity` | 0.7 | 1 | environment | judged | ASSUMED [0.02 .. 1] | yes | judged | `material.sand.reflectivity` |
+| `material.metal.shear_speed_mps` | 3200.0 | m/s | environment | literature | LITERATURE | no | Selfridge 1985, doi:10.1109/T-SU.1985.31608, Table I, Steel, mild: 5.9 and 3.2 mm/us, 7.80 g/cm3 | -- |
+| `material.mud.reflectivity` | 0.3 | 1 | environment | judged | ASSUMED [0.02 .. 1] | yes | judged | `material.sand.reflectivity` |
+| `material.pe_cement.wall_m` | 0.006 | m | environment | judged | ASSUMED [0.001 .. 0.02] | no | inferred from the maker's mass (6.0 kg) and size (228 x 94 mm) with cement 2.0-2.3 g/cm3; not published | `material.pe_cement.roughness_m` |
+| `material.plastic.absorption_long_db_m` | 22.0 | dB/m | environment | judged | ASSUMED [0 .. 164] | no | Selfridge 1985 Table I lists low-density polyethylene only: 2.4 dB/cm at 5 MHz, scaled in proportion to frequency (an assumption) | -- |
+| `material.plastic.shear_speed_mps` | 1016.0 | m/s | environment | literature | LITERATURE | no | Frawley et al. 2025, doi:10.1007/s40870-025-00468-8, Table 1 (0.941 g/cm3, 2440 / 1016 m/s) | -- |
+| `material.pp_shell.absorption_long_db_m` | 46.0 | dB/m | environment | judged | ASSUMED [46 .. 164] | no | Selfridge 1985, doi:10.1109/T-SU.1985.31608, Table I: 5.1 dB/cm (Profax 6432) and 18.2 dB/cm (white sheet) at 5 MHz, scaled in proportion to frequency (an assumption) | `material.pp_shell.shear_speed_mps` |
+| `material.pp_shell.absorption_shear_db_m` | 0.0 | dB/m | environment | judged | ASSUMED [0 .. 164] | no | no value found at a source; 0, with the longitudinal wave's upper value as the other end | `material.pp_shell.shear_speed_mps` |
+| `material.pp_shell.roughness_m` | 0.0001 | m | environment | judged | ASSUMED [0 .. 0.01] | yes | judged from manufacture | `model.smooth_lobe_width_deg` |
+| `material.pp_shell.shear_speed_mps` | 1273.0 | m/s | environment | literature | LITERATURE | no | Frawley et al. 2025, doi:10.1007/s40870-025-00468-8, Table 1 (pulse-echo: 0.916 g/cm3, 2583 / 1273 m/s). Lower end: the static Poisson's ratio 0.42 of a resin maker's property sheet | `material.pp_shell.absorption_long_db_m` |
+| `material.pp_shell.transmission` | 0.11 | fraction (two-way) | environment | measured | MEASURED | yes | field box shadow, re-measured through the facet renderer within 0.25 dB | `model.reverberation_db` |
+| `material.rocks.reflectivity` | 0.85 | 1 | environment | judged | ASSUMED [0.02 .. 1] | yes | judged | `material.sand.reflectivity` |
+| `material.sand.reflectivity` | 0.55 | 1 | environment | judged | ASSUMED [0.02 .. 1] | yes | judged nominal; level absorbed by calibration_db_offset | `model.calibration_db_offset` |
+| `material.seagrass.reflectivity` | 0.22 | 1 | environment | judged | ASSUMED [0.02 .. 1] | yes | judged | `material.sand.reflectivity` |
+| `material.tyre_tread.wall_m` | 0.012 | m | environment | judged | ASSUMED [0.008 .. 0.016 m, the band the reflection is averaged over (grooves 6-8 mm plus 1.0-2.5 mm of rubber under them: US patent 5,343,917)] | no | judgement: an 8 mm tread plus undertread; |R| stays 0.92-0.94 over the band because rubber is nearly matched to water | -- |
+| `model.absorption_db_per_m` | 0.1 | dB/m | environment | physical | LITERATURE | no | nominal physical value; check against a temperature/salinity model for the site | `model.tvg_compensation` |
+| `model.floor_rms_height_m` | -1.0 | m | environment | estimated | DERIVED | yes | pool overlay 1.0e-5 m (FIT W2 grid, at the lower literature bound: smooth at lambda) | `model.surface_rms_height_m` |
+| `model.lambert_exponent` | 1.0 | 1 | environment | joint | DERIVED | yes | two-altitude fit; 0.75 and 1.25 scored worse (RMS 1.29, 0.94 vs 0.92) | `model.tvg_compensation`, `model.calibration_db_offset`, `model.beam_tilt_deg` |
+| `model.sand_lambert_mu_db` | -12.0 | dB | environment | literature | LITERATURE | yes | literature; site spread +-5 dB | material reflection coefficients |
+| `model.seabed_lambert_exponent` | -1.0 | 1 | environment | estimated | DERIVED | yes | pool painted concrete on FIT (pass 4 step 7) | `model.seabed_level_db`, `model.seabed_comb_enabled` |
+| `model.seabed_level_db` | 0.0 | dB | environment | estimated | DERIVED | yes | pool painted concrete: a site nuisance estimated on FIT (pass 4 step 7); confounded with calibration_db_offset by construction | `model.calibration_db_offset`, `model.seabed_lambert_exponent` |
+| `model.seabed_material` | sand | enum | environment | structural | n/a | no | structural (the pool overlay sets painted_concrete) | -- |
+| `model.smooth_lobe_width_deg` | 0.0 | deg | environment | undetermined | ASSUMED [0 .. 30] | yes | undetermined (field box pair carries unknown yaw and burial) | material roughness table |
+| `model.specular_width_deg` | 8.0 | deg | environment | undetermined | ASSUMED [2 .. 30] | yes | not determined by the corpus; held at the NC #4-gated value | `model.specular_strength`, `model.beam_tilt_deg` |
+| `model.surface_rms_height_m` | 0.02 | m | environment | judged | ASSUMED [0 .. 0.1] | yes | default: judged wind-ruffled open water (coherent fraction ~0 at comb angles: the comb is ~a no-op at sea). Pool environment overlay: 3.0e-4 m, FIT-identified on the wall tail profile (pass 4 W2 grid, rms 1.5 dB); 1e-3 m already removes the tail | `model.floor_rms_height_m` |
+| `model.texture_k_cell_m` | 0.5 | m | environment | undetermined | ASSUMED [0.05 .. 10] | yes | track and range correlation beyond the speckle cell | `model.texture_k_inv_shape` |
+| `model.texture_k_inv_shape` | 0.0 | 1 | environment | undetermined | ASSUMED [0 .. 5] | yes | seabed fluctuation statistics (power-minus-dB, per-bin and high-pass std) vs the corpus | `model.ping_level_jitter_db`, `model.texture_k_cell_m` |
+| `model.volume_scattering_coeff` | 0.0 | 1 | environment | undetermined | ASSUMED [0 .. 1] | no | undetermined | `model.lambert_exponent`, `model.calibration_db_offset` |
+| `model.wall_diffuse_fraction` | 0.04 | fraction | environment | estimated | DERIVED | yes | set against the corpus far-ghost level | `wall.roughness_m`, `wall.reflectivity` |
+| `model.wall_echo_strength` | 30.0 | 1 | environment | estimated | DERIVED | yes | fullHarbourCleanExample quay (face +22.8/+18.9 dB vs model +21.8) | `model.wall_face_diffuse`, `wall.reflectivity` |
+| `model.wall_face_diffuse` | 0.5 | 1 | environment | judged | ASSUMED [0 .. 2] | yes | judged | `model.wall_echo_strength` |
+| `model.wall_pontoon_specular` | 0.15 | 1 | environment | judged | ASSUMED [0 .. 1] | yes | judged | `model.wall_echo_strength` |
+| `raycast.objects.face_corr_len_m` | 0.1 | m | environment | judged | ASSUMED [0.05 .. 0.1] | no | judgement, with the slope: 0.10 m (production), 0.05 m at the wide end | `raycast.objects.face_tilt_rms_deg` |
+| `raycast.objects.face_draft_deg` | 0.0 | deg | environment | literature | LITERATURE | no | injection-moulding design guides for polypropylene: draft as low as one degree, 1-2 deg common, up to 5 deg on textured walls (Fictiv; Protolabs; read 2026-11-13) | `raycast.objects.face_tilt_rms_deg` |
+| `raycast.objects.face_tilt_rms_deg` | 0.0 | deg | environment | judged | ASSUMED [0 .. 2] | no | no measurement of a real container's face was found; 0.5 deg over 0.10 m is a few tenths of a millimetre of sink and warp over a decimetre. Verified as implemented against the reference integral on the same displaced surface (within 0.8 dB) | `raycast.objects.face_corr_len_m`, `raycast.beam.taper_pedestal` |
+| `raycast.objects.fouling` | 0.0 | fraction | environment | run_setting | n/a | no | not identified: no measurement of fouled objects at 450 kHz was found; SERDP project MR21-3582 (acoustic scattering from aged munitions) states that the relation between biofouling and the acoustic signature is not well understood | object roughness |
+| `raycast.paths.surface_rms_m` | 0.02 | m | environment | judged | ASSUMED [1e-05 .. 0.05] | no | the geometric profile's judged surface_rms_height_m; pass-4 pool overlay 3e-4; a chop of 0.07 m significant height is 17 mm RMS (Hs = 4 sigma) | -- |
+| `raycast.seabed.sediments.mud.gamma2` | 3.29 | 1 | environment | literature | LITERATURE | yes | JR07 Table 13.1 (<= 3.92); lower bound 2.6 = where the small-slope law's I_K quadrature is computable (as sand's, gates amendment 4; mud is not fitted in Phase A) | `raycast.seabed.sediments.mud.w2` |
+| `raycast.seabed.sediments.mud.sigma2` | 0.002 | 1/dB | environment | literature | LITERATURE | yes | JR07 eq. 14.9 typical range; mid-range default | -- |
+| `raycast.seabed.sediments.mud.w2` | 0.000464 | m^(4-gamma2) | environment | literature | LITERATURE | yes | JR07 Table 13.1 Key West at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held | `raycast.seabed.sediments.mud.gamma2`, `raycast.system_gain_db` |
+| `raycast.seabed.sediments.sand.gamma2` | 3.04 | 1 | environment | literature | LITERATURE | yes | JR07 Table 13.1 (<= 3.92); lower bound 2.6 = where the small-slope law's I_K quadrature is computable (gates amendment 4, 2026-11-04: 2.5 needs ~1.3 GB per call, 2.4 58 GB, below not at all) | `raycast.seabed.sediments.sand.w2` |
+| `raycast.seabed.sediments.sand.sigma2` | 0.002 | 1/dB | environment | literature | LITERATURE | yes | JR07 eq. 14.9 typical range; mid-range default | -- |
+| `raycast.seabed.sediments.sand.w2` | 4.33e-05 | m^(4-gamma2) | environment | literature | LITERATURE | yes | JR07 Table 13.1 SAX99 at 35-40 kHz; not measured at any corpus site; Phase-7 fit, NC #4 held | `raycast.seabed.sediments.sand.gamma2`, `raycast.system_gain_db` |
+| `raycast.water.salinity_ppt` | 35.0 | ppt | environment | literature | LITERATURE | no | J&R App. B.3 standard seawater | -- |
+| `raycast.water.temperature_c` | 27.3 | degC | environment | literature | LITERATURE | no | OISST v2.1 per site and date (harbour 28.5, beach 27.5, pool 26.0), band +-3 degC | -- |
+| `wall.roughness_m` | 0.003 | m | environment | judged | ASSUMED [0 .. 0.1] | yes | judged; fitted only through the far-ghost level | `model.wall_diffuse_fraction` |
+| `waveguide.painted_concrete_rms_height_m` | 0.0001 | m | environment | judged | ASSUMED [1e-05 .. 0.0005] | no | micro-texture Ra 1-5 um by stylus (Courard, Garbacz & Gorka, ICPIC 2004); trowel waviness sub-mm; pool W2 FIT prefers the lower bound | `model.surface_rms_height_m` |
+| `waveguide.sand_density_ratio` | 2.0 | 1 | environment | literature | LITERATURE | no | J&R 2007 Table 5.1 medium sand (SAX99 rho 2.066 g/cm3 vs 1.024), doi:10.1007/978-0-387-36945-7 | `waveguide.sand_speed_ratio` |
+| `waveguide.sand_rms_height_m` | 0.01 | m | environment | judged | ASSUMED [0.002 .. 0.03] | no | J&R 2007 ch. 4 roughness spectra (cm-scale relief of sand); not measured here | -- |
+| `waveguide.sand_speed_ratio` | 1.15 | 1 | environment | literature | LITERATURE | no | J&R 2007 Table 5.1 medium sand (Vp ratio 1.13-1.16) | `waveguide.sand_density_ratio` |
+| `device.speed_of_sound_mps` | 1500.0 | m/s | hardware_fixed | physical | LITERATURE | no | nominal; the device reports 1500 m/s too | -- |
+| `model.horizontal_aperture_deg` | 0.5 | deg | hardware_fixed | spec | LITERATURE | no | specification | `model.array_length_m` |
+| `model.sonar_frequency_hz` | 450000.0 | Hz | hardware_fixed | spec | LITERATURE | no | nominal 450 kHz (the wire reports 451 127 Hz, never used in physics) | -- |
+| `model.spreading_exponent` | 4.0 | 1 | hardware_fixed | physical | LITERATURE | no | physics (not separable from tvg_compensation) | `model.tvg_compensation` |
+| `model.vertical_aperture_deg` | 50.0 | deg | hardware_fixed | spec | LITERATURE | no | specification; widening did not improve the fit | `model.beam_tilt_deg` |
+| `model.beam_tilt_deg` | 20.0 | deg | installation | estimated | DERIVED | yes | sss_calibration_report --fit-tilt over one recording (diffDepthCompensation), 5.88 dB RMS minimum of 11 scored tilts | `model.vertical_aperture_deg`, `model.beam_sidelobe_floor`, `model.specular_strength` |
+| `model.mount_x_m` | -0.345 | m | installation | judged | ASSUMED [-0.6 .. 0.6] | yes | operator (2026-11-01): brackets on the rear-most hull mounting holes; BlueBoat.dae puts them 0.345 m aft of the hull centre. Data tension: the pool walls under fast yaw give -0.60 m relative to the reported navigation position (FIT, -0.75..-0.45; VALIDATION -0.71), i.e. -0.10..-0.21 m from the centre if the GPS sat 0.10 m behind the bow as stated -- the acoustic centre may sit forward of the bolts, or the EKF reference is not the antenna (unresolved) | `installation.timing_latency_s` |
+| `model.mount_y_abs_m` | 0.285 | m | installation | spec | LITERATURE | yes | drawing (570 mm / 2); confirm with a tape measure | -- |
+| `model.sensor_depth_m` | 0.22 | m | installation | measured | MEASURED | yes | pass 3 (2026-11-01): rear-most hull holes 0.030 m above the keel (BlueBoat.dae), waterline 0.216-0.241 m above the keel at 16-22 kg (BlueBoat.stl buoyancy) -> 0.20-0.23 m; the pool (floor 0.90 m, operator) reproduces every run's FBR altitude with 0.22 m, sim - real median 0.000, p10/p90 -0.017/+0.027 m over 36 run-sides (~/calib/pass3/phase2/transducer_mount.json); operator: same holes for every corpus | `node.base_link_rest_z_m`, `bathymetry.datum_offset_m` |
+| `node.base_link_rest_z_m` | -0.11078 | m | installation | derived | DERIVED | no | HullBoxes.gazebo_box().equilibrium_z() from the BlueBoat xacro buoyancy box | `model.sensor_depth_m` |
+| `model.alongtrack_beam_lines` | 5 | lines | model_structure | structural | n/a | no | structural | -- |
+| `model.ghost_share_split` | False | bool | model_structure | structural | n/a | no | DB1: the ghost's first-leg occlusion painted object shadows beyond the quay face at the full shell transmission (-9.6 dB) although C ~ 0 at a 3 mm wall | -- |
+| `model.image_formation` | energy | enum | model_structure | derived | DERIVED | no | derived, verified to leave the calibration within 0.67 dB | -- |
+| `model.layover_gain_max_db` | 20.0 | dB | model_structure | judged | ASSUMED [0 .. 60] | no | judged (device dynamic range) | -- |
+| `model.pulse_level_reference_s` | 6.65e-05 | s | model_structure | structural | n/a | no | structural | -- |
+| `model.receiver_ceiling` | True | 1 | model_structure | structural | n/a | no | structural | -- |
+| `model.receiver_ceiling_knee_db` | 1.0 | dB | model_structure | judged | ASSUMED [0.1 .. 10] | no | judged (pile-up pings show more bins within 1 dB of the maximum) | -- |
+| `model.reverberation_reference` | ambient | enum | model_structure | structural | n/a | no | structural | -- |
+| `model.scatterer_cell_m` | 0.01 | m | model_structure | structural | n/a | no | structural | -- |
+| `model.seabed_comb_enabled` | False | bool | model_structure | structural | n/a | no | pass 4: turns the pool's 15 dB range-shape error into a near-flat level offset (FIT, expected mode) | `model.surface_rms_height_m`, `model.seabed_level_db` |
+| `model.seabed_comb_max_order` | 30 | 1 | model_structure | structural | n/a | no | numerical setting | -- |
+| `model.speckle_looks` | 1 | 1 | model_structure | structural | n/a | no | corpus single-look contrast 5.5-6.7 dB (gate [2g]) | -- |
+| `model.waveguide_comb_enabled` | False | bool | model_structure | structural | n/a | no | pass 4 W/W2: closed form of the incoherent ideal-waveguide image sum (smoke [17]); pool wall tail FIT+VAL (~/calib/pass4/step4) | `model.surface_rms_height_m`, `model.floor_rms_height_m`, `model.wall_face_diffuse` |
+| `model.waveguide_face_step_m` | 0.01 | m | model_structure | structural | n/a | no | numerical setting | -- |
+| `model.waveguide_facet_comb` | False | bool | model_structure | structural | n/a | no | pass 4: pool box echo extent 0.10 -> 0.77 m (real 1.11), excess 16.8 -> 28.4 dB (real 22.3) on 12 FIT passes | `model.surface_rms_height_m`, `model.floor_rms_height_m` |
+| `model.waveguide_facet_max_order` | 2 | 1 | model_structure | structural | n/a | no | numerical setting (cost) | -- |
+| `model.waveguide_max_order` | 30 | 1 | model_structure | structural | n/a | no | numerical setting | -- |
+| `model.waveguide_rel_cut` | 0.0001 | 1 | model_structure | structural | n/a | no | numerical setting (cost) | -- |
+| `raycast.beam.floor_db` | -40.0 | dB | model_structure | structural | n/a | no | design §3 (uniform-aperture sidelobes -26.5 dB two-way); Phase-5 convergence | -- |
+| `raycast.beam.legacy_phase_sign` | False | bool | model_structure | structural | n/a | no | bug fix, proved against an independent Kirchhoff integral | -- |
+| `raycast.diffraction.end_margin_m` | 0.05 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.diffraction.method` | sampled | enum | model_structure | structural | n/a | no | owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md) | -- |
+| `raycast.diffraction.sectors` | 16 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.floor.addition` | power | enum | model_structure | structural | n/a | no | the 2026-11-11 session: plain-seabed 1st percentile -17.0 dB re the mean with the power floor at 18 dB, real harbour -20.5 dB; Monte-Carlo -16.7 (power) / -20.0 (field) | `raycast.floor.reverberation_db` |
+| `raycast.labels.enabled` | False | 1 | model_structure | structural | n/a | no | review of 2026-11-11 (the ray-cast returned no contacts, so no labelled dataset) | -- |
+| `raycast.labels.max_points` | 512 | 1 | model_structure | structural | n/a | no | raycast_test [L2] (shadow within 2 bins of geometry) and [L7] (cost) at 512 | -- |
+| `raycast.objects.layer_model` | fluid | 1 | model_structure | structural | n/a | no | closed forms: normal incidence, energy conservation, an independent propagator solution; rendered transmission and reflection 0.000 dB against the solution (V5) | -- |
+| `raycast.objects.mode` | raster | enum | model_structure | structural | n/a | no | review of 2026-11-11: in a 0.2 m harbour world a pallet was ~20 raised vertices and a small weight one (15 of 29 classes take the raster path) | -- |
+| `raycast.paths.bounce_offset_m` | 0.0001 | 1 | model_structure | structural | n/a | no | numerical setting: G1 (the GPU = the CPU reference; the quay + sill scene decided it, raycast_phase4.md) | -- |
+| `raycast.paths.cutoff_db` | 10.0 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.paths.legacy_reflection_phase` | False | bool | model_structure | structural | n/a | no | bug fix, proved against a thick lossy layer | -- |
+| `raycast.paths.reselect_every` | 1 | pings | model_structure | structural | n/a | no | owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md) | -- |
+| `raycast.paths.reselect_move_m` | 0.0 | m | model_structure | structural | n/a | no | owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md) | -- |
+| `raycast.po.curvature_refine` | 16.0 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.precision` | fp64 | enum | model_structure | structural | n/a | no | owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md) | -- |
+| `raycast.sampling.band_cull` | False | 1 | model_structure | structural | n/a | no | owner 2026-11-10 (fast variant phase 2; docs/engineering/raycast_fast_optimize_plan.md) | -- |
+| `raycast.sampling.cull_unreachable` | False | 1 | model_structure | structural | n/a | no | owner 2026-11-10 (fast variant; docs/engineering/raycast_fast_optimize_plan.md) | -- |
+| `raycast.sampling.max_range_m` | 0.0 | m | model_structure | structural | n/a | no | GPU memory (3.6 GB at 30 m), the measured near range and the verification all stop at 30 m | -- |
+| `raycast.sampling.refine_stretch` | 1.25 | 1 | model_structure | structural | n/a | no | numerical setting: tools/slope_sweep.py, the §6 mean criterion on 20-70 deg ramps (eps_mu p95 <= 0.010, gate 0.02; raycast_phase4.md) | -- |
+| `raycast.sampling.scatterer_spacing_m` | 0.005 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.seabed.energy_valid_hi_db` | 1.0 | dB | model_structure | judged | n/a | no | gates amendment 6a (pre-registered 2026-11-06) | -- |
+| `raycast.seabed.energy_valid_lo_db` | -3.0 | dB | model_structure | judged | n/a | no | gates amendment 6a (pre-registered 2026-11-06); sensitivity +-2 / +-6 dB reported | -- |
+| `raycast.seed_per_run` | False | 1 | model_structure | structural | n/a | no | review of 2026-11-11 (raycast.seed was 0 in every profile: every run of a world showed the same speckle) | -- |
+| `raycast.specular.window_n1` | 8.0 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `raycast.specular.window_n2` | 30.0 | 1 | model_structure | structural | n/a | no | numerical setting: Phase-2 gates (S1, S4/S5, D1, O2); Phase-5 convergence | -- |
+| `sea.hull.damping.heave_ns_per_m` | 245.0 | N s/m | vehicle_control | judged | ASSUMED [0 .. 2000] | yes | judged | `sea.hull.mass_kg` |
+| `sea.hull.damping.pitch_nms_per_rad` | 13.0 | N m s/rad | vehicle_control | judged | ASSUMED [0 .. 500] | yes | judged | -- |
+| `sea.hull.damping.roll_nms_per_rad` | 20.0 | N m s/rad | vehicle_control | judged | ASSUMED [0 .. 500] | yes | judged | -- |
+| `sea.hull.mass_kg` | 16.15 | kg | vehicle_control | spec | LITERATURE | yes | URDF value; weigh the boat as surveyed | `sea.hull.damping.heave_ns_per_m` |

@@ -93,7 +93,8 @@ class Multipath:
                                   sc.patch_phase_rad, sc.patch_min_m,
                                   sc.patch_max_m,
                                   sediments=getattr(rr.law, "sediments", None),
-                                  lib=rr.lib)
+                                  lib=rr.lib,
+                                  legacy_phase=bool(rr._rc.paths.legacy_reflection_phase))
         self.sheet = sheet
         self.surface = ch.SurfaceBoundary(rr.k, pc.surface_rms_m)
         self.floor = ch.FloorBoundary(sheet) if pc.floor_bounces else None
@@ -532,6 +533,7 @@ class Multipath:
                                    p.a[sel], p.b[sel])
             refl = float(rr._facet_R[i])
             rms = float(rr._facet_sigma[i])
+            rtab = rr._facet_tab[i]
             amp0 = (k / (2.0 * np.pi)) * pa * pb * refl
             none = np.zeros(X.shape[0], dtype=bool)
             direct = ch.build(P, X, [], None, self.lam)
@@ -559,8 +561,14 @@ class Multipath:
                     if not ok.any():
                         continue
                     j = np.flatnonzero(ok)
+                    rf = refl
+                    if rtab is not None:    # a shell wall: |R| at the half-angle of the pair
+                        dv = -cj.arrive[j] - ci.arrive[j]
+                        ch_ = np.einsum("ij,ij->i", nrm[j], dv) / np.maximum(
+                            np.linalg.norm(dv, axis=1), 1e-12)
+                        rf = float(rr._facet_gain[i]) * rtab.reflection(ch_)
                     po = po_pair(nrm[j], pu[j], pv[j], pa[j], pb[j],
-                                 ci.arrive[j], -cj.arrive[j], k, refl, rms)
+                                 ci.arrive[j], -cj.arrive[j], k, rf, rms)
                     L = ci.length[j] + cj.length[j]
                     tt = 1.0
                     for c_ in (ci, cj):

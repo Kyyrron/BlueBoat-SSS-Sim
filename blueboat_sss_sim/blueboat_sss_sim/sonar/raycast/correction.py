@@ -82,6 +82,22 @@ CORE_MODEL_KEYS = ("sensor_depth_m", "mount_x_m", "mount_y_abs_m", "beam_tilt_de
 #: modes, ``raycast_test [O1]``)
 _NOT_CORE = ("backend", "seed", "correction", "floor", "near_range", "labels",
              "seed_per_run", "objects")
+#: single keys of core sections that are not part of the physical core the
+#: SEABED mean was fitted on. ``beam.legacy_phase_sign`` (2026-11-13): the sign
+#: of the near-field pattern's phase changes coherent sums over smooth
+#: surfaces only; the seabed mean this layer corrects moves by < 1e-8 dB at
+#: 5, 7.5 and 10 m of altitude (session 01, ``vtests/proxy_seabed_sign.json``).
+#: Left out of the fingerprint at any value, so artifacts fitted before the
+#: key existed keep theirs.
+#: ``paths.legacy_reflection_phase`` (2026-11-14): the phase, not the level, of
+#: the coherent seabed and wall bounces; the seabed mean moves by the amount
+#: recorded in session 01's ``corner/floor_phase_seabed.json``.
+_NOT_CORE_KEYS = ("beam.legacy_phase_sign", "paths.legacy_reflection_phase")
+#: keys of core sections added after the artifacts were fitted: left out of
+#: the fingerprint AT THEIR DEFAULT (so every artifact keeps its own), kept
+#: in at any other value (a tapered aperture is not the core an artifact was
+#: fitted on, and ``check_core`` says so)
+_DEFAULTED_KEYS = {"beam.taper_pedestal": 1.0, "sampling.max_range_m": 0.0}
 #: tolerance on a recorded pulse length [us] (the corpus reports 0.1 us)
 PULSE_TOL_US = 0.5
 
@@ -115,6 +131,20 @@ def core_fingerprint(rc, model) -> dict:
     from .config import ENGINE_KNOBS
     sec = copy.deepcopy(sec)
     for key, default in ENGINE_KNOBS.items():
+        *path, leaf = key.split(".")
+        node = sec
+        for part in path:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict) and leaf in node and node[leaf] == default:
+            del node[leaf]
+    for key in _NOT_CORE_KEYS:
+        *path, leaf = key.split(".")
+        node = sec
+        for part in path:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(leaf, None)
+    for key, default in _DEFAULTED_KEYS.items():
         *path, leaf = key.split(".")
         node = sec
         for part in path:
@@ -306,8 +336,21 @@ def _with_core_engine(rc, core_rc: dict) -> dict:
     """``rc`` as a mapping whose performance-only keys hold the values of
     the artifact's core (``core_rc``), or the engine default where the core
     leaves one out (a fingerprint omits ``ENGINE_KNOBS`` at their default)."""
-    from .config import ENGINE_KNOBS, PERFORMANCE_KEYS
+    from .config import ACCEPTED_CORE_KEYS, ENGINE_KNOBS, PERFORMANCE_KEYS
     sec = dataclasses.asdict(rc) if dataclasses.is_dataclass(rc) else copy.deepcopy(dict(rc))
+    # keys the seabed mean was measured not to depend on (config.ACCEPTED_CORE_KEYS)
+    for key in ACCEPTED_CORE_KEYS:
+        *path, leaf = key.split(".")
+        node, src = sec, core_rc
+        for part in path:
+            node = node.setdefault(part, {}) if isinstance(node, dict) else None
+            src = src.get(part, {}) if isinstance(src, dict) else {}
+        if not isinstance(node, dict):
+            continue
+        if isinstance(src, dict) and leaf in src:
+            node[leaf] = src[leaf]
+        elif key in _DEFAULTED_KEYS:
+            node[leaf] = _DEFAULTED_KEYS[key]
     for key in PERFORMANCE_KEYS:
         *path, leaf = key.split(".")
         node, src = sec, core_rc

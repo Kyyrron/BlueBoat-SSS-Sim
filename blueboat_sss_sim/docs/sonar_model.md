@@ -970,6 +970,14 @@ a mirror of `R` = 0.07 — invisible — which no SSS image of a tyre shows.
 | lying cylinder a = 0.1, L = 0.3 m, broadside | 12.33 dBsm | k a L² = 12.30 |
 | sphere a = 0.1 m | −15.17 dBsm | π a² = −15.03 |
 
+> **Superseded (review of 2026-11-12; marked 2026-11-14).** The comparison below was made at a position 19 m from
+> the box: the images it used were georeferenced with the ping's own heading field, which is not referenced to
+> north on real recordings. The box lay 16.0 m west and 5.5 m north of the beach anchor in 1.10 m of water
+> (transducer 0.88 m over the seabed, not 1.35 m). "34 of 36 headings within 2 dB" therefore describes a
+> geometry the box was not in. The valid comparison, on the box's 12 real sightings, is section 8 of
+> `sim-report/simulator_analysis.md`; the ray-cast sensor's object physics and its verification are section 15
+> of this document. The text is kept as the record of the geometric renderer's facet layer.
+
 At the field's own geometry (1200 bins over 19.711 m, transducer 1.35 m over
 the seabed at the box), over every heading (the field did not survey it):
 
@@ -1143,3 +1151,138 @@ with the box on the boat→wall line darken beyond the face (VAL median −2.85 
 
 Numbers, gates and verdicts: `docs/engineering/calibration_results.md` Part III. The terms and
 assumptions this does not cover are in `docs/engineering/raycast_handoff_from_pass4.md`.
+
+## 15. The ray-cast harbour sensor: verified physics and inputs (completion round, 2026-11-14)
+
+This section covers `renderer: raycast` in its harbour profiles (`config/raycast_harbour_*_sonar.yaml`), the
+sensor of the thesis's simulated comparison. The geometric renderer of sections 1–14 is the legacy sensor.
+Evidence, scripts and run records: `~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics/` (this machine only);
+its `handoff_01.md` gives the commands. Engine design and limits: `docs/engineering/raycast_assessment.md`,
+`.claude/raycast-live.md`.
+
+### 15.1 Phase conventions (two sign fixes)
+
+A path of delay τ is written `exp(−i ω τ)` (`sonar/raycast/receiver.py:BinGrid.add`): a wave travelling along
++r is `exp(−i k r)`. Every complex factor of a coherent sum must be in that convention.
+
+| Factor | Before | Now | Effect of the fix |
+|---|---|---|---|
+| Near-field aperture pattern (`beam.py:Aperture._near`, GPU `gpu_render.py:pattern`) | `Σ w exp(+i k (r − R))` | `Σ w exp(−i k (r − R))` | A 0.72 × 0.32 m plate at 6 m: −4.9 dB at its normal and +8.8 / +11.5 dB at 1° / 2° before; within 0.6 dB of the reference after. Seabed mean: < 1e-8 dB |
+| Seabed and wall reflection coefficient (`specular.py:MaterialSurface.reflection`, GPU `floor_factor`, `face_factor`, sheet kernel) | Jackson & Richardson's V (eq. 8.49), written for `exp(−i ω t)` | `conj(V)` | Phase of each bounce only (sand: 142° at 5° of grazing, 2° at 37°). Seabed mean: 0.0000 dB |
+
+`raycast.beam.legacy_phase_sign` and `raycast.paths.legacy_reflection_phase` restore the old sums; only the
+dated copies `raycast_harbour_{fast,live}_20261112_sonar.yaml` set them (regression against the 2026-11-12
+review). The scattering law uses `|·|²` of V and is unaffected.
+
+### 15.2 Transducer
+
+Uniform unfocused line aperture, length from the vendor's "0.5° nominal theoretical 2-way 3 dB beam width":
+`L = 2 u / (k sin 0.25°)`, `sinc⁴(u) = ½` → 0.2436 m at 450 kHz and 1500 m/s; evaluated with exact near-field
+distances (the far field begins at 9 m per Cerulean, 15 m per Blue Robotics). The transducer window read off the
+vendor drawing is 250 ± 3 mm.
+
+Optional amplitude weighting `raycast.beam.taper_pedestal` p (`beam.py:taper`): `w(x) = p + (1 − p) cos(π x / 2)`
+on `x ∈ [−1, 1]`, the length re-derived so the stated width holds. `p = 1` (default) is the uniform aperture.
+Only `p ≥ 0.819` fits the window (L = 0.2506 m, first side lobe −14.5 dB one-way against −13.3 dB). Its effect on
+a face's flash is at most 5 % of the −10 dB half-width and on the seabed mean at most 0.10 dB.
+Reference for weightings and their side lobes: Harris 1978, doi:10.1109/PROC.1978.10837.
+
+The real beam could not be measured on the corpus to the accuracy the acceptance criteria ask (yaw sweeps the
+beam as fast as travel does and the heading is not known to 0.05° on the ping clock; evidence folder,
+`beam/beam_measurement.md`). The aperture is therefore the vendor's statement, with the weighting as one end of
+the flash bracket (15.7).
+
+### 15.3 Smooth objects: Kirchhoff patches, and how flat a face is
+
+A smooth solid is tessellated into planar patches; each contributes the physical-optics integral through every
+kept pair of paths, with the near-field pattern on transmit and receive (`multipath.py:Multipath.facets`, GPU
+`_facet_pairs_k`). Verified against an independent brute-force Kirchhoff integral (elements ≤ λ/8, exact
+aperture distances) for a plate, a box, a cylinder and a sphere: peak within 0.3 dB, −10 dB flash half-width
+within 0.02°.
+
+**Face geometry** (`object_mesh.py:FaceGeometry`, `wavy_field`, `perturb_patches`): real faces are not ideal.
+A seeded, world-fixed height field `h(X)` (192 plane waves, Gaussian spectrum of correlation length ℓ, RMS
+slope s along any direction: `σ_h = s ℓ / √2`) displaces each patch outward by `h − min h` and tilts it by
+`∇h`; moulded materials (`pp_shell`, `plastic`) also get a draft angle about their base. Keys
+`raycast.objects.face_tilt_rms_deg`, `face_corr_len_m`, `face_draft_deg`, all 0 by default. This is geometry,
+not a level (NC #17). It is what sets the flash width: an ideal 0.72 m face at 8 m flashes over ±0.85°
+(−10 dB); 0.5° of waviness over 0.10 m gives about ±1.9°; 2° over 0.05 m removes the mirror (−7 dB at the
+normal, flat over ±3°). Production: 0.5° / 0.10 m and a 1.5° draft. Sources: moulders' design guides (draft
+"as low as one degree", 1–2° common); the waviness is **assumed**, with the bracket 0 to 2° / 0.05 m.
+
+### 15.4 Shell walls: an elastic plate in water
+
+`raycast.objects.layer_model: elastic` (`layers.py`). A homogeneous isotropic plate of thickness d (ρ, c_L, c_S,
+absorptions as imaginary parts of the wavenumbers) between two water half-spaces; a unit plane wave at θ.
+Unknowns: up- and down-going longitudinal and shear waves in the plate, R, T. Conditions at each face: normal
+displacement continuous, σ_zz = −p, σ_xz = 0. The 6 × 6 system is solved per angle and tabulated every 0.1°;
+T multiplies every ray that crosses the wall, |R| at the pair's half-angle scales the shell's own patches.
+Checked: normal incidence equals the fluid layer; `|R|² + |T|² = 1` without loss; an independent
+propagator-matrix solution (1e-14); rendered transmission and reflection against the solution (0.000 dB).
+Textbook: Brekhovskikh & Godin 1990, doi:10.1007/978-3-642-52369-4; Folds & Loggins 1977, doi:10.1121/1.381643.
+
+Why it matters: as a FLUID layer a 2 mm polypropylene wall loses 6.1 dB at 37° and 13.2 dB at 53° per crossing
+(past its longitudinal critical angle, 33°), which made a flooded box cast a solid's shadow; the solid wall
+passes 0.3–3 dB up to 70° through its shear wave.
+
+Constants (`worldgen/materials.py:_ELASTIC`; never fitted):
+
+| Material | Shear speed | Source | Absorption at 450 kHz | Source |
+|---|---|---|---|---|
+| Polypropylene (`pp_shell`) | 1273 m/s | Frawley et al. 2025, doi:10.1007/s40870-025-00468-8, Table 1 | 46 dB/m longitudinal, 0 shear | Selfridge 1985, doi:10.1109/T-SU.1985.31608, Table I: 5.1 dB/cm at 5 MHz, scaled in proportion to frequency (**assumed** scaling) |
+| HDPE (`plastic`) | 1016 m/s | Frawley et al. 2025 | 22 dB/m | Selfridge 1985 (LDPE 2.4 dB/cm at 5 MHz), same scaling |
+| Mild steel (`metal`, `tinplate`) | 3200 m/s | Selfridge 1985, Table I | 0 | — |
+
+Bracket: with shear 1000 m/s (static Poisson's ratio 0.42) and 164 dB/m on both waves the box's harbour shadow
+goes from −0.1 dB to −11.2 dB. A thin plastic shell's shadow is not determined by the constants available;
+the fluid wall is kept as the "opaque shell" end (`raycast_harbour_fast_shell_opaque_sonar.yaml`). Not
+modelled: ribs, lid, trapped air, sediment inside.
+
+### 15.5 The object–seabed corner path
+
+An upright face and the seabed form a dihedral: sound that reaches the face by way of the seabed returns
+directly, and conversely. The engine renders it as a path pair (out via the floor's image, back direct) with
+the floor factor `conj(V(ψ)) exp(−(2 k σ sin ψ)² / 2)`, σ the RMS height of the sediment's roughness spectrum
+above `K = max(π / r_F, π / Δx)`, `r_F = √(λ R_e / 2)`, `R_e = 2 d₁ d₂ / (d₁ + d₂)`
+(`chains.py:FloorBoundary.factor`, `specular.py:k_low`). Verified against the reference integral with the
+image method: within 0.1 dB on a mirror floor and 0.5 dB on sand at broadside.
+
+Its size: a 0.72 × 0.32 m plate standing on the seabed (6 m of water, 8 m) returns 48 dB more than the plate
+alone on a mirror floor and **28 dB more on sand**. On sand the mirror survives because the two legs near the
+base are short: the Fresnel zone is centimetres wide and the roughness inside it is under a millimetre. This
+"roughness above the Fresnel wavenumber only" rule is a modelling choice no recording in the corpus tests; it
+is the largest single term of an upright object's echo and is listed as open. Measured at low frequency:
+Williams et al. 2010, doi:10.1121/1.3419926 (1–30 kHz, where the sediment is a mirror; the transfer to
+450 kHz is the open point).
+
+### 15.6 Sea surface
+
+`raycast.paths.surface_rms_m` is the RMS height of the surface in the Eckart factor of every surface bounce
+(Eckart 1953, doi:10.1121/1.1907123). The harbour profiles of 2026-11-12 carried 1 mm (a mirror): the direct
+path and its surface image then interfere in fringes along range that zig-zag with roll and heave, the
+"chevron" texture of the beach replays. From 2026-11-14 they carry the engine default 0.02 m (a chop of 0.07 m
+significant height is 17 mm RMS; Holthuijsen 2007, doi:10.1017/CBO9780511618536): no coherent image at any
+grazing angle of the domain. Between 5 mm and 5 cm the sonar is the same to 0.00 dB at 5–10 m of altitude
+inside 20 m.
+
+### 15.7 The flash bracket and the profiles
+
+| Profile | Differs from production in | Use |
+|---|---|---|
+| `raycast_harbour_fast_sonar.yaml` | — | Production sensor, harbour worlds, 4.5–11.3 m of altitude, range ≤ 30 m |
+| `raycast_harbour_live_sonar.yaml` | Engine settings only (5 mm scatterers, float64, no path reuse, sampled diffraction) | Reference for convergence |
+| `raycast_harbour_fast_flash_narrow_sonar.yaml` | Ideal faces; `taper_pedestal 0.819` | Narrow end |
+| `raycast_harbour_fast_flash_wide_sonar.yaml` | Faces 2° over 0.05 m | Wide end |
+| `raycast_harbour_fast_shell_opaque_sonar.yaml` | Fluid shell wall | Opaque-shell end |
+| `raycast_harbour_{fast,live}_20261112_sonar.yaml` | The 2026-11-12 state with both legacy switches | Regression only |
+
+The harbour profiles refuse a range above 30 m (`raycast.sampling.max_range_m`). The generic
+`raycast_default / live / fast` profiles carry the provisional core (+11 dB at the harbour), no shadow floor
+and raster objects: they log a warning when loaded on a scene with objects and are not for results.
+
+### 15.8 What is not modelled, or not verified
+
+Hollow bodies other than `plastic_box` (drums, tins, pipes are solids); rubber and steel-belted tyre walls as
+layers (a tyre's tread echo stays an upper bound); rope constants; sheet-pile corrugation; the scatterer-mediated
+corner path (sound scattered diffusely by the seabed onto the object); the shadow fill as a computed quantity
+(the 18 dB stand-in of NC #15 is kept); the beam's elevation pattern and tilt against data.

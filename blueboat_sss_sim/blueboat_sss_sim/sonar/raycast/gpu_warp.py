@@ -314,11 +314,12 @@ class WarpBVH:
 # ---------------------------------------------------------------- aperture
 @wp.kernel
 def _near_k(d: wp.array(dtype=wp.vec3), e_a: wp.vec3, u: wp.array(dtype=float),
-            w: wp.array(dtype=float), k: float, out_re: wp.array(dtype=float),
+            w: wp.array(dtype=float), k: float, sg: float, out_re: wp.array(dtype=float),
             out_im: wp.array(dtype=float)):
-    """(1/L) int exp(i k (|d - u e_a| - |d|)) |d| / |d - u e_a| du by the
+    """(1/L) int exp(sg i k (|d - u e_a| - |d|)) |d| / |d - u e_a| du by the
     given Gauss-Legendre nodes (``beam.Aperture._near``), with the stable
-    difference r - R = (u^2 - 2 u (d.e_a)) / (r + R)."""
+    difference r - R = (u^2 - 2 u (d.e_a)) / (r + R). ``sg`` = -1 (the
+    carrier's convention; +1 = the pre-2026-11-13 sum, ``legacy_phase``)."""
     i = wp.tid()
     x = d[i]
     R = wp.length(x)
@@ -334,11 +335,11 @@ def _near_k(d: wp.array(dtype=wp.vec3), e_a: wp.vec3, u: wp.array(dtype=float),
         re += a * wp.cos(k * dr)
         im += a * wp.sin(k * dr)
     out_re[i] = 0.5 * re
-    out_im[i] = 0.5 * im
+    out_im[i] = sg * 0.5 * im
 
 
 def near_pattern(d: np.ndarray, e_a: np.ndarray, u: np.ndarray, w: np.ndarray,
-                 k: float, device: str = "cuda:0") -> np.ndarray:
+                 k: float, device: str = "cuda:0", legacy_phase: bool = False) -> np.ndarray:
     """The near-field along-track factor on the GPU (``Aperture._near``)."""
     n = d.shape[0]
     re = wp.zeros(n, dtype=float, device=device)
@@ -348,5 +349,5 @@ def near_pattern(d: np.ndarray, e_a: np.ndarray, u: np.ndarray, w: np.ndarray,
                            wp.vec3(*[float(x) for x in e_a]),
                            wp.array(u.astype(np.float32), device=device),
                            wp.array(w.astype(np.float32), device=device),
-                           float(k), re, im], device=device)
+                           float(k), 1.0 if legacy_phase else -1.0, re, im], device=device)
     return re.numpy().astype(np.float64) + 1j * im.numpy().astype(np.float64)

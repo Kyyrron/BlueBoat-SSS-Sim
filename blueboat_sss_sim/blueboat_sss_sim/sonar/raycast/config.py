@@ -57,6 +57,21 @@ class BeamConfig:
     #: Contributors are kept while the two-way pattern exceeds this [dB re
     #: on-axis far-field]; sidelobes feed the shadow floor (§3).
     floor_db: float = -40.0
+    #: Amplitude weighting of the along-track aperture (``beam.taper``): 1 =
+    #: uniform (default); < 1 = a cosine on that pedestal. The aperture is
+    #: then lengthened so that the two-way -3 dB width stays
+    #: ``two_way_width_deg`` (``aperture_length_m`` 0). The vendor's drawing
+    #: shows a 250 mm window (session 01, ``inputs/beam_spec.md``): 0.819 is
+    #: the strongest taper it allows (first side lobe -14.5 dB one-way against
+    #: -13.3 dB). Bounded [0.3, 1]. It moves the seabed mean by 0.02-0.10 dB.
+    taper_pedestal: float = 1.0
+    #: True = the pre-2026-11-13 sign of the near-field pattern's phase (the
+    #: conjugate of the carrier's convention: a bug, ``beam.py``). It changes
+    #: the coherent echo of extended smooth surfaces (object flashes) and
+    #: nothing else (seabed mean < 1e-8 dB). Only the dated profile copies
+    #: (``*_20261112_sonar.yaml``) set it, to reproduce the renders the
+    #: 2026-11-12 review was made with.
+    legacy_phase_sign: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +106,14 @@ class SamplingConfig:
     #: point could still be lit through the bounce, so there it is
     #: near-exact. Off = today's sampling, exactly.
     band_cull: bool = False
+    #: Longest acquisition range [m] this profile may be used at; 0 = no
+    #: limit (default). The harbour profiles set 30: beyond it the 8 GB GPU
+    #: runs short (40 m: 6.3 GB, 50 m: out of memory), their measured near
+    #: range no longer applies (pulse above 50 us), and nothing was verified
+    #: there (the thesis surveys at 20 m). A longer range raises, with this
+    #: explanation, instead of rendering something unverified. Changes no
+    #: render below the limit.
+    max_range_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -200,6 +223,13 @@ class PathsConfig:
     #: every ping (today). GPU pipeline only.
     reselect_every: int = 1
     reselect_move_m: float = 0.0
+    #: Until 2026-11-14 the complex reflection coefficient of the seabed and
+    #: of wall faces entered the coherent sums in the exp(-i omega t) form of
+    #: the textbook, against this renderer's exp(-i omega tau) carrier: the
+    #: phase of every such bounce was mirrored, its level right
+    #: (``specular.MaterialSurface``). True restores that; the dated profile
+    #: copies only.
+    legacy_reflection_phase: bool = False
 
     def __post_init__(self) -> None:
         if int(self.reselect_every) < 1:
@@ -387,13 +417,49 @@ class ObjectsConfig:
     sediment and growth; it scatters like the seabed and does not mirror.
     0 = clean. Not calibrated (no measurement at 450 kHz was found): the
     sensitivity axis of the aspect response, set per run with the node's
-    ``fouling`` parameter."""
+    ``fouling`` parameter.
+
+    ``layer_model`` (2026-11-14): how the wall of a flooded shell (a material
+    backed by water, e.g. ``pp_shell``) passes and returns sound. ``fluid``
+    (default, as before): a fluid layer, one |R| at every angle -- it stops
+    transmitting beyond the wall's longitudinal critical angle. ``elastic``:
+    the solid wall with its shear wave (``layers.py``: the exact plate
+    solution, tabulated per wall), for the transmission of crossing rays and
+    for the reflection of the shell's own patches at their incidence angle.
+    Needs the wall material's shear speed (``worldgen.materials.
+    elastic_constants``); a shell material without one keeps the fluid wall,
+    said once.
+
+    **Face geometry** (2026-11-14, ``object_mesh.perturb_patches``; solid
+    mode only). A real object's faces are not ideal planes and cylinders, and
+    the width of a mirror flash depends on it. Three GEOMETRIC inputs, all 0
+    by default (the ideal primitive, as before); never a brightness:
+    ``face_tilt_rms_deg``: RMS slope of a smooth random waviness of every
+    mirror surface, along one surface direction [deg]; ``face_corr_len_m``:
+    its correlation length [m] (>= 0.05: five patches); the RMS height that
+    follows is ``tilt * length / sqrt(2)`` (0.6 mm for 0.5 deg over 0.1 m).
+    ``face_draft_deg``: the draft angle of the near-vertical side walls of
+    moulded plastic boxes (they lean outward towards the top) [deg]. The
+    waviness is a pure function of (world seed, object id, position): the
+    same object is the same from ping to ping and from run to run."""
     mode: str = "raster"
     fouling: float = 0.0
+    layer_model: str = "fluid"
+    face_tilt_rms_deg: float = 0.0
+    face_corr_len_m: float = 0.10
+    face_draft_deg: float = 0.0
 
     def __post_init__(self) -> None:
+        if not 0.0 <= float(self.face_tilt_rms_deg) <= 5.0:
+            raise ValueError(f"raycast.objects.face_tilt_rms_deg {self.face_tilt_rms_deg}: [0, 5]")
+        if not 0.05 <= float(self.face_corr_len_m) <= 2.0:
+            raise ValueError(f"raycast.objects.face_corr_len_m {self.face_corr_len_m}: [0.05, 2]")
+        if not 0.0 <= float(self.face_draft_deg) <= 5.0:
+            raise ValueError(f"raycast.objects.face_draft_deg {self.face_draft_deg}: [0, 5]")
         if self.mode not in ("raster", "solid"):
             raise ValueError(f"raycast.objects.mode {self.mode!r}: 'raster' or 'solid'")
+        if self.layer_model not in ("fluid", "elastic"):
+            raise ValueError(f"raycast.objects.layer_model {self.layer_model!r}: 'fluid' or 'elastic'")
         if not 0.0 <= float(self.fouling) <= 1.0:
             raise ValueError(f"raycast.objects.fouling {self.fouling}: [0, 1]")
 
@@ -437,6 +503,23 @@ ENGINE_KNOBS: dict[str, Any] = {
 #: ``Correction.check_core(accept_engine=True)`` compares everything else.
 PERFORMANCE_KEYS: tuple[str, ...] = tuple(ENGINE_KNOBS) + (
     "paths.max_order", "sampling.scatterer_spacing_m")
+
+#: Keys of the physical core that a profile may set to another value than the
+#: one a correction artifact was fitted with, because the SEABED MEAN inside
+#: the artifact's support was measured not to depend on them (session 01 of
+#: the simulator completion round, 2026-11-14; ``Correction.check_core(
+#: accept_engine=True)`` gives them the artifact's own value, or their default,
+#: before comparing):
+#: ``paths.surface_rms_m``: sea surface 1 mm against 2 cm -- 0.00 dB at 7.5
+#: and 10 m of altitude, <= 0.14 dB at 5 m for r < 3 x altitude
+#: (``chevron/harbour_surface.json``); the near-nadir table lives at
+#: r < 2.25 x altitude.
+#: ``beam.taper_pedestal``: the aperture weighting -- the seabed mean moves by
+#: 0.02 to 0.10 dB between 1.0 and 0.819 at 5-10 m of altitude
+#: (``beam/taper_seabed.json``).
+#: ``sampling.max_range_m``: a guard; it changes no render below the limit.
+ACCEPTED_CORE_KEYS: tuple[str, ...] = ("paths.surface_rms_m", "beam.taper_pedestal",
+                                       "sampling.max_range_m")
 
 
 def engine_knob(rc, key: str):
@@ -777,7 +860,7 @@ def _harbour(engine: Mapping[str, Any]) -> dict:
     tail stays exponential), ground-truth contacts (``labels.py``), every
     object as its own mesh on the terrain (``objects.mode: solid``), and the
     speckle realisation of each run from its own noise seed."""
-    return _deep_merge(engine, HARBOUR_V2_CORE, {
+    return _strip(_deep_merge(engine, HARBOUR_V2_CORE, {
         "correction": {"enabled": True, "artifact": HARBOUR_V2_CORRECTION,
                        "altitude_hold_m": [4.5, 11.3],      # taper: the 1.0 m default
                        "onset_fade_m": 0.8,
@@ -786,7 +869,89 @@ def _harbour(engine: Mapping[str, Any]) -> dict:
         "near_range": _deepcopy(HARBOUR_NEAR_RANGE),
         "labels": {"enabled": True},
         "objects": {"mode": "solid"},
-        "seed_per_run": True})
+        "seed_per_run": True},
+        _deepcopy(HARBOUR_PRODUCTION_2026_11_14)),
+        # the sea surface: the v2 core's mirror-flat 1 mm is dropped, which leaves the
+        # engine's default, 2 cm (PathsConfig.surface_rms_m)
+        "paths.surface_rms_m")
+
+
+def _strip(d: Mapping[str, Any], *dotted: str) -> dict:
+    """``d`` without the dotted keys (and without a section they leave
+    empty): a variant declares only what differs from the default profile."""
+    out = _deepcopy(dict(d))
+    for key in dotted:
+        *path, leaf = key.split(".")
+        node, trail = out, []
+        for part in path:
+            trail.append((node, part))
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(leaf, None)
+            for parent, part in reversed(trail):
+                if isinstance(parent.get(part), dict) and not parent[part]:
+                    del parent[part]
+    return out
+
+
+#: What session 01 of the simulator completion round added to the harbour
+#: profiles (owner's decisions of 2026-11-14; evidence
+#: ``~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics/handoff_01.md``):
+#: * a sea surface 2 cm rough instead of 1 mm: a chop of 0.07 m significant
+#:   height is 17 mm RMS; no coherent mirror image of the direct path is left
+#:   (the cause of the zig-zag bands at low altitude and of the stripes beyond
+#:   25 m). Any value above 5 mm gives the same sonar in the thesis domain;
+#: * the wall of a flooded shell as a solid plate (``layers.py``, V5);
+#: * object faces that are not ideal: a waviness of 0.5 deg RMS slope over
+#:   0.10 m (0.6 mm RMS high) and a 1.5 deg draft on moulded boxes. The draft
+#:   is sourced (moulders' design guides: 1-2 deg); the waviness is ASSUMED,
+#:   bracketed by the two flash profiles below.
+HARBOUR_PRODUCTION_2026_11_14: dict[str, Any] = {
+    # (the correlation length 0.10 m is the default; the sea surface is
+    # handled in _harbour by dropping the core's value)
+    "objects": {"layer_model": "elastic", "face_tilt_rms_deg": 0.5,
+                "face_draft_deg": 1.5},
+    # the harbour profiles refuse ranges above 30 m (SamplingConfig.max_range_m)
+    "sampling": {"max_range_m": 30.0},
+}
+#: The two ends of the flash-width bracket (frozen criteria, R1) and the
+#: other end of the shell bracket: production with only these inputs changed.
+#: narrow: ideal faces, no draft, and the strongest aperture taper the
+#: vendor's 250 mm window allows (first side lobe -14.5 dB against -13.3 dB);
+#: wide: dented, used litter -- 2 deg RMS slope over 0.05 m (1.2 mm RMS);
+#: opaque shell: the fluid-wall formula of before, which behaves as an opaque
+#: body at oblique incidence (a shell with ribs, a lid, trapped air or silt).
+FLASH_NARROW: dict[str, Any] = {"beam": {"taper_pedestal": 0.819}}
+#: ... and what the narrow end and the opaque-shell end take back to the
+#: engine default (ideal faces; the fluid wall)
+FLASH_NARROW_DROPS = ("objects.face_tilt_rms_deg", "objects.face_draft_deg")
+FLASH_WIDE: dict[str, Any] = {
+    "objects": {"face_tilt_rms_deg": 2.0, "face_corr_len_m": 0.05},
+}
+SHELL_OPAQUE_DROPS = ("objects.layer_model",)
+
+
+def _harbour_20261112(engine: Mapping[str, Any]) -> dict:
+    """The harbour profiles AS THEY RENDERED ON 2026-11-12 (the review
+    ``sim-report/simulator_analysis.md`` was made with them): the harbour
+    patch of that day, written out here so that it never follows later
+    changes of :func:`_harbour`, plus every legacy switch that reproduces a
+    since-fixed behaviour (``beam.legacy_phase_sign``, ``beam.py``;
+    ``paths.legacy_reflection_phase``, ``specular.MaterialSurface``). For
+    regression against that review only (frozen criteria, B6); never a
+    production sensor."""
+    return _deep_merge(engine, HARBOUR_V2_CORE, {
+        "correction": {"enabled": True, "artifact": HARBOUR_V2_CORRECTION,
+                       "altitude_hold_m": [4.5, 11.3],
+                       "onset_fade_m": 0.8,
+                       "accept_engine_knobs": True},
+        "floor": {"reverberation_db": 18.0, "addition": "field"},
+        "near_range": _deepcopy(HARBOUR_NEAR_RANGE),
+        "labels": {"enabled": True},
+        "objects": {"mode": "solid"},
+        "seed_per_run": True,
+        "beam": {"legacy_phase_sign": True},
+        "paths": {"legacy_reflection_phase": True}})
 
 
 _LIVE_ENGINE = {"paths": {"max_order": 1}}
@@ -795,6 +960,10 @@ _FAST_ENGINE = {"paths": {"max_order": 1, "reselect_every": 10, "reselect_move_m
                              "scatterer_spacing_m": 0.010},
                 "diffraction": {"method": "edge"},
                 "precision": "fp32"}
+_BRACKET_NOTE = (
+    " One end of a sensitivity bracket of the harbour-fast sensor (2026-11-14): the "
+    "production profile with ONLY the named physical inputs changed. A thesis result "
+    "must hold at both ends.")
 _HARBOUR_NOTE = (
     " HARBOUR SITE CALIBRATION, provisional (2026-11-10): the harbour-fitted core "
     "(seabed level within ~2 dB of the real harbour, was +11 dB), its empirical "
@@ -850,6 +1019,50 @@ RAYCAST_VARIANTS: dict[str, dict] = {
         "raycast": _harbour(_FAST_ENGINE),
         "header": "harbour site calibration (HARBOUR_V2_CORE + its correction + floor)",
     },
+    # The sensitivity brackets of the production sensor (owner, 2026-11-14).
+    "raycast_harbour_fast_flash_narrow_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast, flash narrow",
+        "order": 41,
+        "description": "Ideal flat faces, no draft, the strongest aperture taper the "
+                       "transducer window allows: the narrowest mirror flash." + _BRACKET_NOTE,
+        "raycast": _deep_merge(_strip(_harbour(_FAST_ENGINE), *FLASH_NARROW_DROPS), FLASH_NARROW),
+        "header": "BRACKET END (flash narrow) of the harbour-fast production profile",
+    },
+    "raycast_harbour_fast_flash_wide_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast, flash wide",
+        "order": 42,
+        "description": "Dented, used litter: faces 2 deg rough over 0.05 m. The widest, "
+                       "weakest mirror flash." + _BRACKET_NOTE,
+        "raycast": _deep_merge(_harbour(_FAST_ENGINE), FLASH_WIDE),
+        "header": "BRACKET END (flash wide) of the harbour-fast production profile",
+    },
+    "raycast_harbour_fast_shell_opaque_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast, shells opaque",
+        "order": 43,
+        "description": "Flooded plastic shells as opaque bodies (the fluid-wall formula): "
+                       "the deep-shadow end of the shell bracket." + _BRACKET_NOTE,
+        "raycast": _strip(_harbour(_FAST_ENGINE), *SHELL_OPAQUE_DROPS),
+        "header": "BRACKET END (shells opaque) of the harbour-fast production profile",
+    },
+    # Frozen copies of the two harbour profiles as they rendered on 2026-11-12
+    # (owner, 2026-11-13): regression only. ``listed: False`` = no ``variant``
+    # block, so MCS does not offer them.
+    "raycast_harbour_live_20261112_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, live (as of 2026-11-12)",
+        "order": 90,
+        "description": "The harbour-live profile as it rendered on 2026-11-12. Regression only.",
+        "raycast": _harbour_20261112(_LIVE_ENGINE),
+        "header": "FROZEN COPY of the harbour-live profile of 2026-11-12, legacy switches on",
+        "listed": False,
+    },
+    "raycast_harbour_fast_20261112_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast (as of 2026-11-12)",
+        "order": 91,
+        "description": "The harbour-fast profile as it rendered on 2026-11-12. Regression only.",
+        "raycast": _harbour_20261112(_FAST_ENGINE),
+        "header": "FROZEN COPY of the harbour-fast profile of 2026-11-12, legacy switches on",
+        "listed": False,
+    },
 }
 
 
@@ -883,11 +1096,12 @@ def variant_profile_doc(name: str, base_yaml=None) -> dict:
     doc = default_profile_doc(base_yaml)
     rc = _merged(doc["raycast"], v["raycast"])
     RaycastConfig.from_dict(rc)                 # raises on unknown keys
-    return {"renderer": "raycast",
-            "variant": {"label": v["label"], "order": int(v["order"]),
-                        "description": v["description"]},
-            "acquisition": doc["acquisition"], "model": doc["model"],
-            "raycast": rc}
+    out = {"renderer": "raycast"}
+    if v.get("listed", True):                   # MCS lists a profile by this block
+        out["variant"] = {"label": v["label"], "order": int(v["order"]),
+                          "description": v["description"]}
+    out.update(acquisition=doc["acquisition"], model=doc["model"], raycast=rc)
+    return out
 
 
 def write_variant_profiles(config_dir, base_yaml=None) -> list:

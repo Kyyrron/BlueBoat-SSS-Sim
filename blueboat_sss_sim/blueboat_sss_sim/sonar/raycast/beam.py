@@ -7,10 +7,24 @@ uniform aperture of L = 24.4 cm, whose far field begins at L^2/lambda = 17.8 m
 the footprint there is not R*theta. The amplitude pattern is the aperture
 integral over exact distances,
 
-    b_a(x) = (1/L) * integral_{-L/2}^{L/2} w(u) exp(i k (|x - u e_a| - |x|)) du,
+    b_a(x) = (1/L) * integral_{-L/2}^{L/2} w(u) exp(-i k (|x - u e_a| - |x|)) du,
 
 by Gauss-Legendre quadrature with a node count that resolves the phase across
 the aperture; it reduces to sinc(k L s_a / 2) in the far field (gate B2).
+
+**Sign of the phase (2026-11-13, a bug fix).** Every contributor is deposited
+with the carrier ``exp(-i omega tau)`` (``receiver.BinGrid.add``): a path that
+is longer by ``dr`` carries ``exp(-i k dr)``. An aperture point at ``u`` is
+``|x - u e_a| - |x|`` farther from x than the centre, so its term is
+``exp(-i k (...))``. Until 2026-11-13 the integral was summed with ``+i``: the
+complex conjugate. ``|b|`` is the same, so a point target, the beam widths and
+the diffuse seabed did not see it (the seabed mean moves by < 1e-8 dB). A
+coherent sum over an extended smooth surface in the aperture's near field
+did: against an independent Kirchhoff integral a 0.72 m plate at 6 m was
+5.2 dB too weak at normal incidence and 9-11 dB too strong 1-2 deg off it;
+with the sign fixed it agrees within 0.1-0.6 dB (session 01 of the simulator
+completion round, V3; ``~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics``).
+``legacy_phase`` keeps the old sum for the dated profile copies only.
 
 Across track (in the fan plane), a vertical aperture ``H`` (3.5 mm for a
 50 deg one-way height) is in its far field beyond ~4 mm: ``sinc(k H s_v / 2)``
@@ -53,6 +67,32 @@ def aperture_from_width(width_deg: float, k: float, two_way: bool) -> float:
     return 2.0 * u / (k * np.sin(np.radians(0.5 * width_deg)))
 
 
+def taper(x: np.ndarray, pedestal: float) -> np.ndarray:
+    """Amplitude weighting of the line aperture at ``x = 2 u / L`` in
+    [-1, 1]: a cosine on a pedestal, ``p + (1 - p) cos(pi x / 2)``; ``p = 1``
+    is the uniform aperture."""
+    return pedestal + (1.0 - pedestal) * np.cos(0.5 * np.pi * np.asarray(x, float))
+
+
+def aperture_from_width_tapered(width_deg: float, k: float, pedestal: float) -> float:
+    """Aperture length [m] whose TWO-WAY -3 dB full width is ``width_deg``
+    with the cosine-on-pedestal weighting (far field; bisection on the
+    pattern, 4001-point quadrature). ``pedestal = 1`` reproduces
+    :func:`aperture_from_width` to 1e-6."""
+    x = (np.arange(4001) + 0.5) / 4001 * 2.0 - 1.0
+    w = taper(x, pedestal)
+    s = np.sin(np.radians(0.5 * width_deg))
+    lo, hi = 0.02, 2.0
+    for _ in range(80):
+        L = 0.5 * (lo + hi)
+        b = abs(np.sum(w * np.exp(1j * k * 0.5 * L * x * s)) / w.sum())
+        if b ** 4 > 0.5:
+            lo = L
+        else:
+            hi = L
+    return 0.5 * (lo + hi)
+
+
 @dataclass(frozen=True)
 class Aperture:
     """Rectangular aperture, in the transducer frame.
@@ -73,6 +113,16 @@ class Aperture:
     #: Evaluate the near-field integral on the GPU (gpu_warp.near_pattern;
     #: set by the renderer for ``backend: warp``; G1 holds it to the CPU).
     gpu: bool = False
+    #: The pre-2026-11-13 sign of the near-field phase (``exp(+i k dr)``, the
+    #: conjugate of what the carrier's convention requires; module docstring).
+    #: Only ``raycast.beam.legacy_phase_sign`` sets it, for the dated profile
+    #: copies that must reproduce the renders of 2026-11-12.
+    legacy_phase: bool = False
+    #: Amplitude weighting along the aperture (:func:`taper`): 1 = uniform (the
+    #: default, every result before 2026-11-14); < 1 = a cosine on that
+    #: pedestal (``raycast.beam.taper_pedestal``), lower side lobes for a
+    #: longer aperture at the same -3 dB width.
+    pedestal: float = 1.0
 
     def pattern(self, d: np.ndarray, e_a: np.ndarray, e_n: np.ndarray,
                 e_v: np.ndarray, near_field: bool = True,
@@ -90,6 +140,8 @@ class Aperture:
             vert = np.sqrt(vert * vert + self.vertical_floor ** 2)
         front = s_n > 0.0
         if not near_field:
+            if self.pedestal != 1.0:
+                raise NotImplementedError("a tapered aperture is evaluated in the near field only")
             along = _sinc(0.5 * self.k * self.length_m * s_a).astype(complex)
         else:
             along = np.empty(d.shape[0], dtype=complex)
@@ -131,14 +183,19 @@ class Aperture:
         n = int(np.clip(np.ceil(grad * L / (2.0 * np.pi) * 6.0) + 16, 32, 4096))
         x, w = _gauss_legendre(n)
         u = 0.5 * L * x                                   # (n,)
+        if self.pedestal != 1.0:        # weighted aperture, normalised like the uniform one (sum w = 2)
+            w = w * taper(x, self.pedestal)
+            w = w * (2.0 / w.sum())
         if self.gpu:
             from .gpu_warp import near_pattern
-            return near_pattern(d, e_a, u, w, k)
+            return near_pattern(d, e_a, u, w, k, legacy_phase=self.legacy_phase)
         # |d - u e_a| = sqrt(R^2 - 2 u (d.e_a) + u^2), stable for R >> u
         da = (d @ e_a)[:, None]
         r = np.sqrt(np.maximum(R[:, None] ** 2 - 2.0 * u[None, :] * da
                                + u[None, :] ** 2, 0.0))
-        ph = np.exp(1j * k * (r - R[:, None]))
+        # exp(-i k dr): the carrier's convention (module docstring)
+        ph = (np.exp(1j * k * (r - R[:, None])) if self.legacy_phase
+              else np.exp(-1j * k * (r - R[:, None])))
         # Spherical spreading of each element relative to the centre.
         amp = R[:, None] / np.maximum(r, 1e-9)
         return 0.5 * (ph * amp) @ w

@@ -32,6 +32,16 @@ the facet layer: near +14.2 / +14.4 (2026_09_28-10_40_17, images 3-4), and
 region is found automatically, so a pass through bedform troughs can pick
 one: read the passes whose length and rows match the object.
 
+CORRECTION (2026-11-12 review, ``sim-report/simulator_analysis.md`` section 8;
+recorded here 2026-11-14): ``--at -15.9 17.7`` is NOT where the box was. That
+position came from images georeferenced with the ping's own heading field,
+which is not referenced to north on real recordings. The pings place the box
+16.0 m west and 5.5 m north of the beach anchor, in 1.10 m of water (not
+1.50 m). The image numbers above are what this reduction returned at the old
+position (a real dark feature, not necessarily the box); the box's own
+sightings and measures are in the review's section 8 and its
+``beach_box_validation/out/sightings.json``.
+
     python3 -m blueboat_sss_sim.analysis.object_signature \\
         <session>/seabed_images --at X Y [--radius 2.5] [--json out.json]
 """

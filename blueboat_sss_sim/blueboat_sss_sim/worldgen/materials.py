@@ -294,6 +294,43 @@ def _half_space_r(density: float, speed: float) -> float:
 SAND_REFLECTION = _half_space_r(SAND_DENSITY_KGM3, SAND_SOUND_SPEED_MPS)
 
 
+#: Elastic constants of shell-wall materials, for the ray-cast's
+#: ``raycast.objects.layer_model: elastic`` (``sonar/raycast/layers.py``):
+#: ``(shear speed m/s, longitudinal absorption dB/m, shear absorption dB/m)``,
+#: the absorptions at 450 kHz. PHYSICAL, cited, never fitted (NC #17); a
+#: material that is not listed keeps the fluid wall. Sources and their
+#: brackets: ``docs/sonar_model.md`` section 15.
+_ELASTIC: dict[str, tuple[float, float, float]] = {
+    # Polypropylene. Shear speed 1273 m/s: pulse-echo ultrasound on PP sheet,
+    # Frawley et al. 2025, J. Dyn. Behav. Mater. 11(3):398, Table 1
+    # (doi:10.1007/s40870-025-00468-8: 0.916 g/cm3, c_L 2583, c_S 1273 m/s).
+    # Bracket [1000, 1273] m/s: the lower end is what a static Poisson's ratio
+    # of 0.42 (INEOS, Typical Engineering Properties of Polypropylene) gives
+    # with c_L 2583-2740 m/s. Longitudinal absorption 46 dB/m: Selfridge 1985
+    # Table I, Profax 6432, 5.1 dB/cm at 5 MHz, scaled in proportion to the
+    # frequency to 450 kHz (ASSUMED scaling; the table's other PP sample,
+    # 18.2 dB/cm at 5 MHz, gives 164 dB/m: the bracket). It is 0.1-0.3 dB
+    # through a 2 mm wall. Shear absorption: no value was found at a source;
+    # 0, with the same order as the longitudinal one as its bracket.
+    "pp_shell": (1273.0, 46.0, 0.0),
+    # High-density polyethylene (polytanks, crates), for a shell of it: shear
+    # 1016 m/s (Frawley et al. 2025, Table 1: HDPE 0.941 g/cm3, c_L 2440,
+    # c_S 1016 m/s). Absorption: Selfridge 1985 Table I lists 2.4 dB/cm at
+    # 5 MHz for low-density polyethylene only; 22 dB/m by the same scaling.
+    "plastic": (1016.0, 22.0, 0.0),
+    # Mild steel (tins, pails, drums), for a flooded shell of it: Selfridge
+    # 1985 Table I, "Steel, mild": c_L 5.9, c_S 3.2 mm/us, 7.80 g/cm3.
+    "metal": (3200.0, 0.0, 0.0),
+    "tinplate": (3200.0, 0.0, 0.0),
+}
+
+
+def elastic_constants(name: str) -> tuple[float, float, float] | None:
+    """``(c_shear, alpha_long, alpha_shear)`` of the wall material ``name``
+    (:data:`_ELASTIC`), or None."""
+    return _ELASTIC.get(str(name).split("#")[0])
+
+
 def acoustic_reflection(mat: "Material", *, wall_m: float | None = None,
                         backing: str | None = None,
                         frequency_hz: float = 450_000.0) -> float:

@@ -57,6 +57,14 @@ def _cmd_registry(a) -> int:
     if a.markdown:
         print(registry_markdown(reg), end="")
         return 0
+    if getattr(a, "i6", False):
+        from .registry import i6_report
+        rep = i6_report(reg)
+        _dump(rep, a.json)
+        print(f"registry I6: {rep['counts']}; "
+              f"{len(rep['assumed_without_bracket'])} ASSUMED without a "
+              "bracket", file=sys.stderr)
+        return 0 if rep["ok"] else 1
     rep = drift_report(reg, a.profile)
     _dump(rep, a.json)
     print(f"registry: {rep['checked']} parameters, "
@@ -215,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="(default) drift report; exit 1 on drift")
     r.add_argument("--markdown", action="store_true")
     r.add_argument("--json", default=None)
+    r.add_argument("--i6", action="store_true",
+                   help="acceptance tags (I6): counts, and ASSUMED parameters without a bracket")
     r.set_defaults(fn=_cmd_registry)
     m = sub.add_parser("validate-manifest")
     m.add_argument("manifest")

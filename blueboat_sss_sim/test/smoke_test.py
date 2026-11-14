@@ -4964,15 +4964,69 @@ def main() -> None:
             _none = object()
             _diff = {k for k in set(_fv) | set(_fd) if _fv.get(k, _none) != _fd.get(k, _none)}
             _want = set(_rcc.flat_deltas(_vv["raycast"]))
+            # a variant with ``listed: False`` (the frozen copies of 2026-11-12)
+            # carries no ``variant`` block, so MCS does not offer it
+            _blk = (set(_doc["variant"]) == {"label", "order", "description"}
+                    if _vv.get("listed", True) else "variant" not in _doc)
             _vok &= (_pkg.read_bytes() == _gen.read_bytes()
                      and _diff == _want
-                     and set(_doc["variant"]) == {"label", "order", "description"}
+                     and _blk
                      and _doc["renderer"] == "raycast"
                      and resolve_sonar_config(wdir, _vn, "raycast") == str(_pkg))
             _vdet += f"{_vn}: {sorted(_diff)} "
     check("ray-cast live variants: each packaged file is its generator's output, "
           "differs from the default only in its declared deltas, carries the MCS "
-          "variant block and resolves by bare name", bool(_vok), _vdet)
+          "variant block (none when not listed) and resolves by bare name", bool(_vok), _vdet)
+    # The frozen copies of the harbour profiles as they rendered on 2026-11-12
+    # (session 01 of the simulator completion round): the production profile's
+    # deltas of that day plus the legacy switches, and nothing else. The sign
+    # of the near-field pattern's phase (beam.py, fixed 2026-11-13) is not part
+    # of a correction artifact's core: the seabed mean does not depend on it.
+    from blueboat_sss_sim.sonar.raycast import beam as _beam_v
+    from blueboat_sss_sim.sonar.raycast.correction import core_fingerprint as _cfp_v
+    from blueboat_sss_sim.sonar.config import SonarModelConfig as _SMC_v
+    _fz_ok, _fz_det = True, ""
+    for _eng in ("live", "fast"):
+        _, _rc_now = _rcc.load_profile(Path(_rc).parent / f"raycast_harbour_{_eng}_sonar.yaml")
+        _, _rc_old = _rcc.load_profile(Path(_rc).parent / f"raycast_harbour_{_eng}_20261112_sonar.yaml")
+        _fn, _fo = _flat(_rc_now), _flat(_rc_old)
+        _dk = sorted(k for k in set(_fn) | set(_fo) if _fn.get(k, _none) != _fo.get(k, _none))
+        # the frozen copy: the legacy switch on, none of the inputs session 01 added
+        # (sea surface, solid shell wall, face geometry), and still the physical core
+        # its correction artifact was fitted on
+        from blueboat_sss_sim.sonar.raycast import correction as _corr_v
+        _c_old = _corr_v.for_config(_rc_old.correction)
+        _m_old = _rcc.shared_stage_model(_SMC_v(), _rc_old.system_gain_db)
+        try:
+            _c_old.check_core(_rc_old, _m_old, accept_engine=True)
+            _core_ok = True
+        except ValueError:
+            _core_ok = False
+        _fz_ok &= (_rc_old.beam.legacy_phase_sign is True and _rc_now.beam.legacy_phase_sign is False
+                   and _rc_old.paths.surface_rms_m == 0.001 and _rc_old.objects.layer_model == "fluid"
+                   and _rc_old.objects.face_tilt_rms_deg == 0.0 and _rc_old.objects.face_draft_deg == 0.0
+                   and _core_ok)
+        _fz_det += f"{_eng}: differs in {_dk}; "
+    _kq = 2.0 * np.pi * 450000.0 / 1500.0
+    _dq = np.array([[0.31, 6.0, -0.4], [-0.07, 11.0, -2.0]])
+    _ex, _ey = np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
+    _b_new = _beam_v.Aperture(0.244, 0.0037, _kq).pattern(_dq, _ex, _ey, np.cross(_ey, _ex))
+    _b_old = _beam_v.Aperture(0.244, 0.0037, _kq, legacy_phase=True).pattern(_dq, _ex, _ey, np.cross(_ey, _ex))
+    # the phase of one aperture point, straight from the carrier's convention exp(-i k path)
+    _uq = (np.arange(4000) + 0.5) / 4000 * 0.244 - 0.122
+    _rq = np.linalg.norm(_dq[:, None, :] - _uq[None, :, None] * _ex[None, None, :], axis=2)
+    _Rq = np.linalg.norm(_dq, axis=1)
+    _sv = _dq @ np.cross(_ey, _ex) / _Rq
+    _b_ref = ((_Rq[:, None] / _rq) * np.exp(-1j * _kq * (_rq - _Rq[:, None]))).mean(axis=1) \
+        * np.sinc(0.5 * _kq * 0.0037 * _sv / np.pi)
+    _fz_ok &= (float(np.max(np.abs(_b_new - _b_ref))) < 1e-6
+               and float(np.max(np.abs(_b_old - np.conj(_b_ref)))) < 1e-6
+               and float(np.min(np.abs(_b_ref.imag))) > 1e-3)
+    check("ray-cast: the near-field pattern carries exp(-i k dr), the carrier's convention "
+          "(bug fix 2026-11-13); the frozen 2026-11-12 harbour profiles keep that day's inputs "
+          "(legacy phase sign, 1 mm sea surface, fluid shell wall, ideal faces) and their "
+          "correction's core",
+          bool(_fz_ok), _fz_det + f"|b - reference| {float(np.max(np.abs(_b_new - _b_ref))):.1e}")
     # The fast variant's engine paths (2026-11-10, ENGINE_KNOBS): only the
     # fast profile turns them on; the full model and live keep today's
     # renderer, and correction artifacts keep their fingerprint.
@@ -7804,6 +7858,14 @@ def _section_object_physics() -> None:
     #  10.1 m slant ( 7.7 deg): near-edge +0.2 dB, footprint ~-6.5,
     #                           shadow -7.4 dB
     # The pre-2026-09-28 GUI worlds rendered it +16 to +25 dB near-edge.
+    # CORRECTION (review of 2026-11-12, sim-report/simulator_analysis.md
+    # section 8; noted 2026-11-14): those images were georeferenced with the
+    # ping's own heading and are 19 m from the box; the box lay in 1.10 m of
+    # water (transducer 0.88 m over the seabed), not under 1.35 m. The numbers
+    # below stay as this GEOMETRIC renderer's regression targets (legacy
+    # sensor); they are no longer evidence about the box. The ray-cast sensor
+    # is checked against the box's 12 real sightings by the acceptance tests
+    # (B4), not here.
     acq14 = AcquisitionParams(range_length_mm=19711, num_results=1200,
                               gain_index=4, pulse_len_percent=0.00125)
     depth14 = 1.50
@@ -8938,6 +9000,158 @@ def _section_calibration() -> None:
                   - _half18.effective_height) < 1e-3,
           f"rested z {_zpose18(_lying18, -5.0)}, half-buried centre {_zpose18(_half18, -5.0)}")
 
+
+    # ------------------------------------------------------------------
+    print("[19] session 01 (2026-11-14): the ray-cast's verified inputs -- elastic "
+          "shell wall, reflection phase, face geometry, aperture taper, range guard")
+    # The whole-engine verification (V1-V9 of the frozen acceptance criteria) runs
+    # on the GPU from the session's evidence folder (docs/simulator_justification.md
+    # gives the commands): a cold kernel build alone outlasts this gate. Here: the
+    # closed forms and conventions those tests rest on, on the CPU, in seconds.
+    from blueboat_sss_sim.sonar.config import AcquisitionParams as _AP19
+    from blueboat_sss_sim.sonar.config import SonarModelConfig as _SMC19
+    from blueboat_sss_sim.sonar.raycast import beam as _bm19
+    from blueboat_sss_sim.sonar.raycast import config as _rcc19
+    from blueboat_sss_sim.sonar.raycast import layers as _ly19
+    from blueboat_sss_sim.sonar.raycast import object_mesh as _om19
+    from blueboat_sss_sim.sonar.raycast import scene_mesh as _sm19
+    from blueboat_sss_sim.sonar.raycast import seabed_ssa as _ssa19
+    from blueboat_sss_sim.sonar.raycast.renderer import RaycastRenderer as _RR19
+    from blueboat_sss_sim.sonar.raycast.specular import MaterialSurface as _MS19
+    from blueboat_sss_sim.worldgen.materials import (MaterialLibrary as _ML19,
+                                                     WATER_DENSITY_KGM3 as _rw19,
+                                                     WATER_SOUND_SPEED_MPS as _cw19,
+                                                     elastic_constants as _ec19)
+    from blueboat_sss_sim.worldgen.solids import Solid as _Sol19, tessellate as _tess19
+    _f19 = 450_000.0
+    _cfg19 = Path(__file__).resolve().parent.parent / "config"
+    _pp = _ML19().get("pp_shell")
+    _ec = _ec19("pp_shell")
+    # ---- the elastic wall (layers.py): three properties of the exact solution
+    _th19 = np.radians(np.arange(0.0, 86.0, 1.0))
+    _c19 = np.cos(_th19)
+    _wl = _ly19.Wall(_pp.density_kgm3, _pp.sound_speed_mps, _ec[0], 0.002)        # lossless
+    _R19, _T19 = _ly19.plate_coefficients(_c19, _f19, _wl, _rw19, _cw19)
+    _econs = float(np.max(np.abs(np.abs(_R19) ** 2 + np.abs(_T19) ** 2 - 1.0)))
+    _k1_19 = 2.0 * np.pi * _f19 / _cw19
+    _Tfl = _sm19.layer_transmission(np.array([1.0]), np.array([_pp.density_kgm3 / _rw19]),
+                                    np.array([_pp.sound_speed_mps / _cw19]), np.array([0.002]), _k1_19)
+    _Tel0 = _ly19.plate_transmission(np.array([1.0]), _f19, _wl, _rw19, _cw19)
+    _wlossy = _ly19.Wall(_pp.density_kgm3, _pp.sound_speed_mps, _ec[0], 0.002, _ec[1], _ec[2])
+    _tab19 = _ly19.WallTable(_wlossy, _f19, _rw19, _cw19)
+    _cq = np.cos(np.radians(np.array([3.33, 21.47, 44.44, 58.61])))
+    _terr = float(np.max(np.abs(_tab19.transmission(_cq)
+                                - _ly19.plate_transmission(_cq, _f19, _wlossy, _rw19, _cw19))))
+    _c53 = np.array([np.cos(np.radians(53.0))])
+    _el53 = 20 * np.log10(abs(_ly19.plate_transmission(_c53, _f19, _wlossy, _rw19, _cw19)[0]))
+    _fl53 = 20 * np.log10(abs(_sm19.layer_transmission(
+        _c53, np.array([_pp.density_kgm3 / _rw19]), np.array([_pp.sound_speed_mps / _cw19]),
+        np.array([0.002]), _k1_19)[0]))
+    check("ray-cast, elastic shell wall: |R|^2 + |T|^2 = 1 without absorption at 0-85 deg; "
+          "at normal incidence it is the fluid layer (the shear wave decouples); the 0.1 deg "
+          "table follows the solution; past the longitudinal critical angle a 2 mm "
+          "polypropylene wall still passes sound through its shear wave where the fluid "
+          "layer does not",
+          _econs < 1e-9 and abs(_Tel0[0] - _Tfl[0]) < 1e-9 and _terr < 5e-3
+          and _el53 > -4.0 and _fl53 < -10.0,
+          f"energy {_econs:.1e}, normal {abs(_Tel0[0] - _Tfl[0]):.1e}, table {_terr:.1e}, "
+          f"53 deg: elastic {_el53:.1f} dB, fluid {_fl53:.1f} dB")
+    # ---- the phase of the seabed's reflection (specular.MaterialSurface)
+    # Independent of any branch choice: a layer of the sediment 400 wavelengths
+    # thick over water, in the carrier's convention exp(-i k r) (a wave attenuates
+    # along its path: k2 = (omega / c2)(1 - i delta)); the layer formula is even in
+    # the layer's vertical wavenumber. Its limit is the half-space.
+    _sd19 = _ssa19.SEDIMENTS["sand"]
+    _sp19 = np.sin(np.radians(np.array([8.0, 15.0, 25.0, 40.0, 70.0])))
+    _kz1 = _sp19 + 0j
+    _kz2 = np.sqrt(((1.0 - 1j * _sd19.delta_p) / _sd19.nu_p) ** 2 - (1.0 - _sp19 ** 2) + 0j)
+    _t19 = -1j * np.tanh(1j * _kz2 * 400.0 * 2.0 * np.pi)
+    _Z1, _Z2 = 1.0 / _kz1, _sd19.a_rho / _kz2
+    _Zin = _Z2 * (_Z1 + 1j * _Z2 * _t19) / (_Z2 + 1j * _Z1 * _t19)
+    _Vref = (_Zin - _Z1) / (_Zin + _Z1)
+    _V_new = _MS19(["sand"], _f19).reflection(0, _sp19)
+    _V_old = _MS19(["sand"], _f19, legacy_phase=True).reflection(0, _sp19)
+    _, _rc_fz = _rcc19.load_profile(_cfg19 / "raycast_harbour_fast_20261112_sonar.yaml")
+    _, _rc_pr = _rcc19.load_profile(_cfg19 / "raycast_harbour_fast_sonar.yaml")
+    check("ray-cast: the seabed's reflection coefficient enters the coherent sums in the "
+          "carrier's convention (conj of the exp(-i omega t) textbook form; bug fix "
+          "2026-11-14), checked against a thick lossy layer; the frozen 2026-11-12 copies "
+          "keep the old phase",
+          float(np.max(np.abs(_V_new - _Vref))) < 1e-9
+          and float(np.max(np.abs(_V_old - np.conj(_Vref)))) < 1e-9
+          and float(np.max(np.abs(_Vref.imag))) > 0.3
+          and _rc_fz.paths.legacy_reflection_phase is True
+          and _rc_pr.paths.legacy_reflection_phase is False,
+          f"|V - layer limit| {float(np.max(np.abs(_V_new - _Vref))):.1e}, "
+          f"phase at 15 deg grazing {np.degrees(np.angle(_V_new[1])):+.1f} deg")
+    # ---- face geometry (object_mesh.FaceGeometry): a geometry, zero by default
+    _p19 = _tess19(_Sol19("box", 0.72, 0.004, 0.32), 0.01, None)
+    _p19 = _p19.select(_p19.normal[:, 1] < -0.99)
+    _same = _om19.perturb_patches(_p19, _om19.FaceGeometry()) is _p19
+    _fg19 = _om19.FaceGeometry(tilt_rms_deg=0.5, corr_len_m=0.10, seed=77)
+    _pa, _pb = _om19.perturb_patches(_p19, _fg19), _om19.perturb_patches(_p19, _fg19)
+    _rngx = np.random.default_rng(5).uniform(-20.0, 20.0, (20000, 3))
+    _h19, _g19 = _om19.wavy_field(_rngx, 77, 0.10, 0.5)
+    _slope = float(np.degrees(np.sqrt(np.mean(_g19[:, 0] ** 2))))
+    _eps19 = 1e-4
+    _hx, _ = _om19.wavy_field(_rngx[:200] + np.array([_eps19, 0, 0]), 77, 0.10, 0.5)
+    _hm, _ = _om19.wavy_field(_rngx[:200] - np.array([_eps19, 0, 0]), 77, 0.10, 0.5)
+    _gerr = float(np.max(np.abs((_hx - _hm) / (2 * _eps19) - _g19[:200, 0])))
+    _out19 = np.einsum("ij,ij->i", _pa.centre - _p19.centre, _p19.normal)
+    _tilt = float(np.degrees(np.arccos(np.clip(np.einsum("ij,ij->i", _pa.normal, _p19.normal), -1, 1)).max()))
+    _dr19 = _om19.perturb_patches(_p19, _om19.FaceGeometry(draft_deg=1.5), draft=np.ones(len(_p19), bool))
+    _lean = float(np.degrees(np.arcsin(np.clip(-_dr19.normal[:, 2], -1, 1))).mean())
+    check("ray-cast, face geometry: inactive by default (the patches themselves); the "
+          "waviness is a pure function of seed and position, its slope RMS is the stated "
+          "one and its gradient is the field's; patches move outward only; the draft leans "
+          "a side wall by its angle",
+          _same and np.array_equal(_pa.centre, _pb.centre) and np.array_equal(_pa.normal, _pb.normal)
+          and abs(_slope - 0.5) < 0.05 and _gerr < 1e-6 and float(_out19.min()) >= -1e-12
+          and 0.2 < _tilt < 3.0 and abs(abs(_lean) - 1.5) < 1e-6,
+          f"slope RMS {_slope:.3f} deg, gradient error {_gerr:.1e}, largest patch tilt {_tilt:.2f} deg, "
+          f"draft lean {_lean:+.3f} deg")
+    # ---- aperture weighting (beam.taper): the stated width at any pedestal
+    _k19 = 2.0 * np.pi * _f19 / _cw19
+    _L1 = _bm19.aperture_from_width_tapered(0.5, _k19, 1.0)
+    _L8 = _bm19.aperture_from_width_tapered(0.5, _k19, 0.819)
+
+    def _pat19(L, ped, s):
+        x = (np.arange(4001) + 0.5) / 4001 * 2.0 - 1.0
+        w = _bm19.taper(x, ped)
+        return np.abs((w[None, :] * np.exp(1j * 0.5 * _k19 * L * s[:, None] * x[None, :])).sum(axis=1)) / w.sum()
+
+    _s19 = np.sin(np.radians(np.linspace(0.0, 3.0, 6001)))
+    _b1, _b8 = _pat19(_L1, 1.0, _s19), _pat19(_L8, 0.819, _s19)
+
+    def _w3(b):                           # two-way -3 dB full width [deg]
+        return 2.0 * float(np.degrees(np.arcsin(_s19[np.argmax(b ** 4 < 0.5)])))
+
+    def _sll(b):                          # first side lobe, one-way [dB]
+        i0 = int(np.argmax(np.diff(b) > 0))                    # first null
+        return float(20 * np.log10(b[i0:].max()))
+    check("ray-cast, aperture weighting: pedestal 1 is the uniform aperture; the cosine on a "
+          "pedestal keeps the vendor's 0.5 deg two-way -3 dB width, lowers the first side lobe "
+          "and, at the narrow bracket end's pedestal 0.819, fits the transducer window read "
+          "off the vendor drawing (250 +- 3 mm)",
+          abs(_L1 - _bm19.aperture_from_width(0.5, _k19, True)) < 1e-6
+          and np.allclose(_bm19.taper(np.linspace(-1, 1, 9), 1.0), 1.0)
+          and abs(_w3(_b1) - 0.5) < 0.005 and abs(_w3(_b8) - 0.5) < 0.005
+          and abs(_sll(_b1) + 13.26) < 0.05 and _sll(_b8) < _sll(_b1) - 1.0
+          and 0.247 < _L8 < 0.253,
+          f"L {_L1 * 1e3:.1f} / {_L8 * 1e3:.1f} mm, width {_w3(_b1):.3f} / {_w3(_b8):.3f} deg, "
+          f"side lobe {_sll(_b1):.2f} / {_sll(_b8):.2f} dB")
+    # ---- the range guard of the harbour profiles
+    _m19 = _rcc19.shared_stage_model(_SMC19(), _rc_pr.system_gain_db)
+    try:
+        _RR19(None, _AP19(range_length_mm=40000), _m19, _rc_pr)
+        _guard = False
+    except ValueError as _e19:
+        _guard = "limited to 30 m" in str(_e19)
+    check("ray-cast: a harbour profile refuses an acquisition beyond its 30 m "
+          "(raycast.sampling.max_range_m) with a message naming both; the frozen copies "
+          "and the generic profiles carry no limit",
+          _guard and _rc_pr.sampling.max_range_m == 30.0 and _rc_fz.sampling.max_range_m == 0.0
+          and _rcc19.RaycastConfig().sampling.max_range_m == 0.0, f"guard raised: {_guard}")
 
 if __name__ == "__main__":
     main()

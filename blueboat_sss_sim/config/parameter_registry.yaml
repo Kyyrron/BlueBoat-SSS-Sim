@@ -671,6 +671,7 @@ parameters:
     identified_by: "judgement: an 8 mm tread plus undertread; |R| stays 0.92-0.94 over the band because rubber is nearly matched to water"
     metric: "raycast_test [O10] (tread band over the seabed)"
     uncertainty: "the echo is an upper bound by the rubber's two-way absorption, not read at a source"
+    bracket: "0.008 .. 0.016 m, the band the reflection is averaged over (grooves 6-8 mm plus 1.0-2.5 mm of rubber under them: US patent 5,343,917)"
     confounders: []
     experiment: "a car tyre on the seabed in the heading-response experiment"
     owner: worldgen/materials.py (_ACOUSTIC)
@@ -1389,6 +1390,7 @@ parameters:
     identified_by: "pool FIT (our driver): predicts -2.16 vs measured -1.7..-2.4 dB in 2-8 m; field VAL (SonarView files): measured step -0.01 dB median vs +0.81 predicted -> refuted there"
     metric: within-file level step at a fixed pulse
     uncertainty: "recorder-dependent? filter_duration_percent is not on the wire"
+    bracket: "off (shipped) .. on: a level step of -2.2 dB between a 10 m and a 20 m window; geometric renderer only"
     confounders: [model.pulse_level_exponent, model.calibration_db_offset]
     experiment: one session, 10 m and 20 m, our driver AND SonarView, one bottom
     owner: sonar/acoustics.py (receive_window_factor)
@@ -1698,10 +1700,10 @@ parameters:
     default: 0.02
     bounds: [1.0e-05, 0.05]
     tunable: false
-    meaning: "Water-surface RMS height for the Eckart fraction of surface bounces; judged open-water default (calm pool: a site record, 3e-4)"
-    identified_by: "the geometric profile's judged surface_rms_height_m; pass-4 pool overlay 3e-4"
+    meaning: "Water-surface RMS height for the Eckart fraction of surface bounces; judged open-water default (calm pool: a site record, 3e-4). The harbour profiles use this default since 2026-11-14 (their core carried 1 mm, a mirror: fringes along range)"
+    identified_by: "the geometric profile's judged surface_rms_height_m; pass-4 pool overlay 3e-4; a chop of 0.07 m significant height is 17 mm RMS (Hs = 4 sigma)"
     metric: "surface multipath / Lloyd fringes"
-    uncertainty: "1e-5 .. 0.05"
+    uncertainty: "1e-5 .. 0.05; between 5 mm and 5 cm the sonar is identical inside the thesis domain (0.00 dB at 5-10 m of altitude within 20 m); 1 mm adds up to +0.9 dB at 15-20 m at 5 m of altitude"
     confounders: []
     experiment: "a wave staff / still-water photo; later the sea state"
     owner: sonar/raycast/config.py
@@ -1842,6 +1844,7 @@ parameters:
     identified_by: "gates amendment 6a (pre-registered 2026-11-06); sensitivity +-2 / +-6 dB reported"
     metric: "JR07 13.18 (exact in the narrow-lobe limit: -0.02 dB at 30 kHz, Fig. 13.2 sand)"
     uncertainty: "judgement: 13.18 is approximate for broad 450 kHz lobes (SAX99 -2.0 dB, Panama City 93 -4.2 dB)"
+    i6: "n/a"
     confounders: []
     experiment: "none (a rule)"
     owner: sonar/raycast
@@ -1856,6 +1859,7 @@ parameters:
     identified_by: "gates amendment 6a (pre-registered 2026-11-06)"
     metric: "JR07 13.18"
     uncertainty: "judgement"
+    i6: "n/a"
     confounders: []
     experiment: "none (a rule)"
     owner: sonar/raycast
@@ -1898,6 +1902,7 @@ parameters:
     identified_by: "judgement (2026-11-10, harbour patch): no strata below 4.77 m at the harbour acquisitions"
     metric: "none"
     uncertainty: "n/a"
+    bracket: "0 (a cliff) .. 4.5 m; acts only below 4.5 m of altitude, outside the thesis domain: no effect inside it"
     confounders: []
     experiment: "harbour strata at 3.5-4.5 m altitude, if recorded"
     owner: sonar/raycast
@@ -2123,3 +2128,209 @@ parameters:
     experiment: "the real heading-response experiment on a fouled and a clean object"
     owner: sonar/raycast
     source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.fouling"}
+  # ---------------------------------------------- completion round, session 01 (2026-11-14)
+  - name: raycast.beam.taper_pedestal
+    unit: "1"
+    class: device
+    status: judged
+    default: 1.0
+    bounds: [0.819, 1.0]
+    tunable: false
+    meaning: "Amplitude weighting of the along-track aperture, a cosine on a pedestal p; 1 = uniform. The length is re-derived so the vendor's 0.5 deg two-way -3 dB width holds"
+    identified_by: "vendor: 0.5 deg two-way; the transducer window on the vendor drawing is 250 +- 3 mm, so only p >= 0.819 fits (L 250.6 mm, first side lobe -14.5 dB one-way against -13.3 dB uniform). The real weighting is not published and could not be measured on the corpus (session 01, beam/beam_measurement.md)"
+    metric: "flash half-width of a face (5 % at most over the range); seabed mean (0.10 dB at most)"
+    uncertainty: "0.819 (the narrow end of the flash bracket) .. 1.0 (production)"
+    confounders: [raycast.objects.face_tilt_rms_deg]
+    experiment: "a corner reflector at mid-water crossed on a straight line, attitude on the sonar's clock"
+    owner: sonar/raycast/beam.py (taper)
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:BeamConfig.taper_pedestal"}
+  - name: raycast.objects.face_tilt_rms_deg
+    unit: deg
+    class: environment
+    status: judged
+    default: 0.0
+    bounds: [0.0, 2.0]
+    tunable: false
+    meaning: "RMS slope of the seeded waviness of every mirror face of a smooth solid (object_mesh.FaceGeometry); 0 = ideal primitives. Production (harbour profiles): 0.5"
+    identified_by: "no measurement of a real container's face was found; 0.5 deg over 0.10 m is a few tenths of a millimetre of sink and warp over a decimetre. Verified as implemented against the reference integral on the same displaced surface (within 0.8 dB)"
+    metric: "flash half-width at -10 dB: ideal +-0.85 deg, 0.5 deg +-1.9 deg, 2 deg no mirror (0.72 m face at 8 m)"
+    uncertainty: "0 (a machined plate; narrow end) .. 2 deg over 0.05 m (a dented or ribbed face; wide end)"
+    confounders: [raycast.objects.face_corr_len_m, raycast.beam.taper_pedestal]
+    experiment: "the real heading-response experiment; a straightedge and feeler gauge on the real containers"
+    owner: sonar/raycast/object_mesh.py (wavy_field, perturb_patches)
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.face_tilt_rms_deg"}
+  - name: raycast.objects.face_corr_len_m
+    unit: m
+    class: environment
+    status: judged
+    default: 0.1
+    bounds: [0.05, 0.1]
+    tunable: false
+    meaning: "Correlation length of the face waviness"
+    identified_by: "judgement, with the slope: 0.10 m (production), 0.05 m at the wide end"
+    metric: "as raycast.objects.face_tilt_rms_deg"
+    uncertainty: "0.05 .. 0.10 m"
+    confounders: [raycast.objects.face_tilt_rms_deg]
+    experiment: "as raycast.objects.face_tilt_rms_deg"
+    owner: sonar/raycast/object_mesh.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.face_corr_len_m"}
+  - name: raycast.objects.face_draft_deg
+    unit: deg
+    class: environment
+    status: literature
+    default: 0.0
+    bounds: [0.0, 5.0]
+    tunable: false
+    meaning: "Draft angle of the side walls of moulded classes (pp_shell, plastic), about their base; 0 = vertical walls. Production (harbour profiles): 1.5"
+    identified_by: "injection-moulding design guides for polypropylene: draft as low as one degree, 1-2 deg common, up to 5 deg on textured walls (Fictiv; Protolabs; read 2026-11-13)"
+    metric: "the aspect and elevation at which a side wall mirrors"
+    uncertainty: "0 .. 5 deg"
+    confounders: [raycast.objects.face_tilt_rms_deg]
+    experiment: "a protractor on the real containers"
+    owner: sonar/raycast/object_mesh.py (perturb_patches)
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.face_draft_deg"}
+  - name: raycast.objects.layer_model
+    unit: "1"
+    class: model_structure
+    status: structural
+    default: fluid
+    choices: [fluid, elastic]
+    tunable: false
+    meaning: "The wall of a flooded shell: a fluid layer (no shear wave; before 2026-11-14) or the exact elastic plate in water (sonar/raycast/layers.py). Production (harbour profiles): elastic; the fluid wall is the opaque-shell bracket end"
+    identified_by: "closed forms: normal incidence, energy conservation, an independent propagator solution; rendered transmission and reflection 0.000 dB against the solution (V5)"
+    metric: "shell shadow: fluid -12.9 dB, elastic -0.1 dB (2 mm polypropylene box, 6 m of water, 8 m)"
+    uncertainty: "the model is exact for a plane plate; the constants carry the uncertainty"
+    confounders: []
+    experiment: "none"
+    owner: sonar/raycast/layers.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:ObjectsConfig.layer_model"}
+  - name: raycast.sampling.max_range_m
+    unit: m
+    class: model_structure
+    status: structural
+    default: 0.0
+    tunable: false
+    meaning: "A profile's range limit: an acquisition beyond it is refused at start-up; 0 = none. The harbour profiles carry 30"
+    identified_by: "GPU memory (3.6 GB at 30 m), the measured near range and the verification all stop at 30 m"
+    metric: "none"
+    uncertainty: "n/a"
+    confounders: []
+    experiment: "none"
+    owner: sonar/raycast/renderer.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:SamplingConfig.max_range_m"}
+  - name: raycast.beam.legacy_phase_sign
+    unit: bool
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "True restores the near-field pattern's phase as coded before 2026-11-13 (the conjugate of the carrier's convention): the frozen 2026-11-12 profile copies only"
+    identified_by: "bug fix, proved against an independent Kirchhoff integral"
+    metric: "plate at its normal: -4.9 dB with the old sign"
+    uncertainty: "n/a"
+    confounders: []
+    experiment: "none"
+    owner: sonar/raycast/beam.py
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:BeamConfig.legacy_phase_sign"}
+  - name: raycast.paths.legacy_reflection_phase
+    unit: bool
+    class: model_structure
+    status: structural
+    default: false
+    tunable: false
+    meaning: "True restores the seabed and wall reflection coefficient in the exp(-i omega t) form used before 2026-11-14 (conjugate phase, same level): the frozen 2026-11-12 profile copies only"
+    identified_by: "bug fix, proved against a thick lossy layer"
+    metric: "phase of a floor bounce: 142 deg at 5 deg of grazing on sand"
+    uncertainty: "n/a"
+    confounders: []
+    experiment: "none"
+    owner: sonar/raycast/specular.py (MaterialSurface)
+    source: {python: "blueboat_sss_sim.sonar.raycast.config:PathsConfig.legacy_reflection_phase"}
+  - name: material.pp_shell.shear_speed_mps
+    unit: m/s
+    class: environment
+    status: literature
+    default: 1273.0
+    bounds: [1000.0, 1273.0]
+    tunable: false
+    meaning: "Shear speed of a polypropylene shell wall (elastic layer model)"
+    identified_by: "Frawley et al. 2025, doi:10.1007/s40870-025-00468-8, Table 1 (pulse-echo: 0.916 g/cm3, 2583 / 1273 m/s). Lower end: the static Poisson's ratio 0.42 of a resin maker's property sheet"
+    metric: "shell shadow at harbour grazing: -0.1 dB at 1273 m/s, -11.2 dB at 1000 m/s with the upper absorptions"
+    uncertainty: "1000 .. 1273 m/s; one commercial sheet, a moulded grade may differ"
+    confounders: [material.pp_shell.absorption_long_db_m]
+    experiment: "ultrasonic time of flight on a coupon cut from a container"
+    owner: worldgen/materials.py (_ELASTIC)
+    source: {python: "blueboat_sss_sim.worldgen.materials:_ELASTIC['pp_shell'][0]"}
+  - name: material.pp_shell.absorption_long_db_m
+    unit: dB/m
+    class: environment
+    status: judged
+    default: 46.0
+    bounds: [46.0, 164.0]
+    tunable: false
+    meaning: "Absorption of the longitudinal wave in a polypropylene wall at 450 kHz"
+    identified_by: "Selfridge 1985, doi:10.1109/T-SU.1985.31608, Table I: 5.1 dB/cm (Profax 6432) and 18.2 dB/cm (white sheet) at 5 MHz, scaled in proportion to frequency (an assumption)"
+    metric: "shell shadow"
+    uncertainty: "46 .. 164 dB/m"
+    confounders: [material.pp_shell.shear_speed_mps]
+    experiment: "through-transmission on a coupon at 450 kHz"
+    owner: worldgen/materials.py (_ELASTIC)
+    source: {python: "blueboat_sss_sim.worldgen.materials:_ELASTIC['pp_shell'][1]"}
+  - name: material.pp_shell.absorption_shear_db_m
+    unit: dB/m
+    class: environment
+    status: judged
+    default: 0.0
+    bounds: [0.0, 164.0]
+    tunable: false
+    meaning: "Absorption of the shear wave in a polypropylene wall at 450 kHz"
+    identified_by: "no value found at a source; 0, with the longitudinal wave's upper value as the other end"
+    metric: "shell shadow"
+    uncertainty: "0 .. 164 dB/m"
+    confounders: [material.pp_shell.shear_speed_mps]
+    experiment: "as material.pp_shell.absorption_long_db_m"
+    owner: worldgen/materials.py (_ELASTIC)
+    source: {python: "blueboat_sss_sim.worldgen.materials:_ELASTIC['pp_shell'][2]"}
+  - name: material.plastic.shear_speed_mps
+    unit: m/s
+    class: environment
+    status: literature
+    default: 1016.0
+    tunable: false
+    meaning: "Shear speed of a high-density polyethylene shell wall (elastic layer model); no class of the catalogue is an HDPE shell yet"
+    identified_by: "Frawley et al. 2025, doi:10.1007/s40870-025-00468-8, Table 1 (0.941 g/cm3, 2440 / 1016 m/s)"
+    metric: "shell shadow"
+    uncertainty: "one commercial sheet"
+    confounders: []
+    experiment: "as material.pp_shell.shear_speed_mps"
+    owner: worldgen/materials.py (_ELASTIC)
+    source: {python: "blueboat_sss_sim.worldgen.materials:_ELASTIC['plastic'][0]"}
+  - name: material.plastic.absorption_long_db_m
+    unit: dB/m
+    class: environment
+    status: judged
+    default: 22.0
+    bounds: [0.0, 164.0]
+    tunable: false
+    meaning: "Absorption of the longitudinal wave in a polyethylene wall at 450 kHz"
+    identified_by: "Selfridge 1985 Table I lists low-density polyethylene only: 2.4 dB/cm at 5 MHz, scaled in proportion to frequency (an assumption)"
+    metric: "shell shadow"
+    uncertainty: "0 (lossless) .. 164 dB/m (the lossiest polyolefin sheet of the same table, scaled)"
+    confounders: []
+    experiment: "as material.pp_shell.absorption_long_db_m"
+    owner: worldgen/materials.py (_ELASTIC)
+    source: {python: "blueboat_sss_sim.worldgen.materials:_ELASTIC['plastic'][1]"}
+  - name: material.metal.shear_speed_mps
+    unit: m/s
+    class: environment
+    status: literature
+    default: 3200.0
+    tunable: false
+    meaning: "Shear speed of mild steel, for a flooded steel shell (elastic layer model); no class of the catalogue is a steel shell yet"
+    identified_by: "Selfridge 1985, doi:10.1109/T-SU.1985.31608, Table I, Steel, mild: 5.9 and 3.2 mm/us, 7.80 g/cm3"
+    metric: "shell shadow"
+    uncertainty: "a handbook value"
+    confounders: []
+    experiment: "none"
+    owner: worldgen/materials.py (_ELASTIC)
+    source: {python: "blueboat_sss_sim.worldgen.materials:_ELASTIC['metal'][0]"}

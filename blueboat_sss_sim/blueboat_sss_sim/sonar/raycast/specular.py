@@ -121,7 +121,17 @@ class MaterialSurface:
     and the coherent-sum RMS height rule."""
 
     def __init__(self, material_names, frequency_hz: float,
-                 sediments: dict | None = None, lib=None) -> None:
+                 sediments: dict | None = None, lib=None,
+                 legacy_phase: bool = False) -> None:
+        #: ``seabed_ssa.reflection`` is J&R's V, written for exp(-i omega t).
+        #: This renderer's carrier is exp(-i omega tau) (a wave along +r is
+        #: exp(-i k r)): the coherent sums need the complex CONJUGATE (the
+        #: transmitted wave must decay into the bottom in the carrier's own
+        #: convention). Until 2026-11-14 V was used as printed: every level
+        #: right, the phase of a floor / wall bounce mirrored (up to 140 deg
+        #: under the critical angle). ``legacy_phase`` keeps that for the
+        #: dated profile copies only (``paths.legacy_reflection_phase``).
+        self.legacy_phase = bool(legacy_phase)
         from ...worldgen.materials import (MaterialLibrary, WATER_DENSITY_KGM3,
                                            WATER_SOUND_SPEED_MPS,
                                            surface_roughness_m)
@@ -162,11 +172,11 @@ class MaterialSurface:
 
     def reflection(self, mat: int, sin_th: np.ndarray) -> np.ndarray:
         p = self.sediment[mat]
-        if p is not None:
-            return _ssa.reflection(p, sin_th)
-        a_rho, nu = self.half_space[mat]
-        q = _ssa.SedimentParams("half", a_rho, nu, 0.0, 3.0, 1e-6, 0.0)
-        return _ssa.reflection(q, sin_th)
+        if p is None:
+            a_rho, nu = self.half_space[mat]
+            p = _ssa.SedimentParams("half", a_rho, nu, 0.0, 3.0, 1e-6, 0.0)
+        V = _ssa.reflection(p, sin_th)
+        return V if self.legacy_phase else np.conj(V)
 
     def rms_height(self, mat: int, R_eff: np.ndarray, lam: float,
                    dx: float) -> np.ndarray:
@@ -182,7 +192,8 @@ class SheetSpecular:
     def __init__(self, mesh, scene, k: float, frequency_hz: float,
                  n1: float, n2: float, patch_phase_rad: float,
                  patch_min_m: float, patch_max_m: float,
-                 sediments: dict | None = None, lib=None) -> None:
+                 sediments: dict | None = None, lib=None,
+                 legacy_phase: bool = False) -> None:
         g = scene.grid
         self.g = g
         self.mesh = mesh
@@ -205,7 +216,7 @@ class SheetSpecular:
         tn = mesh.normals()
         self.tri_normal = np.where(tn[:, 2:3] < 0, -tn, tn)
         self.surf = MaterialSurface(mesh.material_names, frequency_hz,
-                                    sediments, lib)
+                                    sediments, lib, legacy_phase=legacy_phase)
         self.out_mat = (int(mesh.material[mesh.kind == KIND_APRON][0])
                         if (mesh.kind == KIND_APRON).any() else 0)
 

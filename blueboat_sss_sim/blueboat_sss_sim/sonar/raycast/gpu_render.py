@@ -890,6 +890,7 @@ class Beam:
     k: wp.float64
     vfloor: wp.float64
     near: int
+    sg: wp.float32                         # sign of the near-field phase: -1; +1 = legacy_phase
     gl_n: wp.array(dtype=wp.int32)
     gl_off: wp.array(dtype=wp.int32)
     gl_u: wp.array(dtype=wp.float32)       # 0.5 L x (node positions, m)
@@ -947,7 +948,7 @@ def pattern(B: Beam, d64: wp.vec3d, e_a64: wp.vec3d, e_n64: wp.vec3d, e_v64: wp.
             re += a * wp.cos(k * dr)
             im += a * wp.sin(k * dr)
         re = 0.5 * re
-        im = 0.5 * im
+        im = B.sg * 0.5 * im                # exp(-i k dr): the carrier's convention (beam.py)
     return wp.vec2d(wp.float64(re * vert), wp.float64(im * vert))
 
 
@@ -1047,6 +1048,13 @@ class Layers:
     d: wp.array(dtype=wp.float64)
     k1: wp.float64
     normal: wp.array(dtype=wp.vec3d)       # mesh.normals() (unflipped)
+    # objects.layer_model elastic (layers.WallTable): per triangle the index of
+    # its solid-wall table (-1 = the fluid formula), the tables' T every
+    # 1 / inv_step degrees of incidence, flattened [table, angle]
+    tab_of: wp.array(dtype=wp.int32)
+    tab: wp.array(dtype=wp.vec2d)
+    n_th: int
+    inv_step: wp.float64
 
 
 @wp.func
@@ -1107,6 +1115,29 @@ def layer_T(cos1: wp.float64, rho: wp.float64, cr: wp.float64, d: wp.float64,
 
 
 @wp.func
+def table_T(Ly: Layers, ti: int, cos1: wp.float64) -> wp.vec2d:
+    """``layers.WallTable.transmission``: linear in the incidence angle."""
+    th = wp.acos(wp.clamp(cos1, wp.float64(0.0), wp.float64(1.0))) * wp.float64(57.29577951308232)
+    x = wp.clamp(th * Ly.inv_step, wp.float64(0.0), wp.float64(Ly.n_th) - wp.float64(1.000001))
+    i = int(x)
+    f = x - wp.float64(i)
+    a = Ly.tab[ti * Ly.n_th + i]
+    b = Ly.tab[ti * Ly.n_th + i + 1]
+    g = wp.float64(1.0) - f
+    return wp.vec2d(a[0] * g + b[0] * f, a[1] * g + b[1] * f)
+
+
+@wp.func
+def table_R(rtab: wp.array(dtype=wp.float64), inv_step: wp.float64, cosh: wp.float64) -> wp.float64:
+    """``layers.WallTable.reflection``: |R| at the incidence cosine ``cosh``."""
+    th = wp.acos(wp.clamp(cosh, wp.float64(0.0), wp.float64(1.0))) * wp.float64(57.29577951308232)
+    x = wp.clamp(th * inv_step, wp.float64(0.0), wp.float64(rtab.shape[0]) - wp.float64(1.000001))
+    i = int(x)
+    f = x - wp.float64(i)
+    return rtab[i] * (wp.float64(1.0) - f) + rtab[i + 1] * f
+
+
+@wp.func
 def seg_transmit(o: Oracle, Ly: Layers, a: wp.vec3d, b: wp.vec3d, eps: wp.float64) -> wp.vec2d:
     """``SceneOracle.transmit``: 0 across the sea surface or an opaque
     triangle, else the product of the thin layers' factors."""
@@ -1126,7 +1157,11 @@ def seg_transmit(o: Oracle, Ly: Layers, a: wp.vec3d, b: wp.vec3d, eps: wp.float6
             T = wp.vec2d(wp.float64(0.0), wp.float64(0.0))
             break
         cos1 = wp.abs(wp.dot(Ly.normal[tri], u))
-        T = cmul(T, layer_T(cos1, Ly.rho[tri], Ly.cr[tri], Ly.d[tri], Ly.k1))
+        ti = int(Ly.tab_of[tri])
+        if ti >= 0:                         # the solid wall, tabulated
+            T = cmul(T, table_T(Ly, ti, cos1))
+        else:
+            T = cmul(T, layer_T(cos1, Ly.rho[tri], Ly.cr[tri], Ly.d[tri], Ly.k1))
         p0 = p0 + (h[0] + wp.float64(10.0) * eps) * u
     return T
 
@@ -1216,6 +1251,7 @@ class SpecSheet:
     s_w2: wp.array(dtype=wp.float64)
     s_g2: wp.array(dtype=wp.float64)
     s_rms: wp.array(dtype=wp.float64)
+    vsg: wp.float64     # sign on Im V: -1 = conj(V), the carrier's convention; +1 = legacy (MaterialSurface)
 
 
 @wp.func
@@ -1298,7 +1334,7 @@ def floor_factor(s: SpecSheet, k: wp.float64, mat: int, sin_psi: wp.float64,
         sig = wp.sqrt(6.2831853 * wp.float32(s.s_w2[mat]) * wp.pow(kl, 2.0 - g2) / (g2 - 2.0))
     g = 2.0 * wp.float32(k) * sig * sp
     e = wp.exp(-0.5 * wp.min(g * g, 1400.0))
-    return wp.vec2d(wp.float64(V[0] * e), wp.float64(V[1] * e))
+    return wp.vec2d(wp.float64(V[0] * e), s.vsg * wp.float64(V[1] * e))
 
 
 @wp.struct
@@ -1319,6 +1355,7 @@ class Faces:
     rconst: wp.array(dtype=wp.float64)
     rms: wp.array(dtype=wp.float64)
     wall: wp.array(dtype=wp.int32)          # wall index (own-face rule), -1 for objects
+    vsg: wp.float64                         # sign on Im V (SpecSheet.vsg)
 
 
 @wp.func
@@ -1357,7 +1394,7 @@ def face_factor(F: Faces, f: int, k: wp.float64, sin_psi: wp.float64) -> wp.vec2
     ap = F.ap[f]
     V = reflection(wp.float32(F.arho[f]), wp.vec2f(wp.float32(ap[0]), wp.float32(ap[1])),
                    wp.float32(sin_psi))
-    return wp.vec2d(wp.float64(V[0]) * e, wp.float64(V[1]) * e)
+    return wp.vec2d(wp.float64(V[0]) * e, F.vsg * wp.float64(V[1]) * e)
 
 
 @wp.struct
@@ -2645,6 +2682,7 @@ def _fc_amp_k(Xc: wp.array(dtype=wp.vec3d), Nn: wp.array(dtype=wp.vec3d),
     sin_th = wp.clamp(-wp.dot(n, inc), wp.float64(0.0), wp.float64(1.0))
     mat = Mt[i]
     Vr = reflection(S.s_arho[mat], S.s_ap[mat], sin_th)
+    Vr = wp.vec2d(Vr[0], S.vsg * Vr[1])
     Re = wp.float64(2.0) * ra * rb / wp.max(ra + rb, wp.float64(1e-300))
     g = W.k * wp.abs(nd) * spec_rms(S, mat, Re)
     sq = wp.exp(wp.float64(-0.5) * wp.min(g * g, wp.float64(1400.0)))
@@ -2872,7 +2910,8 @@ def _make_facet_pairs_k(maxc: int):
                        e_v: wp.vec3d, B: Beam, o: Oracle, Ly: Layers, S: SpecSheet, F: Faces,
                        kinds: wp.array(dtype=wp.int32), faces: wp.array(dtype=wp.int32),
                        koff: wp.array(dtype=wp.int32), is_out: wp.array(dtype=wp.int32), nk: int,
-                       refl: wp.float64, rms: wp.float64, k: wp.float64, rms_s: wp.float64,
+                       refl: wp.float64, rms: wp.float64, rtab: wp.array(dtype=wp.float64),
+                       r_inv_step: wp.float64, r_on: int, k: wp.float64, rms_s: wp.float64,
                        alpha_np: wp.float64, c: wp.float64, floor_pw: wp.float64,
                        offset: wp.float64, eps: wp.float64, lam: wp.float64, max_iter: int, x: Rx,
                        ndep_o: wp.array(dtype=wp.int32)):
@@ -2951,7 +2990,12 @@ def _make_facet_pairs_k(maxc: int):
                     continue
                 ai = wp.vec3d(Arr[i, 0], Arr[i, 1], Arr[i, 2])
                 aj = wp.vec3d(Arr[j, 0], Arr[j, 1], Arr[j, 2])
-                po = po_pair_amp(nv, pu[t], pv[t], pa[t], pb[t], ai, -aj, k, refl, rms)
+                rf = refl
+                if r_on == 1:               # a shell wall: |R| at the half-angle of the pair
+                    dv = -aj - ai
+                    rf = refl * table_R(rtab, r_inv_step, wp.dot(nv, dv)
+                                        / wp.max(wp.length(dv), wp.float64(1.0e-12)))
+                po = po_pair_amp(nv, pu[t], pv[t], pa[t], pb[t], ai, -aj, k, rf, rms)
                 Lt = Lc[i] + Lc[j]
                 amp = cmul(cmul(cmul(two, wp.vec2d(Fre[i], Fim[i])), wp.vec2d(Fre[j], Fim[j])), po)
                 sc = wp.exp(-alpha_np * Lt) / (Lc[i] * Lc[j])
@@ -3531,6 +3575,16 @@ def _diff_factor_k(idx: wp.array(dtype=wp.int32), pos: wp.array(dtype=wp.vec3d),
 
 # ==================================================================== facets
 @wp.kernel
+def _seg_transmit_probe_k(o: Oracle, Ly: Layers, a: wp.array(dtype=wp.vec3d),
+                          b: wp.array(dtype=wp.vec3d), eps: wp.float64,
+                          out: wp.array(dtype=wp.vec2d)):
+    """``seg_transmit`` per segment (tests only: the wall tables as the
+    kernels read them, V5)."""
+    i = wp.tid()
+    out[i] = seg_transmit(o, Ly, a[i], b[i], eps)
+
+
+@wp.kernel
 def _seg_blocked_probe_k(o: Oracle, a: wp.array(dtype=wp.vec3d), b: wp.array(dtype=wp.vec3d),
                          eps: wp.float64, out: wp.array(dtype=wp.int32)):
     """``seg_blocked`` per segment (tests only: the fp32 / fp64 parity of
@@ -3831,9 +3885,14 @@ class GpuMultipath:
                  640, 768, 896, 1024, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096]
         us, ws, offs = [], [], []
         o = 0
+        ped = float(getattr(ap, "pedestal", 1.0))
         for n in sizes:
             x, w = np.polynomial.legendre.leggauss(n)
             us.append(0.5 * ap.length_m * x)
+            if ped != 1.0:              # the weighted aperture (beam.taper), sum of weights 2
+                from .beam import taper as _taper
+                w = w * _taper(x, ped)
+                w = w * (2.0 / w.sum())
             ws.append(w)
             offs.append(o)
             o += n
@@ -3841,6 +3900,7 @@ class GpuMultipath:
         B.L, B.H, B.k = wp.float64(ap.length_m), wp.float64(ap.height_m), wp.float64(ap.k)
         B.vfloor = wp.float64(ap.vertical_floor)
         B.near = 1 if rr._rc.beam.near_field else 0
+        B.sg = wp.float32(1.0 if getattr(ap, "legacy_phase", False) else -1.0)
         B.gl_n = wp.array(np.array(sizes, np.int32), dtype=wp.int32, device=dev)
         B.gl_off = wp.array(np.array(offs, np.int32), dtype=wp.int32, device=dev)
         B.gl_u = wp.array(np.concatenate(us).astype(np.float32), dtype=wp.float32, device=dev)
@@ -3922,7 +3982,34 @@ class GpuMultipath:
         Ly.k1 = wp.float64(0.0 if lay is None else lay["k1"])
         Ly.normal = wp.array(np.ascontiguousarray(rr.mesh.normals(), np.float64), dtype=wp.vec3d,
                              device=dev)
+        tabs = None if lay is None else lay.get("tables")
+        if tabs:
+            n_th = int(tabs[0].T.size)
+            if any(int(t.T.size) != n_th or t.step_deg != tabs[0].step_deg for t in tabs):
+                raise ValueError("wall tables of different angular steps")
+            flat = np.concatenate([np.column_stack([t.T.real, t.T.imag]) for t in tabs])
+            Ly.tab_of = wp.array(np.ascontiguousarray(lay["tab_of"], np.int32), dtype=wp.int32, device=dev)
+            Ly.tab = wp.array(np.ascontiguousarray(flat, np.float64), dtype=wp.vec2d, device=dev)
+            Ly.n_th = n_th
+            Ly.inv_step = wp.float64(1.0 / float(tabs[0].step_deg))
+        else:
+            Ly.tab_of = wp.array(np.full(nt, -1, np.int32), dtype=wp.int32, device=dev)
+            Ly.tab = wp.array(np.zeros((2, 2), np.float64), dtype=wp.vec2d, device=dev)
+            Ly.n_th = 2
+            Ly.inv_step = wp.float64(1.0)
         return Ly
+
+    def probe_transmit(self, a: np.ndarray, b: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+        """``seg_transmit`` of the segments a -> b on the device, complex
+        (tests only, V5)."""
+        dev = self.dev
+        n = int(np.atleast_2d(a).shape[0])
+        out = wp.zeros(n, dtype=wp.vec2d, device=dev)
+        v3 = lambda q: wp.array(np.ascontiguousarray(np.atleast_2d(q), np.float64), dtype=wp.vec3d, device=dev)  # noqa: E731
+        wp.launch(_seg_transmit_probe_k, n, [self.oracle, self.layers, v3(a), v3(b), wp.float64(eps), out],
+                  device=dev)
+        o = out.numpy()
+        return o[:, 0] + 1j * o[:, 1]
 
     def _spec(self) -> SpecSheet:
         sp, dev, m = self.mp.sheet, self.dev, self.rr.mesh
@@ -3958,6 +4045,7 @@ class GpuMultipath:
         S.s_w2 = wp.array(np.array(w2, np.float64), dtype=wp.float64, device=dev)
         S.s_g2 = wp.array(np.array(g2, np.float64), dtype=wp.float64, device=dev)
         S.s_rms = wp.array(np.array(rms, np.float64), dtype=wp.float64, device=dev)
+        S.vsg = wp.float64(1.0 if getattr(surf, "legacy_phase", False) else -1.0)
         return S
 
     def _faces(self, faces: list) -> Faces:
@@ -4009,6 +4097,7 @@ class GpuMultipath:
         F.rconst = wp.array(rconst, dtype=wp.float64, device=dev)
         F.rms = wp.array(rms, dtype=wp.float64, device=dev)
         F.wall = wp.array(wall, dtype=wp.int32, device=dev)
+        F.vsg = wp.float64(1.0 if getattr(surf, "legacy_phase", False) else -1.0)
         self._face_index = {id(f): i for i, f in enumerate(faces)}
         return F
 
@@ -4196,6 +4285,73 @@ class GpuMultipath:
                 self._patch_cache[i] = g
         return g
 
+    # ---- the other objects' faces as bounce mirrors: which to test at all
+    # (2026-11-14, completion round session 01: throughput with many objects).
+    # With 30 objects in reach the selection tested ~11 400 single-face
+    # sequences per ping-side, one device launch and read-back each (3 s), and
+    # kept none. Nothing here changes what is rendered: a face is skipped only
+    # when ``build_small`` returns a zero factor for EVERY patch of the object.
+    def _face_tables(self) -> None:
+        fs = self.mp.object_faces
+        self._of_c = np.array([f.c for f in fs], float).reshape(-1, 3)
+        self._of_n = np.array([f.n for f in fs], float).reshape(-1, 3)
+        self._of_owner = np.array([int(f.owner) for f in fs], np.int64)
+        # radius of the face polygon about its centre (inf: not a polygon -> never skipped)
+        self._of_rho = np.array([float(np.max(np.hypot(f.poly[:, 0], f.poly[:, 1])))
+                                 if getattr(f, "poly", None) is not None else np.inf for f in fs], float)
+
+    def _faces_in_reach(self, P) -> np.ndarray:
+        """``|f.c - P| <= r_max`` for every object face, as the scalar test
+        it replaces (the faces within 1e-9 m of the limit are decided by that
+        very expression, so the set is the same to the last bit)."""
+        if not hasattr(self, "_of_c"):
+            self._face_tables()
+        if not len(self._of_c):
+            return np.zeros(0, bool)
+        P = np.asarray(P, float)
+        r_max = self.rr.r_max
+        d = np.sqrt(((self._of_c - P) ** 2).sum(axis=1))
+        inside = d <= r_max
+        for j in np.flatnonzero(np.abs(d - r_max) < 1e-9):
+            inside[j] = np.linalg.norm(self.mp.object_faces[j].c - P) <= r_max
+        return inside
+
+    def _bounce_candidates(self, P, X: np.ndarray, ix: np.ndarray) -> np.ndarray:
+        """Of the faces ``ix``, those that can reflect between the sensor
+        at P and at least one patch of the object whose patch centres are X
+        (order kept). For a one-bounce chain ``build_small`` wants the sensor
+        and the patch in front of the face and the bounce point on its
+        polygon. The bounce point is ``F0 + s (X_p - F0)`` with ``F0`` the
+        foot of P on the face plane, ``X_p`` the patch's projection on it and
+        ``s = h / (h + d)`` (h, d: heights of the sensor and of the patch
+        over the plane). With the object inside a ball (centre C, radius r,
+        C at height dC): ``s_lo = h / (h + dC + r) <= s <= s_hi = h / (h +
+        max(dC - r, 0))``, so the bounce point lies within ``s_hi r`` of the
+        stretch ``s_lo .. s_hi`` of the segment from ``F0`` to the projected
+        centre. A face is skipped when the sensor is behind it (by 1e-6 m),
+        or the whole object is, or its polygon lies farther from that stretch
+        than ``s_hi r`` (1 mm of margin). Conservative: every skipped face
+        has a zero bound; a kept one is tested on the device as before."""
+        if not len(ix):
+            return ix
+        P = np.asarray(P, float)
+        C = X.mean(axis=0)
+        r = float(np.sqrt(((X - C) ** 2).sum(axis=1).max()))
+        c, n, rho = self._of_c[ix], self._of_n[ix], self._of_rho[ix]
+        h = ((P - c) * n).sum(axis=1)                       # sensor above the face plane
+        dC = ((C - c) * n).sum(axis=1)                      # object centre above it
+        skip = (h < -1e-6) | (dC + r < -1e-6)
+        F0 = P - h[:, None] * n
+        Cp = C - dC[:, None] * n
+        ab = Cp - F0
+        hp = np.maximum(h, 1e-3)                            # (the stretch is used for h > 1e-3 only)
+        s_lo = hp / (hp + np.maximum(dC + r, 0.0))
+        s_hi = hp / (hp + np.maximum(dC - r, 0.0))
+        t = np.clip(((c - F0) * ab).sum(axis=1) / np.maximum((ab * ab).sum(axis=1), 1e-300), s_lo, s_hi)
+        dist = np.sqrt(((c - (F0 + t[:, None] * ab)) ** 2).sum(axis=1))
+        skip |= (h > 1e-3) & (dist > s_hi * r + rho + 1e-3)
+        return ix[~skip]
+
     def facets(self, P, e_a, e_n, e_v, grid, level: np.ndarray, key=None) -> dict:
         """``Multipath.facets`` on the device (``key``: the selection reuse,
         per side and object, as in :meth:`diffuse`)."""
@@ -4208,6 +4364,7 @@ class GpuMultipath:
         x = self._rx(grid)
         n_dep = 0
         reps = []
+        in_reach = None
         for i, o in enumerate(rr._facet_objs):
             c0 = np.array([o.x, o.y, 0.0])
             reach = float(np.hypot(o.length, o.width)) + o.proud_height
@@ -4221,20 +4378,45 @@ class GpuMultipath:
                 continue
             refl = float(rr._facet_R[i])
             rms = float(rr._facet_sigma[i])
+            # a shell wall (objects.layer_model elastic): |R| from its table at the pair's
+            # half-angle, times the clean share; else the scalar |R|
+            tab = rr._facet_tab[i]
+            if tab is not None:
+                if not hasattr(self, "_rtab_cache"):
+                    self._rtab_cache = {}
+                rt = self._rtab_cache.get(id(tab))
+                if rt is None:
+                    rt = self._rtab_cache[id(tab)] = wp.array(
+                        np.ascontiguousarray(tab.R_abs, np.float64), dtype=wp.float64, device=dev)
+                refl, r_inv, r_on = float(rr._facet_gain[i]), 1.0 / float(tab.step_deg), 1
+            else:
+                if not hasattr(self, "_rtab_none"):
+                    self._rtab_none = wp.array(np.ones(2), dtype=wp.float64, device=dev)
+                rt, r_inv, r_on = self._rtab_none, 1.0, 0
             wp.launch(_facet_direct_k, n, [Xp, Pv, ea, en, ev, self.beam, wp.float64(rr.r_max),
                                            R, best, state], device=dev)
             oid = int(o.object_id)
-            extra = [f for f in mp.object_faces if f.owner != oid
-                     and np.linalg.norm(f.c - P) <= rr.r_max]
+            if in_reach is None:
+                in_reach = self._faces_in_reach(P)
+            ix = np.flatnonzero(in_reach & (self._of_owner != oid))
+            extra = [mp.object_faces[j] for j in ix]
             reuse, record = self._cached_selection(key, ("facet", i), P, e_a, extra)
             if reuse is not None:
                 kept, rep = reuse
             else:
                 zeros = wp.zeros(n, dtype=wp.int32, device=dev)
                 minus = wp.full(n, -1, dtype=wp.int32, device=dev)
+                # the faces that can carry a bounce to this object at all (the others have
+                # a bound of exactly zero: counted as tested and dropped, as they were)
+                live = self._bounce_candidates(P, Xh, ix) if int(mp.pc.max_order) == 1 else ix
                 kept, rep = self._select_set(P, Pv, ea, en, ev, Xp, n, R, best, amp0, state, zeros,
-                                             minus, x, level, grid, extra,
+                                             minus, x, level, grid,
+                                             [mp.object_faces[j] for j in live],
                                              int(mp.pc.max_object_bounces))
+                n_cull = int(len(ix) - len(live))
+                if n_cull:
+                    rep["sequences"] += n_cull
+                    rep["dropped"] += n_cull
                 self._store_selection(key, ("facet", i), record, kept, rep)
             reps.append(rep)
             kinds, faces, koff = self._seq_arrays(kept)
@@ -4243,7 +4425,8 @@ class GpuMultipath:
             wp.launch(pair_kernel("facets", len(kept) + 1), n, [Xp, Np, Up, Vp, Ap, Bp, state, Pv, ea, en, ev, self.beam,
                                           self.oracle, self.layers, self.spec, self.faces, kinds,
                                           faces, koff, is_out, len(kept), wp.float64(refl),
-                                          wp.float64(rms), wp.float64(k), wp.float64(mp.surface.rms),
+                                          wp.float64(rms), rt, wp.float64(r_inv), int(r_on),
+                                          wp.float64(k), wp.float64(mp.surface.rms),
                                           wp.float64(self.alpha_np), wp.float64(rr.c),
                                           wp.float64(rr._floor), wp.float64(offset), wp.float64(eps),
                                           wp.float64(self.lam), self.max_iter, x, ndep], device=dev)

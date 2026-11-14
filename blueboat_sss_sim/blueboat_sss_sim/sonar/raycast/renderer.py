@@ -67,6 +67,13 @@ class RaycastRenderer(SonarRenderer):
                 "raycast.near_range was measured at %s bins / %s us, not this acquisition "
                 "(%d bins): the shared model's ringing and water column are used",
                 rc.near_range.num_results, rc.near_range.pulse_us, acquisition.num_results)
+        lim = float(rc.sampling.max_range_m)
+        if lim > 0.0 and float(acquisition.range_max_m) > lim + 1e-6:
+            raise ValueError(
+                f"this ray-cast profile is limited to {lim:g} m of range and the acquisition asks for "
+                f"{float(acquisition.range_max_m):.1f} m (raycast.sampling.max_range_m): beyond it the "
+                "GPU memory, the measured near range and the verification of this profile do not hold. "
+                "Use a range of 30 m or less (the thesis surveys at 20 m).")
         from ...worldgen.materials import MaterialLibrary
         snap = getattr(scene, "config_snapshot", None) or {}
         #: the scene's materials: the defaults with its world's overrides
@@ -93,8 +100,12 @@ class RaycastRenderer(SonarRenderer):
         # site's true wavenumber (so the real beam widens a little in warmer,
         # faster water, as the physical array would).
         k_nom = 2.0 * np.pi * float(OMNISCAN_FREQ_HZ) / SPEED_OF_SOUND_MPS
-        L = float(rc.beam.aperture_length_m) or _beam.aperture_from_width(
-            rc.beam.two_way_width_deg, k_nom, True)
+        ped = float(rc.beam.taper_pedestal)
+        if not 0.3 <= ped <= 1.0:
+            raise ValueError(f"raycast.beam.taper_pedestal {ped} outside [0.3, 1]")
+        L = float(rc.beam.aperture_length_m) or (
+            _beam.aperture_from_width(rc.beam.two_way_width_deg, k_nom, True) if ped == 1.0
+            else _beam.aperture_from_width_tapered(rc.beam.two_way_width_deg, k_nom, ped))
         if not 0.224 <= L <= 0.310:
             raise ValueError(f"aperture length {L:.3f} m outside [0.224, 0.310] m "
                              "(datasheet far field / CAD housing)")
@@ -110,7 +121,8 @@ class RaycastRenderer(SonarRenderer):
             raise ValueError(f"vertical_floor_amp {vf} outside [0, 0.3]")
         self.aperture = _beam.Aperture(
             L, _beam.aperture_from_width(rc.beam.height_deg, k_nom, False),
-            self.k, vertical_floor=vf, gpu=(rc.backend == "warp"))
+            self.k, vertical_floor=vf, gpu=(rc.backend == "warp"),
+            legacy_phase=bool(rc.beam.legacy_phase_sign), pedestal=ped)
         self.tilt = np.radians(float(model.beam_tilt_deg))
         self.envelope = envelope_for(acquisition,
                                      rc.receiver.filter_duration_percent,
@@ -119,6 +131,14 @@ class RaycastRenderer(SonarRenderer):
                                      rc.receiver.filter_pulse_ratio)
         solid = self.objects_mode == "solid"
         objects = list(getattr(scene, "objects", None) or [])
+        if objects and not solid:
+            import logging
+            logging.getLogger(__name__).warning(
+                "ray-cast: this profile draws the %d objects of the scene from the world raster "
+                "(raycast.objects.mode: raster). On a smooth object that puts a highlight where the "
+                "real one shows none (review of 2026-11-12: +4 to +25 dB on a plastic box in 12 of 12 "
+                "sightings). For images with objects use a harbour profile (objects.mode: solid).",
+                len(objects))
         #: fraction of every object and wall surface covered by sediment and
         #: growth (raycast.objects.fouling): diffuse like the seabed, no mirror
         self.fouling = float(rc.objects.fouling)
@@ -172,6 +192,11 @@ class RaycastRenderer(SonarRenderer):
         self._facet_R = [f[2] * (1.0 - self.fouling) for f in facets]
         self._facet_sigma = [f[3] for f in facets]
         self._facet_faces = [f[4] for f in facets]
+        #: ``objects.layer_model: elastic``: the wall table of a shell's
+        #: patches (|R| at the local incidence angle), else None (the scalar
+        #: ``_facet_R``); and what then multiplies the table (the clean share)
+        self._facet_tab: list = [None] * len(facets)
+        self._facet_gain = [1.0 - self.fouling] * len(facets)
         self._facet_cache: dict[int, object] = {}
         # The seabed sheet's coherent (mean-field) channel: the bottom path's
         # specular return (specular.py; FBR imaged, NC #4).
@@ -183,7 +208,8 @@ class RaycastRenderer(SonarRenderer):
                 self.mesh, scene, self.k, float(OMNISCAN_FREQ_HZ),
                 sc.window_n1, sc.window_n2, sc.patch_phase_rad,
                 sc.patch_min_m, sc.patch_max_m,
-                sediments=getattr(self.law, "sediments", None), lib=self.lib)
+                sediments=getattr(self.law, "sediments", None), lib=self.lib,
+                legacy_phase=bool(rc.paths.legacy_reflection_phase))
         self._set_layers(self.lib)
         self.multipath = None
         if rc.paths.enabled and int(rc.paths.max_order) > 0:
@@ -221,7 +247,11 @@ class RaycastRenderer(SonarRenderer):
         rho = np.ones(nt)
         cr = np.ones(nt)
         th = np.zeros(nt)
-        for o in self._facet_objs:
+        elastic = str(self._rc.objects.layer_model) == "elastic"
+        tab_of = np.full(nt, -1, dtype=np.int32)
+        tables: list = []
+        index: dict = {}
+        for i, o in enumerate(self._facet_objs):
             mat = lib.get(o.material)
             params = dict(getattr(o, "params", None) or {})
             if (mat.backing or "solid").lower() != "water" or params.get("flooded") is False:
@@ -235,8 +265,29 @@ class RaycastRenderer(SonarRenderer):
             rho[sel] = mat.density_kgm3 / WATER_DENSITY_KGM3
             cr[sel] = mat.sound_speed_mps / WATER_SOUND_SPEED_MPS
             th[sel] = d
+            if not elastic:
+                continue
+            # the solid wall (layers.py): one table per (material, thickness)
+            from ...worldgen.materials import elastic_constants
+            from .layers import Wall, WallTable
+            ec = elastic_constants(o.material)
+            if ec is None:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "ray-cast: no shear speed for the shell material %r; its wall stays a "
+                    "fluid layer (gap)", o.material)
+                continue
+            key = (str(o.material), round(d, 6))
+            if key not in index:
+                index[key] = len(tables)
+                tables.append(WallTable(Wall(mat.density_kgm3, mat.sound_speed_mps, ec[0], d,
+                                             ec[1], ec[2]), self.freq_hz,
+                                        WATER_DENSITY_KGM3, WATER_SOUND_SPEED_MPS))
+            tab_of[sel] = index[key]
+            self._facet_tab[i] = tables[index[key]]
         k1 = 2.0 * np.pi * self.freq_hz / WATER_SOUND_SPEED_MPS
-        self.oracle.set_layers(mask, rho, cr, th, k1)
+        self.oracle.set_layers(mask, rho, cr, th, k1,
+                               tables=tables or None, tab_of=tab_of if tables else None)
 
     # ------------------------------------------------------------- geometry
     def sensor_pose(self, side: Side, p: Pose3D) -> Pose3D:
@@ -628,8 +679,16 @@ class RaycastRenderer(SonarRenderer):
             if self._facet_parts[i] is None:
                 p = object_patches(self._facet_objs[i], seabed, patch, kc)
             else:
-                from .object_mesh import part_patches
-                p = part_patches(self._facet_parts[i], seabed, patch, kc)
+                from .object_mesh import FaceGeometry, part_patches
+                oc = self._rc.objects
+                face = FaceGeometry(
+                    float(oc.face_tilt_rms_deg), float(oc.face_corr_len_m),
+                    float(oc.face_draft_deg),
+                    # the WORLD's seed and the object's id: the same object is the same
+                    # in every ping and every run
+                    (int(getattr(self._scene, "seed", 0) or 0) * 1_000_003
+                     + int(self._facet_objs[i].object_id)) & 0xFFFFFFFF)
+                p = part_patches(self._facet_parts[i], seabed, patch, kc, face=face)
             self._facet_cache[i] = p
         return p
 
@@ -647,15 +706,17 @@ class RaycastRenderer(SonarRenderer):
             p = self._patches(i)
             if p is None or len(p) == 0:
                 continue
+            tab = self._facet_tab[i]
             n_vis += self.deposit_patches(P, e_a, e_n, e_v, p,
-                                          float(self._facet_R[i]),
+                                          float(self._facet_R[i] if tab is None
+                                                else self._facet_gain[i]),
                                           float(self._facet_sigma[i]), grid,
-                                          eckart=eckart_c)
+                                          eckart=eckart_c, rtab=tab)
         return n_vis
 
     def deposit_patches(self, P, e_a, e_n, e_v, p, refl: float,
                         rms_m: float, grid: BinGrid, eckart=None,
-                        visibility: bool = True) -> int:
+                        visibility: bool = True, rtab=None) -> int:
         """Kirchhoff (PO) backscatter of planar patches seen directly:
         ``(k/2pi) cos(theta) a b sinc sinc`` (``facets.po_amplitude``'s
         normalisation, sigma = 4 pi |sum|^2) times the material reflection,
@@ -690,6 +751,8 @@ class RaycastRenderer(SonarRenderer):
         # convention (specular.py): the phase consistent with the floor's
         # mean field and the image paths; |amp| as facets.po_amplitude.
         amp = (1j * k / (2.0 * np.pi)) * cos_t[idx] * area * refl
+        if rtab is not None:        # a shell wall: |R| at the patch's own incidence angle
+            amp = amp * rtab.reflection(cos_t[idx])
         if eckart is not None and rms_m > 0.0:
             psi = np.arcsin(np.clip(cos_t[idx], 0.0, 1.0))
             amp = amp * np.sqrt(eckart(psi, rms_m, k))

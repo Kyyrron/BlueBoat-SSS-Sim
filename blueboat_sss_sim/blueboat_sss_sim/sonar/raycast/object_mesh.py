@@ -88,10 +88,96 @@ def part_mesh(s: PartSurface) -> tuple[np.ndarray, np.ndarray]:
     return v @ s.R.T + s.t, f
 
 
+#: base materials of moulded plastic containers: their box parts take the
+#: draft angle (``raycast.objects.face_draft_deg``)
+MOULDED_MATERIALS = ("pp_shell", "plastic")
+
+
+@dataclass(frozen=True)
+class FaceGeometry:
+    """How far an object's mirror surfaces depart from the ideal primitive
+    (``raycast.objects.face_*``): geometry, never a level (NC #17)."""
+
+    tilt_rms_deg: float = 0.0     # RMS slope of the waviness along one surface direction
+    corr_len_m: float = 0.10      # its correlation length
+    draft_deg: float = 0.0        # draft of moulded side walls
+    seed: int = 0                 # (world seed, object id): world-fixed
+
+    @property
+    def active(self) -> bool:
+        return self.tilt_rms_deg > 0.0 or self.draft_deg > 0.0
+
+
+def wavy_field(X: np.ndarray, seed: int, corr_len_m: float, tilt_rms_deg: float,
+               modes: int = 192) -> tuple[np.ndarray, np.ndarray]:
+    """A smooth stationary random field ``h(X)`` [m] and its gradient (n, 3):
+    a sum of ``modes`` plane waves whose wave vectors are drawn from the
+    Gaussian spectrum of the correlation ``exp(-r^2 / l^2)``. Along any
+    direction its RMS slope is ``sqrt(2) sigma_h / l``, set to
+    ``tilt_rms_deg``. A pure function of ``seed`` and position."""
+    rng = np.random.default_rng([int(seed) & 0xFFFFFFFF, 0x5EA1])
+    K = rng.normal(0.0, np.sqrt(2.0) / float(corr_len_m), (int(modes), 3))
+    ph = rng.uniform(0.0, 2.0 * np.pi, int(modes))
+    amp = np.radians(float(tilt_rms_deg)) * float(corr_len_m) / np.sqrt(2.0) * np.sqrt(2.0 / modes)
+    arg = np.asarray(X, float) @ K.T + ph
+    return amp * np.cos(arg).sum(axis=1), -amp * (np.sin(arg) @ K)
+
+
+def _rotate(vec: np.ndarray, axis: np.ndarray, angle: float) -> np.ndarray:
+    """Rodrigues rotation of rows ``vec`` about the unit rows ``axis``."""
+    c, s = np.cos(angle), np.sin(angle)
+    return (vec * c + np.cross(axis, vec) * s
+            + axis * np.einsum("ij,ij->i", axis, vec)[:, None] * (1.0 - c))
+
+
+def perturb_patches(p: Patches, fg: FaceGeometry, draft: np.ndarray | None = None,
+                    z0: float | None = None) -> Patches:
+    """``p`` with the face geometry ``fg``. The waviness displaces each patch
+    along its normal by ``h - min h`` (outward only: a patch never sinks
+    under the mesh the visibility rays are cast against) and tilts it by the
+    field's slope; the draft leans the near-vertical patches flagged in
+    ``draft`` outward about the object's base ``z0``. ``fg`` inactive: ``p``
+    itself."""
+    if not fg.active or len(p) == 0:
+        return p
+    c, n, u, v = (np.array(a, dtype=np.float64) for a in (p.centre, p.normal, p.u, p.v))
+    if fg.draft_deg > 0.0 and draft is not None and draft.any():
+        side = draft & (np.abs(n[:, 2]) < 0.2)
+        if side.any():
+            d = np.radians(fg.draft_deg)
+            nh = n[side].copy()
+            nh[:, 2] = 0.0
+            nh /= np.linalg.norm(nh, axis=1, keepdims=True)
+            zb = float(c[side][:, 2].min() if z0 is None else z0)
+            c[side] = c[side] + (np.maximum(c[side][:, 2] - zb, 0.0) * np.tan(d))[:, None] * nh
+            ax = np.cross(np.array([0.0, 0.0, 1.0]), nh)        # rotates n_h towards -z
+            n[side], u[side], v[side] = (_rotate(q[side], ax, d) for q in (n, u, v))
+    if fg.tilt_rms_deg > 0.0:
+        h, g = wavy_field(c, fg.seed, fg.corr_len_m, fg.tilt_rms_deg)
+        c = c + (h - h.min())[:, None] * n
+        u2 = u + np.einsum("ij,ij->i", g, u)[:, None] * n       # tangents of the displaced surface
+        v2 = v + np.einsum("ij,ij->i", g, v)[:, None] * n
+        u2 /= np.linalg.norm(u2, axis=1, keepdims=True)
+        v2 -= np.einsum("ij,ij->i", v2, u2)[:, None] * u2
+        v2 /= np.linalg.norm(v2, axis=1, keepdims=True)
+        n2 = np.cross(u2, v2)
+        n2 *= np.sign(np.einsum("ij,ij->i", n2, n))[:, None]
+        n, u, v = n2, u2, v2
+    return Patches(c, n, u, v, p.a, p.b)
+
+
 def part_patches(group: list[PartSurface], seabed, patch_m: float,
-                 k: float | None = None) -> Patches:
+                 k: float | None = None, face: FaceGeometry | None = None) -> Patches:
     """The Kirchhoff patches of coherent parts, in the world, above the
-    seabed (``facets.object_patches`` for several parts)."""
-    w = Patches.concat([tessellate(s.part.solid, patch_m, k).transformed(s.R, s.t)
-                        for s in group])
+    seabed (``facets.object_patches`` for several parts). ``face``: the
+    object's face geometry (``perturb_patches``); None or inactive = the
+    ideal primitives, as before."""
+    each = [tessellate(s.part.solid, patch_m, k).transformed(s.R, s.t) for s in group]
+    w = Patches.concat(each)
+    if face is not None and face.active:
+        draft = np.concatenate([
+            np.full(len(q), s.part.solid.kind == "box"
+                    and str(s.material).split("#")[0] in MOULDED_MATERIALS)
+            for s, q in zip(group, each) if len(q)]) if len(w) else np.zeros(0, bool)
+        w = perturb_patches(w, face, draft)
     return w.select(w.centre[:, 2] > seabed(w.centre[:, 0], w.centre[:, 1]) + 1e-4)
