@@ -81,8 +81,10 @@ headless the same way: `MissionModel.add_waypoint` + `sample_mission` +
    | 5 × `plastic_box` | (15, −8) (25, −8) (35, −8) (45, −8) (55, −8) | 8 m to starboard of line 1 — a row of identical targets |
    | 4 × `tire_car` | (15, 6) (30, 6) (45, 6) (60, 6) | 6 m to port of **both** lines — seen twice, from opposite directions |
    | 3 × `plastic_box` | (20, 20) (40, 20) (60, 20) | 8 m to starboard of line 2 |
-   | 2 × `pipe_pvc`, 3 m, across track | (20, −14) (50, −14) | straight edges across the swath show along-track wobble |
-   | 1 × `pipe_pvc`, 3 m, along track | (31.5, −4) | a straight edge along the track shows range wobble |
+   | 2 × `pipe_steel`, 3 m, across track | (20, −14) (50, −14) | straight edges across the swath show along-track wobble |
+   | 1 × `pipe_steel`, 3 m, along track | (31.5, −4) | a straight edge along the track shows range wobble |
+
+   (`pipe_pvc` until 2026-11-15, when that class was deleted with the object set version 2; see below.)
 
 5. Save as **`flat_5p0m`** (and **`flat_1p5m`**). The worlds land in
    `~/worlds/sea_validation/`.
@@ -101,13 +103,24 @@ repositories. It refuses to overwrite and is deterministic, so it reproduces the
 Each object's drawn sizes, headings and burials differ from the lost originals, which no
 record kept. Positions, classes and the survey are as specified.
 
+**2026-11-15: rebuilt as `flat_5p0m_v2` and `flat_1p5m_v2`.** The object set version 2 deleted
+`pipe_pvc`; both worlds were rebuilt from their own `builder_state.yaml` with `pipe_steel` (a
+flooded steel shell, 5 mm wall) in place of the three PVC pipes, and `spec: 2` on every instance
+(a tyre gets the version 2 tread band; a box is unchanged). Positions, yaws, sizes, burials,
+depth, seed and path are those of 2026-10-20. Script and record:
+`~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/worlds_src/build_sea_validation_v2.py`
+(the 2026-10-20 script no longer exists). The steel pipes are far brighter than the PVC ones;
+the gate's checks read target positions and shapes, not levels. The gate has not yet run on the
+v2 worlds. `flat_1p5m` was deleted; `flat_5p0m` is kept for its `metadata.yaml` only (the Belief
+follow-up of session 06 reads it) and no longer loads as a scene.
+
 ### Step 3 — run the four sea states
 
 **Automatically (recommended):**
 
 ```bash
 cd ~/ros2_ws/src/BlueBoat-SideScanSonar/BlueBoat-SSS-Sim/blueboat_sss_sim
-python3 -m test.gazebo_sea_test --world-dir ~/worlds/sea_validation/flat_5p0m \
+python3 -m test.gazebo_sea_test --world-dir ~/worlds/sea_validation/flat_5p0m_v2 \
     --out ~/ros2_ws/sim_runs/sea_validation/$(date +%F)_5m
 ```
 
@@ -134,7 +147,7 @@ is recorded (`<out>/<scenario>/bag`) and analysed; the report is
 --wakes`; re-analyse without re-running with `--analyse-only`.
 
 **By hand, from MCS:** launch the mission on the world (*Launch Mission →
-simulation → world `flat_5p0m`*), and in the sea-state dialog set the
+simulation → world `flat_5p0m_v2`*), and in the sea-state dialog set the
 table's settings for each scenario (seed 7). Record with
 `ros2 bag record --use-sim-time -o <dir> /blueboat/odom /current
 /sim/sea_state /side_scan_sonar/ground_truth/sensor

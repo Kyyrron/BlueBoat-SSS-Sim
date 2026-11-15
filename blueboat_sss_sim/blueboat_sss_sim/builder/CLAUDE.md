@@ -189,7 +189,9 @@ the window first and scrolls only below its own minimum (every screen fits
   `world.seabed` when it is not empty. The wizard has no control for it: the campaign generator fills it. An
   Edit re-save of a generated world keeps it.
 - Four classes joined the catalogue (`trap_pot`, `pipe_steel`, `net_bundle`, `mooring_block`); the Screen 4 and 5
-  lists show them without a GUI edit. A world built by the campaign generator opens in Edit mode: its litter is
+  lists show them without a GUI edit. **Stage 6 (same day) deleted the 22 classes outside the object set version 2**:
+  the lists hold 11 classes, and Edit mode on a world that names a deleted class fails at the build, naming the class
+  and its replacement (rebuild such a world as a new folder with version 2 classes). A world built by the campaign generator opens in Edit mode: its litter is
   a pinned field (`objects.placed`), its structures are explicit instances.
 - Every saved world now also gets its ground truth (`metadata.yaml` schema version 2, additive;
   `ground_truth_rasters.npz`) and a content digest: `worldgen/groundtruth.py`, called by `build_world_folder`.

@@ -45,7 +45,7 @@ across the east-west survey lines; waves from the north-east, oblique):
 Usage (from the package source root)::
 
     source ~/ros2_ws/env.sh
-    python3 -m test.gazebo_sea_test --world-dir ~/worlds/sea_validation/flat_5p0m \\
+    python3 -m test.gazebo_sea_test --world-dir ~/worlds/sea_validation/flat_5p0m_v2 \\
         --trajectory ~/.config/blueboat_mcs/trajectories/sea_validation.yaml \\
         --out ~/ros2_ws/sim_runs/sea_validation/$(date +%F)_5m
 """
@@ -543,7 +543,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     home = Path.home()
     ap.add_argument("--world-dir", type=Path,
-                    default=home / "worlds/sea_validation/flat_5p0m")
+                    default=home / "worlds/sea_validation/flat_5p0m_v2")
     ap.add_argument("--trajectory", type=Path,
                     default=home / ".config/blueboat_mcs/trajectories/sea_validation.yaml")
     ap.add_argument("--out", type=Path, default=None)

@@ -29,7 +29,7 @@ objects:
   size_scale: 1.0
   burial_scale: 1.0
   reflectivity_jitter: 0.15
-  # composition: {tire_car: 1.0, can: 1.5, ...}   # optional, see objects.py CATALOG
+  # composition: {tire_car: 1.0, debris: 1.2, ...}   # optional, see objects.py CATALOG
   # overrides:
   #   pipe_pvc: {length_range: [1.0, 4.0], burial_range: [0.0, 0.3]}
 

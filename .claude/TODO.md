@@ -230,7 +230,8 @@ that many boxes with slight overlaps at the joints (cosmetic; each chord box car
 depth barriers and the sonar see the same chords, so nothing disagrees.
 
 ### [P2] Objects v3: lattice classes on their side
-A bicycle / crate / trolley on one of its faces keeps its yaw-frame
+**Closed 2026-11-15 (Stage 6): the bicycle, crate and trolley classes were deleted; the one lattice
+class left, `trap_pot`, is built of real parts in the ray-cast.** As it was: a bicycle / crate / trolley on one of its faces keeps its yaw-frame
 lattice thinning over the *projected* box footprint; the skeleton is not
 re-derived from the rotated frame members. Fine at raster resolution,
 noted so it is not "rediscovered".
@@ -247,7 +248,7 @@ message. Adding `pyproj` would lift this; until then, re-export in
 EPSG:4326 or convert to CSV.
 
 ### [P2] Cone visual is a cylinder stand-in
-SDF `<cone>` exists only from SDFormat 15 (Ionic); on Harmonic
+**Moot since 2026-11-15: `traffic_cone` was deleted; no class is a cone.** As it was: SDF `<cone>` exists only from SDFormat 15 (Ionic); on Harmonic
 `traffic_cone` renders as an upright cylinder at half the base radius
 (`sdf_writer._object_sdf`). Acoustics are mask-driven and correct either
 way. Swap to a real `<cone>` when the workspace moves past Harmonic.
@@ -1345,22 +1346,25 @@ missing", pool per-bin std 6.29 vs 4.99).
 
 ## Session 02 of the completion round (2026-11-15): generated worlds — open items
 
-Evidence and handoff: `~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/handoff_02.md`.
+Evidence and handoff: `~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/handoff_02.md`; which command moved
+where after Stage 6: `02_world_builder/command_map.md`.
 
-- **Stage 6 (clean-up) waits for the owner**: `02_world_builder/cleanup_plan.md` (delete the 22 classes outside
-  the object set version 2 and the worlds that use them; two decisions asked). Until then the catalogue holds
-  33 classes and nothing is deleted.
-- **B2 on the HELD-OUT recording is session 05's.** The heterogeneity presets were fitted on the FIT recording
-  only. Its dark-region rate cannot be matched at the FIT acquisition (the simulated speckle's range
-  correlation at 40 m / 600 bins, 0.23 against the device's 0.12): judge it at the thesis setting.
-- **Not built** (stated, P1 / P2): a sediment-filled lying drum, an open pipe bore, net draping over objects,
-  moored hulls, vegetation, a tyre on a rim, the beach-day kit (no beach day confirmed), pontoon anchor chains.
-- **Paper requests** (no figure rests on them): APL-UW TR 9407 ch. IV; Williams et al. 2002 and 2009 (the
-  roughness model above 100 kHz); Lyons et al. 2009 (patchy seafloors); Broad, Rees & Davis 2020 (small-boat
-  anchor marks).
-- **Change requests to other modules** (not edited, CM-3): the root interface tables for the new
-  `metadata.yaml` keys and `ground_truth_rasters.npz`; BlueBoat-Perception's class map (`yolo_classes_v1`: the
-  29 classes) for the version 2 set; the Replanner emulator's `CLASS_MAP` (`pipe_pvc`, `mesh_crate`).
-- **The Gazebo sea gate's two worlds** (`sea_validation/flat_1p5m`, `flat_5p0m`) hold `pipe_pvc`: to be rebuilt
-  with `pipe_steel` at Stage 6; the gate itself must then be rerun by a session that is allowed to launch Gazebo.
-
+- **Stage 6 is done** (owner's answers, 2026-11-15): the catalogue is the object set version 2 (11 classes); the 22
+  others are deleted and a world naming one fails to load by name. Five world folders were deleted; the two
+  sea-gate worlds were rebuilt as `flat_1p5m_v2` / `flat_5p0m_v2`.
+- **Run the Gazebo sea gate once on `flat_5p0m_v2` and `flat_1p5m_v2`** (a session allowed to launch Gazebo;
+  `.claude/gazebo-gate.md`). Not run since the rebuild.
+- **B2 on the HELD-OUT recording is session 05's**, under amendment A-04 (judged at each recording's own
+  acquisition; dark and bright region rates reported, not judged). The presets were fitted on the FIT recording.
+- **Stated limitations (owner, 2026-11-15: no correction):** the heterogeneity presets lower the mean level of the
+  16–20 m band by 0.45 dB (`nominal`) and 1.08 dB (`high`); the mooring blocks as concrete objects are 2–3 dB
+  brighter in the near bands than as terrain; the `high` preset's lag-3 correlation sits 0.049 over the real
+  maximum (the fine relief is at its floor, 12 mm; the rest is the broad relief's and the patches').
+- **Not built** (P1 / P2): a sediment-filled lying drum, an open pipe bore, net draping, moored hulls, vegetation,
+  a tyre on a rim, the beach-day kit, pontoon anchor chains. A net bundle's strands may overtop its stored height
+  by their diameter (`raycast_test [O3]` allows it).
+- **Paper requests** (no figure rests on them): APL-UW TR 9407 ch. IV; Williams et al. 2002 and 2009; Lyons et al.
+  2009; Stanic et al. 1988; Broad, Rees & Davis 2020; Kuroda et al. 2020 full text.
+- **Change requests to other modules** (not edited, CM-3): the root interface tables (new `metadata.yaml` keys,
+  `ground_truth_rasters.npz`); BlueBoat-Perception's class map `yolo_classes_v1` (29 classes) for the version 2
+  set; the Replanner emulator's `CLASS_MAP` (`pipe_pvc`, `mesh_crate`, both deleted).

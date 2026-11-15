@@ -5,7 +5,7 @@ Moved from `.claude/CLAUDE.md` §7 on 2026-11-10. Read before running or changin
 
 ```bash
 source ~/ros2_ws/env.sh            # + colcon build --packages-select blueboat_sss_sim
-python3 -m test.gazebo_sea_test --world-dir ~/worlds/sea_validation/flat_5p0m \
+python3 -m test.gazebo_sea_test --world-dir ~/worlds/sea_validation/flat_5p0m_v2 \
     --out ~/ros2_ws/sim_runs/sea_validation/<date>_5m      # --quick: line 1 only
 ```
 
@@ -27,3 +27,16 @@ lost once (empty from 2026-10-12). They were rebuilt on 2026-10-20 by
 to overwrite). On 2026-10-20 the gate ran 24/25 (5 m) and 23/24 (1.5 m). The
 only failure each time was an intermittent "fresh pose" stall in *waves*,
 which passed when re-run (`TODO.md`).
+
+**Since 2026-11-15 the gate's worlds are `flat_5p0m_v2` and `flat_1p5m_v2`**: the
+object set version 2 deleted `pipe_pvc`, so the two worlds were rebuilt from
+their own `builder_state.yaml` with `pipe_steel` (steel shell, 5 mm wall) in
+place of the PVC pipes and `spec: 2` on every instance; positions, yaws, sizes,
+burials, depth, seed and path unchanged (script and record:
+`~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/worlds_src/build_sea_validation_v2.py`,
+`sea_validation_v2_built.yaml`; the 2026-10-20 script no longer exists).
+`flat_1p5m` was deleted; `flat_5p0m` is kept only because the Belief
+follow-up of session 06 reads its `metadata.yaml` -- it no longer loads as a
+scene. **The gate has not been run on the v2 worlds** (no Gazebo launch
+without the owner's order): the next session allowed to launch Gazebo runs
+it once on each and records the result here.

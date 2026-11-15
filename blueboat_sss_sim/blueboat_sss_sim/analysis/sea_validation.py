@@ -1224,7 +1224,9 @@ def plot_compare(runs: list[RunData], results: list[dict], out: Path) -> list[st
     chip_runs = [r for r in runs if r.targets and r.profiles]
     if chip_runs:
         pick = []
-        for typ in ("tire_car", "plastic_box", "pipe_pvc"):
+        # pipe_steel: the gate's worlds since 2026-11-15 (flat_*_v2); pipe_pvc: runs recorded on the
+        # worlds of 2026-10-20, whose class was deleted (the label is only matched, never loaded)
+        for typ in ("tire_car", "plastic_box", "pipe_steel", "pipe_pvc"):
             pick += [o for o in chip_runs[0].targets if o.get("type") == typ][:2]
         pick = pick[:6]
         fig, axs = plt.subplots(len(chip_runs), len(pick),

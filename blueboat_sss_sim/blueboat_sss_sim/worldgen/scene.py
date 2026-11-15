@@ -303,6 +303,12 @@ class SceneModel:
             doc = yaml.safe_load(f)
         if doc.get("version") != MANIFEST_VERSION:
             raise ValueError(f"Unsupported scene manifest version {doc.get('version')}")
+        # A world that names a class deleted on 2026-11-15 (or any unknown one)
+        # does not load: the error names the class and its replacement, instead
+        # of a mesh that silently lacks the object.
+        from .objects import check_class
+        for o in doc.get("objects") or []:
+            check_class(str(o.get("type")), f"{directory}: object {o.get('object_id')}")
         data = np.load(directory / "scene.npz")
         scene = cls(
             grid=GridSpec(**doc["grid"]),

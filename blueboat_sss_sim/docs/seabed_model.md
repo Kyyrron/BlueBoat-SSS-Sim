@@ -568,31 +568,40 @@ the stretches, `nominal` their median (`worldgen/campaign.HETEROGENEITY`).
 |---|---|---|---|---|
 | `low` | 12 mm | 40 mm | 0 / 0 | none |
 | `nominal` | 12 mm | 75 mm | 1 % / 0.5 %, 2 m | pits 0.5 %, 0.01 mounds per m², 4 marks per ha |
-| `high` | 20 mm | 200 mm | 8 % / 3 %, 3 m | pits 1.3 %, 0.05 mounds per m², 12 marks per ha |
+| `high` | 12 mm (20 mm until 2026-11-15, see below) | 200 mm | 8 % / 3 %, 3 m | pits 1.3 %, 0.05 mounds per m², 12 marks per ha |
 
 Generated against real, at the FIT acquisition (worlds built by the campaign generator: flat, 8.3 m, 800
 pings, mean of two seeds; real: the 14 FIT stretches). [Batch B of session 02]
 
 | Statistic | Real min / median / max | `uniform` | `low` | `nominal` | `high` |
 |---|---|---|---|---|---|
-| Correlation 3 pings apart | 0.025 / 0.044 / 0.146 | 0.005 | 0.024 | 0.066 | 0.216 |
-| Spread of 0.5 m patch means [dB] | 1.05 / 1.24 / 2.46 | 0.95 | 1.13 | 1.52 | 2.62 |
-| Spread of 2 m patch means [dB] | 0.37 / 0.60 / 2.08 | 0.25 | 0.38 | 0.68 | 1.71 |
-| Dark regions per 100 m² | 26.4 / 31.6 / 37.1 | 49.8 | 59.4 | 51.4 | 42.1 |
-| Bright regions per 100 m² | 6.8 / 9.3 / 36.4 | 2.8 | 8.2 | 15.0 | 47.3 |
+| Correlation 3 pings apart | 0.025 / 0.044 / 0.146 | 0.005 | 0.024 | 0.066 | 0.216 → **0.195** |
+| Spread of 0.5 m patch means [dB] | 1.05 / 1.24 / 2.46 | 0.95 | 1.13 | 1.52 | 2.62 → **2.59** |
+| Spread of 2 m patch means [dB] | 0.37 / 0.60 / 2.08 | 0.25 | 0.38 | 0.68 | 1.71 → **1.71** |
+| Dark regions per 100 m² | 26.4 / 31.6 / 37.1 | 49.8 | 59.4 | 51.4 | 42.1 → **40.1** |
+| Bright regions per 100 m² | 6.8 / 9.3 / 36.4 | 2.8 | 8.2 | 15.0 | 47.3 → **38.8** |
+
+`high`: Batch B's value (fine relief 20 mm) → the shipped preset (12 mm, the owner's change of 2026-11-15, rendered
+the same way: `batchB/r2_high_check.jsonl`).
 
 Read against the tolerances of acceptance criterion B2 (correlation ±0.05, spreads ±30 %):
 - `low` against the real minimum: correlation -0.001, spreads +8 % and +4 %: inside.
 - `nominal` against the real median: correlation +0.022, spreads +22 % and +13 %: inside, on the rough side of the median.
-- `high` against the real maximum: correlation +0.070 (outside ±0.05), spreads +7 % and -18 % (inside). The largest real stretch lies beside structures.
+- `high` against the real maximum: correlation +0.049 (at the edge of ±0.05), spreads +5 % and −18 % (inside).
+  With the fine relief at 20 mm it was +0.070. The owner asked for the fine relief that centres the correlation on
+  the real maximum: **the fine relief alone cannot** — 17 / 14 / 12 mm give 0.209 / 0.199 / 0.195 — and 12 mm is
+  its floor (the presets do not fall from `nominal` to `high`). The rest of the excess is the broad relief's and the
+  patches', which were left as fitted. The largest real stretch lies beside structures.
 - The dark-region rate is outside the real range for every preset, the uniform seabed included (below).
-- Mean level of a range band against the uniform world, largest shift: `low` -0.22 dB, `nominal` -0.45 dB, `high` -1.17 dB (all in the 16–20 m band).
+- Mean level of a range band against the uniform world, largest shift: `low` −0.22 dB, `nominal` −0.45 dB, `high`
+  −1.08 dB (−1.17 at 20 mm) (all in the 16–20 m band). A stated limitation (owner, 2026-11-15: no correction).
 
 What the fit cannot do, and why:
 - The **dark-region rate** of the simulated picture exceeds the real one already on uniform sand (50 against
   26–37 per 100 m²) at this acquisition: the simulated speckle is more correlated along range (0.23 against
   0.12) than the device's at 40 m / 600 bins. It is a property of the sensor model at that setting, not of the
-  seabed, and no seabed parameter can lower it. Session 05 judges it at the thesis setting.
+  seabed, and no seabed parameter can lower it. Amendment A-04 of the acceptance criteria (owner, 2026-11-15):
+  B2 is judged at each recording's own acquisition; dark- and bright-region rates are reported, not judged.
 - Four generator parameters cannot match four statistics at three levels exactly; the table states the misses.
 - One harbour, one recording: the presets are a bracket, not a calibration.
 

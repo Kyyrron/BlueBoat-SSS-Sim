@@ -316,7 +316,7 @@ def main() -> None:
     check("objects page: no orientation key emitted for the default (random)",
           "orientation" not in state.objects.classes["drum_200l"])
     row_on = objects._rows["drum_200l"]
-    row_off = objects._rows["brick"]
+    row_off = objects._rows["debris"]
     check("an unchecked row is collapsed: no parameter widgets exposed",
           row_off._body.isHidden() and not row_on._body.isHidden()
           and not row_off.isChecked() and row_on.isChecked())
@@ -324,7 +324,7 @@ def main() -> None:
     check("'Selected only' hides the unchecked rows",
           row_off.isHidden() and not row_on.isHidden())
     objects._selected_only.setChecked(False)
-    objects._filter.setText("brick")
+    objects._filter.setText("debris")
     check("text filter keeps only the matching classes",
           not row_off.isHidden() and row_on.isHidden())
     objects._filter.setText("")
@@ -366,16 +366,16 @@ def main() -> None:
           state.objects.classes["drum_200l"]["orientation"]["rest"]
           == {"enabled": True, "randomness": 0.8}
           and r3.rest.enabled.isChecked() and r3.rest.randomness.value() == 0.8
-          and not objects3._rows["rope"].rest.enabled.isEnabled())
+          and not objects3._rows["chain"].rest.enabled.isEnabled())
 
     from blueboat_sss_sim.builder.pages.objects_page import ClassInfoDialog
     ok_info = True
-    for cls in ("drum_200l", "mesh_crate", "rope", "traffic_cone"):
+    for cls in ("drum_200l", "trap_pot", "chain", "net_bundle"):
         dlg = ClassInfoDialog(cls)
         ok_info &= dlg.windowTitle().startswith("About:")
         dlg.deleteLater()
     check("class Info dialog builds (size, shape, footprint preview)",
-          ok_info, "solid, lattice, line and cone classes")
+          ok_info, "solid, lattice, line and coil classes")
 
     print("[g4] preview worker (synchronous run)")
     results: dict = {}
@@ -618,9 +618,9 @@ def main() -> None:
     check("the depth composite is drawn under the objects",
           "composite" in pp.map._overlay_items)
 
-    _arm("traffic_cone")
+    _arm("tire_car")
     check("arming a class arms the map's place mode",
-          pp._armed == "traffic_cone" and pp.map.mode is _Mode7.OBJECT)
+          pp._armed == "tire_car" and pp.map.mode is _Mode7.OBJECT)
     pp._form.prefill(None)
     pp._on_click(_QPF(210.0, 110.0))
     check("a click drops one object exactly where it landed",
@@ -715,7 +715,7 @@ def main() -> None:
     # facet object (NC #17), so the row is greyed out for it and comes back
     # when the material turns the object rough.
     dlg7f = ObjectEditDialog({
-        "type": "can", "x": 0.0, "y": 0.0, "yaw": 0.0, "length": 0.13,
+        "type": "pipe_steel", "x": 0.0, "y": 0.0, "yaw": 0.0, "length": 0.13,
         "width": 0.08, "proud_height": 0.08, "burial": 0.0,
         "reflectivity": 0.9, "material": "metal"})
     off7 = not dlg7f._spins["reflectivity"].isEnabled()

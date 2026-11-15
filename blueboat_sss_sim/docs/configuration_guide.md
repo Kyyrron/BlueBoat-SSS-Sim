@@ -339,8 +339,9 @@ objects:
                                             # omit = random, flat (see below)
       params: {fill_fraction: 0.2}          # class-specific extras
   explicit:                                 # verbatim instances (matched
-    - {type: crate_plastic, x: 5.0, y: 5.0, yaw: 0.3}          # pairs,
-    - {type: mesh_crate, x: -5.0, y: 5.0, fill_fraction: 0.35} # clusters)
+    - {type: plastic_box, x: 5.0, y: 5.0, yaw: 0.3}            # pairs,
+    - {type: trap_pot, x: -5.0, y: 5.0, fill_fraction: 0.07,   # clusters)
+       params: {spec: 2, variant: us_wire}}
   path_xy: [[0.0, 0.0], [20.0, 0.0]]        # survey track, world metres
                                             # (the builder fills this in)
   # path_heading_deg: 45.0                  # headless scalar fallback
@@ -434,9 +435,14 @@ flat stamp. Explicit instances take `roll_deg` / `pitch_deg`
 verbatim. The manifest carries `roll`, `pitch`, `rest` and `rest_z`
 (additive defaults), `metadata.yaml` `roll_deg` / `pitch_deg` / `rest`,
 and `world.sdf` places the same primitive at the settled pose.
-The catalog holds **29 classes** (the original 13 plus the target-family additions incl. the
-open-frame `bicycle`/`mesh_crate`/`shopping_trolley` with
-`fill_fraction`, and the field-target `plastic_box`); see
+The catalog holds the **11 classes of the object set version 2** (since 2026-11-15:
+`plastic_box`, `drum_200l`, `concrete_block`, `trap_pot`, `pipe_steel`, `tire_car`, `net_bundle`,
+`mooring_block`, `chain`, `mooring_pile`, `debris`; `seabed_model.md` §10); the 22 others were
+deleted, and a world that names one no longer loads (the error names the class and its
+replacement, `objects.REMOVED_CLASSES`). The seven classes that existed before keep their earlier
+construction for an instance without `params.spec: 2` -- a build path that keeps old worlds
+bit-identical; new worlds always carry `spec: 2`. The legacy random composition (a world without
+`objects.classes`) draws `tire_car`, `concrete_block`, `chain` and `debris`. See
 `worldgen/objects.py` (`CATALOG`).
 
 ### walls (optional)

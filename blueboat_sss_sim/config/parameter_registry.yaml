@@ -2564,7 +2564,7 @@ parameters:
     identified_by: "fit on the object-free stretches of the FIT recording reflectionEvidenceFullharbour.svlog (14 stretches; the statistics of design_note.md par. 2.4): nominal = their median, low / high = their smallest / largest"
     metric: "lag-3 ping correlation, spread of 0.5 m and 2 m patch means, bright regions per 100 m2 (analysis/seabed_stats.py)"
     uncertainty: "one harbour, one recording, at 40 m / 600 bins; the generator has four parameters for four statistics at three levels"
-    bracket: "0.012 (low) .. 0.020 (high) (the R2 presets)"
+    bracket: "0.012 (low, nominal and high since 2026-11-15; high was 0.020) (the R2 presets)"
     confounders: []
     experiment: "session 05: B2 on the HELD-OUT recording"
     owner: worldgen/campaign.py (HETEROGENEITY)

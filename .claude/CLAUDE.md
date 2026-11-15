@@ -276,7 +276,18 @@ change; run `svlog_digest` first on any `.svlog`.
 fitted on the FIT recording), structures, and litter of the **object set version 2** (11 classes) drawn from
 the population model, all pinned, with a content digest that repeats. Every new world, hand-made included, gets
 its ground truth: `metadata.yaml` schema version 2 (additive, `format` unchanged) and
-`ground_truth_rasters.npz`. Brackets: R5 (`raycast.objects.corner_floor_coherence`, profiles
+`ground_truth_rasters.npz`.
+
+**The catalogue is the object set version 2 (since 2026-11-15, Stage 6, owner's order).** Eleven
+classes (`objects.V2_CLASSES`); the 22 others were deleted, and a world that names one does not
+load: `SceneModel.load`, the ray-cast mesher and the placement raise, naming the class and its
+replacement (`objects.REMOVED_CLASSES`). **The earlier construction of the seven classes that
+existed before is kept for an instance without `params.spec: 2`** — a build path, not a kept
+class: it keeps every world and every result made before bit-identical (the real harbour world,
+the beach-box worlds, session 01's evidence). **New worlds always carry `spec: 2`** (the campaign
+generator and every rebuild write it). Session 01's scripts that named deleted classes have
+patched copies in `~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/e1_patched/`; which command
+moved where: `02_world_builder/command_map.md`. Brackets: R5 (`raycast.objects.corner_floor_coherence`, profiles
 `…_corner_low` / `…_corner_high`) and R6 (`uncertain_materials`). **Read `.claude/worldgen-campaign.md` before
 touching `worldgen/campaign.py`, `population.py`, `domain.py`, `groundtruth.py`, the version 2 builders of
 `compounds.py` or `depth/layers/heterogeneity.py`** (opt-in `spec: 2`, pinned entries, random streams, the
@@ -470,8 +481,8 @@ scientific argument.
     brightness. A brightness knob on an object or a class is a violation.
     **Ray-cast, `raycast.objects.mode: solid` (2026-11-11, the harbour profiles): one surface rule
     for objects, walls and seabed.** The sheet is the terrain (`depth.npz`); every object is meshed
-    at load from the manifest as its parts (`worldgen/compounds.py`: one primitive, or a pallet's
-    boards, a bicycle's tubes, a car tyre's steel-belted tread band ...), each with its material
+    at load from the manifest as its parts (`worldgen/compounds.py`: one primitive, or a drum's
+    hoops and chimes, a wire pot's rods and mesh, a car tyre's steel-belted tread band ...), each with its material
     (`sonar/raycast/object_mesh.py`); a wall is built of its `material` (concrete | metal, chosen
     in the World Builder). A material is its reflection |R| and RMS roughness: the surface mirrors
     `R·√C` (Kirchhoff patches) and scatters `1 − C` diffusely (`scattering.DiffuseLaw`), C =
@@ -554,7 +565,10 @@ The traps:
   `worldgen/materials.py`), never a brightness (NC #17); `transmission` is 0
   for all but `pp_shell`. `config/materials_literature.yaml` is an
   **override**, not the default, so existing worlds do not move.
-- `DEFAULT_COMPOSITION` is deliberately unchanged — new classes enter via
+- `DEFAULT_COMPOSITION` (the legacy random field of a world YAML without `objects.classes`) was
+  reduced on 2026-11-15 to `tire_car`, `concrete_block`, `chain`, `debris` (the classes of it that
+  survived Stage 6; the render fixture was re-baselined once for it). Otherwise it is not
+  reshuffled — new classes enter via
   `objects.classes`, never by reshuffling legacy seeds.
 - `wall_multipath_enabled: true` by default is a strict no-op without walls.
 

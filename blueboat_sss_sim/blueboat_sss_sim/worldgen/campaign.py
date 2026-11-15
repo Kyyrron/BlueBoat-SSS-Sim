@@ -68,7 +68,11 @@ HETEROGENEITY: dict[str, dict[str, float]] = {
                     share_coarser=0.0, patch_len=2.0, pit_cover=0.0, mounds=0.0, drag=0.0),
     "nominal": dict(fine_rms=0.012, fine_len=0.4, broad_rms=0.075, broad_len=3.0, share_finer=0.01,
                     share_coarser=0.005, patch_len=2.0, pit_cover=0.005, mounds=0.01, drag=4.0),
-    "high":    dict(fine_rms=0.02, fine_len=0.4, broad_rms=0.20, broad_len=3.0, share_finer=0.08,
+    # high: fine relief 12 mm since 2026-11-15 (was 20 mm; owner: bring the lag-3 correlation towards the real
+    # maximum by the fine relief alone). 12 mm is the lowest it may take (the presets do not fall from nominal
+    # to high); lag-3 0.196 there against the real 0.146 (batchB/r2_high_check.jsonl): the rest of the excess
+    # is the broad relief's and the patches'
+    "high":    dict(fine_rms=0.012, fine_len=0.4, broad_rms=0.20, broad_len=3.0, share_finer=0.08,
                     share_coarser=0.03, patch_len=3.0, pit_cover=0.013, mounds=0.05, drag=12.0),
 }
 #: clutter presets: hard small litter and cobbles per m2 (Schernewski et al.

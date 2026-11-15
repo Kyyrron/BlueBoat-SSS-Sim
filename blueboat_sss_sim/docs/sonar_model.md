@@ -148,7 +148,7 @@ through one harness): highlight **+21.6…+23.3 dB → +7.6…+9.2 dB** against
 the device's measured **+2.5 dB**; the shadow's worst bin **−54 → −19 dB**
 against **−13.6**. **Superseded 2026-09-28 for smooth solid objects** by the
 facet layer (§12): the raster path above now serves the smooth *aggregates*
-(the lattice classes: mesh crate, bicycle, trolley) and every rough object.
+(the lattice classes -- since 2026-11-15 the wire pot `trap_pot` -- and every rough object).
 
 **Transmit ringing.** Every real ping additionally carries the decaying
 transmit-pulse core right under the transducer — measured on
@@ -939,8 +939,8 @@ which spans more than one layer resonance (λ/2 in PE = 2.7 mm), so the mean
 |R|² over that band is used: |R| = 0.60 (−4.5 dB), between 0.44 and 0.71.
 Smoke `[14]`.
 
-For a class drawn as a lying cylinder or capsule (`pipe_pvc`, `can`,
-`cylinder_metal`, `fire_extinguisher`, `bottle_plastic`, `bottle_glass`),
+For a class drawn as a lying cylinder (`pipe_steel`; until 2026-11-15 also `pipe_pvc`, `can`,
+`cylinder_metal`, `fire_extinguisher` and the capsule bottles),
 `proud_height` and `width` are drawn independently, but the solid the facet
 layer scatters from is a cylinder of diameter `width`. On the flat stamp its
 top is `min(effective_height, width)` above the seabed (`facets.object_patches`:

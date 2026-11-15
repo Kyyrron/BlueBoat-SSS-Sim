@@ -61,15 +61,6 @@ def _mask_annulus(xl: np.ndarray, yl: np.ndarray, o: PlacedObject) -> np.ndarray
     return prof
 
 
-def _mask_capsule(xl: np.ndarray, yl: np.ndarray, o: PlacedObject) -> np.ndarray:
-    """Bottle-like: cylinder with hemispherical ends, lying along x."""
-    r = o.width / 2
-    ax = np.clip(np.abs(xl) - (o.length / 2 - r), 0.0, None)
-    d = np.hypot(ax, yl)
-    prof = np.sqrt(np.clip(1.0 - (d / max(r, 1e-6)) ** 2, 0.0, 1.0))
-    return prof
-
-
 def _mask_line_segments(n_seg: int, gap_ratio: float) -> MaskFn:
     """Rope/chain: a slightly wavy dashed line of small bumps along x."""
 
@@ -91,13 +82,6 @@ def _mask_line_segments(n_seg: int, gap_ratio: float) -> MaskFn:
     return fn
 
 
-def _mask_anchor(xl: np.ndarray, yl: np.ndarray, o: PlacedObject) -> np.ndarray:
-    """Cross/T shape: shank along x + flukes along y."""
-    shank = (np.abs(yl) <= 0.12 * o.width) & (np.abs(xl) <= o.length / 2)
-    flukes = (np.abs(xl - o.length * 0.3) <= 0.12 * o.length) & (np.abs(yl) <= o.width / 2)
-    return (shank | flukes).astype(np.float64)
-
-
 def _mask_blob(xl: np.ndarray, yl: np.ndarray, o: PlacedObject) -> np.ndarray:
     """Irregular debris blob: perturbed ellipse."""
     rng = np.random.default_rng(o.object_id)
@@ -112,12 +96,6 @@ def _mask_cylinder_upright(xl: np.ndarray, yl: np.ndarray,
                            o: PlacedObject) -> np.ndarray:
     """Drum/pail standing on the seabed: flat-topped disc footprint."""
     return (np.hypot(xl, yl) <= o.length / 2).astype(np.float64)
-
-
-def _mask_cone(xl: np.ndarray, yl: np.ndarray, o: PlacedObject) -> np.ndarray:
-    """Traffic cone / bollard: linear radial taper -- no broadside face."""
-    rr = np.hypot(xl, yl)
-    return np.clip(1.0 - rr / max(o.length / 2, 1e-6), 0.0, 1.0)
 
 
 def _mask_coil(xl: np.ndarray, yl: np.ndarray, o: PlacedObject) -> np.ndarray:
@@ -205,40 +183,21 @@ class ObjectSpec:
         return self.label or self.type.replace("_", " ")
 
 
+#: The object classes: since 2026-11-15 the object set version 2 of
+#: ``target_families_and_surrogates.md`` (11 classes, ``V2_CLASSES``); the 22
+#: others were deleted (``REMOVED_CLASSES``). The seven classes that existed
+#: before keep their earlier construction for an instance WITHOUT
+#: ``params.spec: 2`` -- a build path, not a class: it keeps every world and
+#: every result made before bit-identical. New worlds always carry ``spec: 2``.
 CATALOG: dict[str, ObjectSpec] = {
     "tire_car":        ObjectSpec("tire_car", _mask_annulus, (0.55, 0.75), (0.55, 0.75),
                                   (0.18, 0.25), "rubber", (0.0, 0.5), True, "cylinder_upright"),
-    "tire_bicycle":    ObjectSpec("tire_bicycle", _mask_annulus, (0.55, 0.70), (0.55, 0.70),
-                                  (0.03, 0.05), "rubber", (0.0, 0.6), True, "cylinder_upright"),
-    "pipe_pvc":        ObjectSpec("pipe_pvc", _mask_cylinder_lying, (0.8, 3.0), (0.05, 0.20),
-                                  (0.05, 0.20), "pvc", (0.0, 0.5), False, "cylinder"),
-    "bottle_plastic":  ObjectSpec("bottle_plastic", _mask_capsule, (0.20, 0.35), (0.07, 0.12),
-                                  (0.07, 0.12), "plastic", (0.0, 0.6), False, "cylinder"),
-    "can":             ObjectSpec("can", _mask_cylinder_lying, (0.10, 0.17), (0.06, 0.10),
-                                  (0.06, 0.10), "metal", (0.0, 0.6), False, "cylinder"),
-    "tent_weight":     ObjectSpec("tent_weight", _mask_box, (0.15, 0.30), (0.10, 0.20),
-                                  (0.08, 0.15), "concrete", (0.0, 0.4), False, "box"),
-    "rope":            ObjectSpec("rope", _mask_line_segments(0, 0.0), (2.0, 8.0), (0.02, 0.05),
-                                  (0.02, 0.05), "rope", (0.0, 0.6), False, "box"),
-    "cylinder_metal":  ObjectSpec("cylinder_metal", _mask_cylinder_lying, (0.3, 1.0), (0.10, 0.30),
-                                  (0.10, 0.30), "metal", (0.0, 0.4), False, "cylinder"),
     "concrete_block":  ObjectSpec("concrete_block", _mask_box, (0.3, 0.8), (0.2, 0.5),
                                   (0.15, 0.40), "concrete", (0.0, 0.3), False, "box"),
-    "brick":           ObjectSpec("brick", _mask_box, (0.20, 0.25), (0.09, 0.12),
-                                  (0.05, 0.08), "brickclay", (0.0, 0.5), False, "box"),
     "chain":           ObjectSpec("chain", _mask_line_segments(12, 0.35), (1.5, 6.0), (0.03, 0.08),
                                   (0.03, 0.08), "metal", (0.0, 0.6), False, "box"),
-    "anchor":          ObjectSpec("anchor", _mask_anchor, (0.4, 1.0), (0.3, 0.8),
-                                  (0.10, 0.30), "metal", (0.0, 0.4), False, "box"),
     "debris":          ObjectSpec("debris", _mask_blob, (0.2, 1.2), (0.15, 0.8),
                                   (0.05, 0.35), "generic", (0.0, 0.5), False, "box"),
-
-    # ---- target-family additions (target_families_and_surrogates.md) ----
-    # F1 upright rigid box -- the mirror class (sharp aspect dependence).
-    "crate_plastic":   ObjectSpec("crate_plastic", _mask_box, (0.45, 0.55),
-                                  (0.30, 0.40), (0.18, 0.25), "plastic",
-                                  (0.0, 0.3), False, "box",
-                                  label="fish crate (PP)"),
     # The 2026-09-07 beach target itself: a 68 L NAFCO storage box (NA
     # Container Clear #75), 716 x 425 x 323 mm outer, lid on, flooded. Its
     # three dimensions are class knobs rather than a size range, because
@@ -282,14 +241,6 @@ CATALOG: dict[str, ObjectSpec] = {
                                        "air-filled one is an near-total "
                                        "reflector and casts a full "
                                        "shadow."))),
-    "tin_18l":         ObjectSpec("tin_18l", _mask_box, (0.22, 0.25),
-                                  (0.22, 0.25), (0.32, 0.36), "tinplate",
-                                  (0.0, 0.3), False, "box",
-                                  label="18 L tin can (isshoka)"),
-    "polytank":        ObjectSpec("polytank", _mask_box, (0.32, 0.36),
-                                  (0.22, 0.26), (0.42, 0.48), "plastic",
-                                  (0.0, 0.3), False, "box",
-                                  label="20 L polytank"),
     # Harbour furniture rather than litter: a mooring pile is what a
     # pontoon is actually held by, and what stands beside it in every
     # marina (2026-09-18 review P6-6). Modelled as what it is -- an
@@ -318,55 +269,6 @@ CATALOG: dict[str, ObjectSpec] = {
                                   (0.56, 0.60), (0.56, 0.60), (0.85, 0.92),
                                   "metal", (0.0, 0.2), True, "cylinder_upright",
                                   label="200 L steel drum"),
-    "pail_20l":        ObjectSpec("pail_20l", _mask_cylinder_upright,
-                                  (0.27, 0.31), (0.27, 0.31), (0.34, 0.40),
-                                  "tinplate", (0.0, 0.3), True,
-                                  "cylinder_upright", label="20 L pail can"),
-    "fire_extinguisher": ObjectSpec("fire_extinguisher", _mask_cylinder_lying,
-                                    (0.44, 0.49), (0.13, 0.15), (0.13, 0.15),
-                                    "metal", (0.0, 0.4), False, "cylinder",
-                                    label="fire extinguisher"),
-    # F5 elongated linear rigid (wooden pallet: large footprint, open slats).
-    "pallet_wood":     ObjectSpec("pallet_wood", _mask_lattice(_mask_box),
-                                  (1.05, 1.15), (1.05, 1.15), (0.12, 0.16),
-                                  "wood", (0.0, 0.4), False, "box",
-                                  label="wooden pallet (JIS T11)",
-                                  fill_fraction_range=(0.50, 0.70)),
-    # F6 tapered/conical -- a cone has no broadside.
-    "traffic_cone":    ObjectSpec("traffic_cone", _mask_cone, (0.36, 0.40),
-                                  (0.36, 0.40), (0.60, 0.75), "plastic",
-                                  (0.0, 0.2), True, "cone",
-                                  label="traffic cone"),
-    # F8 tangled compliant mass -- most frequent family in marina surveys.
-    "rope_coil":       ObjectSpec("rope_coil", _mask_coil, (0.30, 0.80),
-                                  (0.30, 0.80), (0.08, 0.18), "rope",
-                                  (0.0, 0.5), True, "box",
-                                  label="rope/mooring-line coil"),
-    "net_ball":        ObjectSpec("net_ball", _mask_coil, (0.50, 1.50),
-                                  (0.40, 1.20), (0.20, 0.50), "rope",
-                                  (0.0, 0.4), False, "box",
-                                  label="net ball / trawl offcut"),
-    # F9 small hard threshold objects.
-    "bottle_glass":    ObjectSpec("bottle_glass", _mask_capsule, (0.30, 0.40),
-                                  (0.09, 0.11), (0.09, 0.11), "glass",
-                                  (0.0, 0.6), False, "cylinder",
-                                  label="glass bottle (isshobin)"),
-    # F4 open-frame / skeletal -- the wireframe failure family.
-    "bicycle":         ObjectSpec("bicycle", _mask_lattice(_mask_box),
-                                  (1.50, 1.80), (0.50, 0.80), (0.35, 0.60),
-                                  "metal", (0.0, 0.3), False, "box",
-                                  label="bicycle (lying)",
-                                  fill_fraction_range=(0.12, 0.25)),
-    "mesh_crate":      ObjectSpec("mesh_crate", _mask_lattice(_mask_box),
-                                  (0.50, 0.56), (0.34, 0.39), (0.28, 0.34),
-                                  "plastic", (0.0, 0.3), False, "box",
-                                  label="50 L mesh container",
-                                  fill_fraction_range=(0.30, 0.50)),
-    "shopping_trolley": ObjectSpec("shopping_trolley", _mask_lattice(_mask_box),
-                                   (0.90, 1.10), (0.55, 0.70), (0.45, 0.70),
-                                   "metal", (0.0, 0.3), False, "box",
-                                   label="shopping trolley (lying)",
-                                   fill_fraction_range=(0.18, 0.35)),
 
     # ---- object set version 2 (2026-11-15, completion round session 02;
     # target_families_and_surrogates.md Version 2): the new classes. Their
@@ -416,15 +318,44 @@ V2_CLASSES = V2_TARGETS + V2_STRUCTURES + V2_CLUTTER
 #: verbatim wherever the author pins them).
 DRY_HEIGHT_M = -0.05
 
-#: Legacy random-composition weights. Deliberately unchanged by the
-#: target-family additions: extending this dict would silently reshuffle
-#: every legacy seed's object draw. New classes enter a world through the
-#: explicit per-class ``objects.classes`` config (the world builder's path).
+#: Legacy random-composition weights: what a world YAML WITHOUT an
+#: ``objects.classes`` key draws (the legacy random field). Reduced on
+#: 2026-11-15 (Stage 6 of the completion round, owner's order) to the four
+#: classes of it that the object set version 2 keeps, with their old weights:
+#: a legacy seed draws other objects from then on (the render fixture was
+#: re-baselined once for it). New worlds name their classes
+#: (``objects.classes``, the builder) or are generated (``worldgen.campaign``).
 DEFAULT_COMPOSITION: dict[str, float] = {
-    "tire_car": 1.0, "tire_bicycle": 0.5, "pipe_pvc": 1.0, "bottle_plastic": 1.5,
-    "can": 1.5, "tent_weight": 0.5, "rope": 0.7, "cylinder_metal": 0.8,
-    "concrete_block": 0.8, "brick": 1.0, "chain": 0.6, "anchor": 0.4, "debris": 1.2,
+    "tire_car": 1.0, "concrete_block": 0.8, "chain": 0.6, "debris": 1.2,
 }
+
+#: The classes deleted on 2026-11-15 (object set version 2, owner's order;
+#: ``02_world_builder/cleanup_plan.md``) and what replaces each. A world that
+#: still names one does not load: the error names the class and this hint.
+REMOVED_CLASSES: dict[str, str] = {
+    "tire_bicycle": "tire_car", "pipe_pvc": "pipe_steel", "cylinder_metal": "pipe_steel",
+    "bottle_plastic": "the small_litter seabed layer", "bottle_glass": "the small_litter seabed layer",
+    "can": "the small_litter seabed layer", "tent_weight": "concrete_block", "brick": "concrete_block",
+    "rope": "net_bundle (variant rope_coil) or chain", "rope_coil": "net_bundle (variant rope_coil)",
+    "net_ball": "net_bundle", "anchor": "debris", "crate_plastic": "plastic_box", "tin_18l": "plastic_box",
+    "polytank": "plastic_box", "pail_20l": "drum_200l", "fire_extinguisher": "pipe_steel",
+    "pallet_wood": "debris", "traffic_cone": "none (no cone in the version 2 set)",
+    "bicycle": "trap_pot (open frame) or debris", "mesh_crate": "trap_pot or plastic_box",
+    "shopping_trolley": "trap_pot (open frame) or debris",
+}
+
+
+def check_class(type_name: str, where: str = "") -> None:
+    """Raise, naming the class, when ``type_name`` is not in :data:`CATALOG`
+    (a class deleted on 2026-11-15 also names its replacement)."""
+    if type_name in CATALOG:
+        return
+    pre = f"{where}: " if where else ""
+    if type_name in REMOVED_CLASSES:
+        raise KeyError(f"{pre}object class {type_name!r} was deleted on 2026-11-15 (object set version 2); "
+                       f"use {REMOVED_CLASSES[type_name]}. A world that holds it no longer loads: rebuild it "
+                       "as a new folder with version 2 classes")
+    raise KeyError(f"{pre}unknown object class {type_name!r} (available: {sorted(CATALOG)})")
 
 
 # --------------------------------------------------------------------------
@@ -493,10 +424,7 @@ _SHAPE_TEXT = {
     "_mask_cylinder_lying": "cylinder lying on the seabed",
     "_mask_cylinder_upright": "upright cylinder (flat circular footprint)",
     "_mask_annulus": "ring lying flat (tire), rounded cross-section",
-    "_mask_capsule": "capsule lying on its side (bottle)",
-    "_mask_anchor": "cross/T silhouette (shank + flukes)",
     "_mask_blob": "irregular rounded blob",
-    "_mask_cone": "cone -- radius tapers linearly, no flat face",
     "_mask_coil": "low dome with ring texture (coiled line / tangle)",
 }
 
@@ -510,13 +438,9 @@ def _solid_for(spec: ObjectSpec, o: PlacedObject) -> Solid | None:
         return Solid("cylinder", 0.5 * o.width, o.length, axis=0)
     if name == "_mask_cylinder_upright":
         return Solid("cylinder", 0.5 * o.length, o.proud_height, axis=2)
-    if name == "_mask_capsule":
-        return Solid("capsule", 0.5 * o.width, o.length, axis=0)
     if name == "_mask_annulus":
         return Solid("annulus", 0.5 * o.length, 0.275 * o.length, o.proud_height)
-    if name == "_mask_cone":
-        return Solid("cone", 0.5 * o.length, o.proud_height)
-    return None                       # rope/chain/anchor/blob/coil: 2.5-D only
+    return None                       # chain/blob/coil: 2.5-D only
 
 
 def rest_poses(spec: ObjectSpec) -> tuple:
@@ -870,9 +794,7 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
         c = cfg.classes[type_name]
         if not c.get("enabled", True):
             continue
-        if type_name not in CATALOG:
-            raise KeyError(f"Unknown object class '{type_name}' "
-                           f"(available: {sorted(CATALOG)})")
+        check_class(type_name, "objects.classes")
         spec = CATALOG[type_name]
         amount = c.get("amount", {}) or {}
         a_kind = str(amount.get("kind", "count"))
@@ -940,9 +862,7 @@ def place_objects_v2(grid: GridSpec, cfg: ObjectFieldConfig,
 
     for item in cfg.explicit:
         t = str(item["type"])
-        if t not in CATALOG:
-            raise KeyError(f"Unknown object class '{t}' in objects.explicit "
-                           f"(available: {sorted(CATALOG)})")
+        check_class(t, "objects.explicit")
         spec = CATALOG[t]
         item_params = (item["params"] if isinstance(item.get("params"),
                                                     Mapping) else None)
@@ -1429,9 +1349,7 @@ def make_explicit_instances(type_name: str, x: float, y: float,
     (:func:`placed_to_explicit`), so what the operator previewed at the
     click is exactly what the world will contain.
     """
-    if type_name not in CATALOG:
-        raise KeyError(f"Unknown object class '{type_name}' "
-                       f"(available: {sorted(CATALOG)})")
+    check_class(type_name)
     spec = CATALOG[type_name]
     materials = materials if materials is not None else MaterialLibrary()
     cfg = ObjectFieldConfig()

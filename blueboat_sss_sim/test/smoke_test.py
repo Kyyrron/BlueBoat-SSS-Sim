@@ -401,15 +401,20 @@ def main() -> None:
     import yaml as _y1
 
     def legacy_world(world_yaml: Path, out_dir: Path,
-                     seed: int = 7, density: float = 60.0) -> SceneModel:
-        """The retired default mission bundle's world half, reproduced
-        bit-identically: same world config, the mission's density override,
-        seed 7. Verified equal to the last generate_mission output when the
-        fixture was frozen."""
+                     seed: int = 7, density: float = 60.0,
+                     no_objects: bool = False) -> SceneModel:
+        """The retired default mission bundle's world half: same world
+        config, the mission's density override, seed 7. Its objects come from
+        the legacy random composition, which since 2026-11-15 draws the four
+        classes of it that the object set version 2 kept (``DEFAULT_COMPOSITION``):
+        the terrain is the retired bundle's, the objects are not.
+        ``no_objects``: the same world with no object at all."""
         with open(world_yaml, "r", encoding="utf-8") as f1:
             raw1 = _y1.safe_load(f1) or {}
         raw1.setdefault("world", {})["seed"] = seed
         raw1.setdefault("objects", {})["density_per_hectare"] = density
+        if no_objects:
+            raw1["objects"]["classes"] = {}
         sc1 = generate_scene(WorldConfig.from_dict(raw1), raw_config=raw1)
         sc1.save(out_dir)
         write_world_sdf(sc1, out_dir)
@@ -1025,14 +1030,15 @@ def main() -> None:
              + (np.arange(acq.num_results) + 0.5) * acq.bin_size_m)
     far = (bin_r > 6.0) & (bin_r < 14.5)   # past the FBR, inside the swath
 
-    def _pings(m, n, seed=None):
-        """Render `n` pings along the mission trajectory under model config `m`.
+    def _pings(m, n, seed=None, sc=None):
+        """Render `n` pings along the mission trajectory under model config `m`
+        (over the legacy world, or the scene `sc`).
 
         ``seed=None`` leaves the noiseless field, whose ensemble mean is the
         per-range statistic a fit compares; an int applies the shipped speckle
         so the reduction's own repeatability can be measured.
         """
-        rr = GeometricRenderer(scene, acq, m)
+        rr = GeometricRenderer(scene if sc is None else sc, acq, m)
         rg = np.random.default_rng(seed) if seed is not None else None
         out = []
         for k in range(n):
@@ -1095,12 +1101,19 @@ def main() -> None:
     # the tvg-0 law before that, and tvg 0.80 vs lambert 1.945 before *that*.
     # The ridge itself is what made the single-altitude fit return a confident
     # wrong answer, and why the current constants were fitted on two.
+    # On the seabed alone (the legacy world with no object, 2026-11-15): the
+    # claim is about the range law on a flat seabed. Objects add a lambert-
+    # dependent part of their own: with the legacy random field the pair
+    # differed by 0.43 dB once the class deletion changed that field, by
+    # 0.17 dB without objects (02_world_builder/stage6/legacy_checks_probe.py).
+    _sc2e = legacy_world(PKG_ROOT / "config" / "default_world.yaml",
+                         OUT / "legacy_world_no_objects", no_objects=True)
     c_tvg = _mean_db(_pings(dataclasses.replace(model,
-                                                tvg_compensation=0.20), 150))
+                                                tvg_compensation=0.20), 150, sc=_sc2e))
     c_lam = _mean_db(_pings(dataclasses.replace(model,
-                                                lambert_exponent=1.45), 150))
+                                                lambert_exponent=1.45), 150, sc=_sc2e))
     c_off = _mean_db(_pings(dataclasses.replace(model,
-                                                lambert_exponent=2.6), 150))
+                                                lambert_exponent=2.6), 150, sc=_sc2e))
 
     def _p2p(a, b):
         """Peak-to-peak disagreement of two per-range curves, ignoring a
@@ -1115,7 +1128,7 @@ def main() -> None:
     # in principle.
     check("tvg_compensation/lambert_exponent confounded at one altitude",
           p_match <= 0.4 and p_off > 1.0,
-          f"tvg 0.20 vs lambert 1.45: {p_match:.3f} dB p-p over 6.0-14.5 m "
+          f"seabed only: tvg 0.20 vs lambert 1.45: {p_match:.3f} dB p-p over 6.0-14.5 m "
           f"(under the 0.67 dB reduction floor); vs a mismatched lambert 2.6: "
           f"{p_off:.2f} dB p-p (clearly separable)")
 
@@ -1401,8 +1414,12 @@ def main() -> None:
                     probe_alt.append(rr.ping.altitude_m)
         return np.array(alts), np.array(probe), np.array(probe_alt), shad
 
-    alt_sh, probe_sh, palt_sh, shad_sh = _sweep(scene_sh)
-    alt_4m, _, _, shad_4m = _sweep(scene)
+    # n = 1600 (80 s of survey) since 2026-11-15: the legacy random field
+    # changed with the class deletion, and 40 s of it showed only two objects
+    # with a resolved shadow at both altitudes (02_world_builder/stage6/
+    # legacy_checks_probe.py); the probe pings are the first 200, unchanged.
+    alt_sh, probe_sh, palt_sh, shad_sh = _sweep(scene_sh, n=1600)
+    alt_4m, _, _, shad_4m = _sweep(scene, n=1600)
 
     # NC #4: the sidelobe floor, near-nadir specular lobe, separately-speckled
     # specular component and pulse smearing were all tuned at ~4 m altitude.
@@ -2787,7 +2804,7 @@ def main() -> None:
         PlacedObject(object_id=1, type="tire_car", x=0.0, y=6.0, yaw=0.0,
                      length=0.8, width=0.8, proud_height=0.35, burial=0.0,
                      reflectivity=0.8),
-        PlacedObject(object_id=2, type="block_concrete", x=4.0, y=8.0,
+        PlacedObject(object_id=2, type="concrete_block", x=4.0, y=8.0,
                      yaw=0.0, length=0.6, width=0.6, proud_height=0.4,
                      burial=0.0, reflectivity=0.85),
     ]
@@ -2823,7 +2840,7 @@ def main() -> None:
     # The published JSON schema stays additive: a consumer written before
     # ghosts existed reads the stream unchanged, and one written after
     # recovers both new fields.
-    legacy_payload = {"side": "port", "object_id": 3, "type": "can",
+    legacy_payload = {"side": "port", "object_id": 3, "type": "tire_car",
                       "slant_range_m": 5.0, "extent_bins": 4.0,
                       "shadow_bins": 9.0, "visible": True, "ping_number": 12}
     new_payload = dict(legacy_payload, ghost=True, via="wall:quay_north")
@@ -3603,21 +3620,18 @@ def main() -> None:
     print("[8] objects v2: new families, clustering, fill-fraction, limits")
     from blueboat_sss_sim.worldgen.objects import (CATALOG,  # noqa: E402
                                                    DEFAULT_COMPOSITION,
+                                                   REMOVED_CLASSES,
+                                                   V2_CLASSES,
                                                    ObjectFieldConfig,
                                                    place_objects,
                                                    rasterize_objects)
 
-    new_types = ["crate_plastic", "tin_18l", "polytank", "drum_200l",
-                 "pail_20l", "fire_extinguisher", "pallet_wood",
-                 "traffic_cone", "rope_coil", "net_ball", "bottle_glass",
-                 "bicycle", "mesh_crate", "shopping_trolley",
-                 # 2026-09-18: the field target itself, and the harbour
-                 # furniture a pontoon line is actually held by
-                 "plastic_box", "mooring_pile"]
-    # 33 since 2026-11-15: the 29 classes + the four new ones of the object set
-    # version 2 (trap_pot, pipe_steel, net_bundle, mooring_block; section [20])
-    check("all target-family classes registered (33 total)",
-          all(t in CATALOG for t in new_types) and len(CATALOG) == 33,
+    # Since 2026-11-15 the catalogue IS the object set version 2 (Stage 6 of
+    # the completion round, owner's order): 11 classes, the 22 others deleted.
+    check("the catalogue is the object set version 2: 11 classes, none of the 22 "
+          "deleted ones",
+          set(CATALOG) == set(V2_CLASSES) and len(CATALOG) == 11
+          and len(REMOVED_CLASSES) == 22 and not set(REMOVED_CLASSES) & set(CATALOG),
           f"{len(CATALOG)} classes")
     box8 = CATALOG["plastic_box"]
     check("the field target is a class of its own: the NAFCO box's exact "
@@ -3630,11 +3644,10 @@ def main() -> None:
                   for m in _MatLib().names if m != "pp_shell"),
           f"{box8.display_label}, rho {_MatLib().get('pp_shell').reflectivity}, "
           f"two-way transmission {_MatLib().get('pp_shell').transmission}")
-    check("legacy composition untouched by the additions",
-          set(DEFAULT_COMPOSITION) == {
-              "tire_car", "tire_bicycle", "pipe_pvc", "bottle_plastic", "can",
-              "tent_weight", "rope", "cylinder_metal", "concrete_block",
-              "brick", "chain", "anchor", "debris"})
+    check("legacy composition: the four kept classes it named, with their old "
+          "weights (reduced on 2026-11-15)",
+          DEFAULT_COMPOSITION == {"tire_car": 1.0, "concrete_block": 0.8,
+                                  "chain": 0.6, "debris": 1.2})
 
     # The seabed table's contrasts, and the literature-anchored override that
     # widens them (2026-09-18, P6-16): the shipped values are judgement and
@@ -3666,17 +3679,17 @@ def main() -> None:
         "min_separation_m": 1.0,
         "classes": {
             "drum_200l": {"amount": {"kind": "count", "value": 6}},
-            "mesh_crate": {"amount": {"kind": "count", "value": 5},
-                           "size": {"kind": "gauss", "mean": 1.0,
-                                    "sigma": 0.05}},
-            "traffic_cone": {"amount": {"kind": "count", "value": 4}},
-            "rope_coil": {"amount": {"kind": "count", "value": 4},
-                          "burial": {"kind": "uniform", "lo": 0.0, "hi": 0.2}},
-            "bottle_glass": {"amount": {"kind": "density", "value": 12.5}},
+            "trap_pot": {"amount": {"kind": "count", "value": 5},
+                         "size": {"kind": "gauss", "mean": 1.0,
+                                  "sigma": 0.05}},
+            "tire_car": {"amount": {"kind": "count", "value": 4}},
+            "net_bundle": {"amount": {"kind": "count", "value": 4},
+                           "burial": {"kind": "uniform", "lo": 0.0, "hi": 0.2}},
+            "pipe_steel": {"amount": {"kind": "density", "value": 12.5}},
         },
         "explicit": [
-            {"type": "crate_plastic", "x": 5.0, "y": 5.0, "yaw": 0.3},
-            {"type": "mesh_crate", "x": -5.0, "y": 5.0, "length": 0.5,
+            {"type": "plastic_box", "x": 5.0, "y": 5.0, "yaw": 0.3},
+            {"type": "trap_pot", "x": -5.0, "y": 5.0, "length": 0.5,
              "width": 0.36, "proud_height": 0.3, "fill_fraction": 0.35,
              "burial": 0.0},
         ]})
@@ -3714,23 +3727,23 @@ def main() -> None:
     by_type = {}
     for o in objs1:
         by_type[o.type] = by_type.get(o.type, 0) + 1
-    # density 12.5/ha on the 60x40 m grid (0.24 ha) -> 3 bottles.
+    # density 12.5/ha on the 60x40 m grid (0.24 ha) -> 3 pipes.
     check("counts and densities honoured per class",
-          by_type.get("drum_200l") == 6 and by_type.get("mesh_crate") == 6
-          and by_type.get("traffic_cone") == 4
-          and by_type.get("rope_coil") == 4
-          and by_type.get("bottle_glass") == 3
-          and by_type.get("crate_plastic") == 1, f"{by_type}")
+          by_type.get("drum_200l") == 6 and by_type.get("trap_pot") == 6
+          and by_type.get("tire_car") == 4
+          and by_type.get("net_bundle") == 4
+          and by_type.get("pipe_steel") == 3
+          and by_type.get("plastic_box") == 1, f"{by_type}")
     exp = objs1[-1]
     check("explicit instance placed verbatim (matched-pair capability)",
-          exp.type == "mesh_crate" and exp.x == -5.0 and exp.y == 5.0
+          exp.type == "trap_pot" and exp.x == -5.0 and exp.y == 5.0
           and exp.length == 0.5 and exp.fill_fraction == 0.35
           and exp.burial == 0.0)
     check("burial distribution honoured",
-          all(o.burial <= 0.2 for o in objs1 if o.type == "rope_coil"))
+          all(o.burial <= 0.2 for o in objs1 if o.type == "net_bundle"))
     check("open-frame classes draw a fill fraction, solid stay 1.0",
-          all(0.30 <= o.fill_fraction <= 0.50 for o in objs1
-              if o.type == "mesh_crate" and o is not exp)
+          all(0.06 <= o.fill_fraction <= 0.08 for o in objs1
+              if o.type == "trap_pot" and o is not exp)
           and all(o.fill_fraction == 1.0 for o in objs1
                   if o.type == "drum_200l"))
 
@@ -3764,9 +3777,9 @@ def main() -> None:
         rasterize_objects([obj], g_tiny, h, r)
         return h
 
-    o_solid = PlacedObject(0, "crate_plastic", 0.0, 0.0, 0.0, 0.53, 0.37,
+    o_solid = PlacedObject(0, "plastic_box", 0.0, 0.0, 0.0, 0.53, 0.37,
                            0.31, 0.0, 0.7, "plastic")
-    o_mesh = PlacedObject(0, "mesh_crate", 0.0, 0.0, 0.0, 0.53, 0.37,
+    o_mesh = PlacedObject(0, "trap_pot", 0.0, 0.0, 0.0, 0.53, 0.37,
                           0.31, 0.0, 0.7, "plastic", fill_fraction=0.35)
     h_solid, h_mesh = _stamp(o_solid), _stamp(o_mesh)
     ratio = float(h_mesh.sum() / h_solid.sum())
@@ -3840,10 +3853,10 @@ def main() -> None:
     # physics and not a dilution -- an open frame of many members is an
     # incoherent aggregate and outshines it.
     e_solid = _echo_window(_flat_scene(
-        [PlacedObject(0, "crate_plastic", 10.0, 6.0, 0.0, 0.53, 0.37, 0.31,
+        [PlacedObject(0, "plastic_box", 10.0, 6.0, 0.0, 0.53, 0.37, 0.31,
                       0.0, 0.7, "generic")]))
     e_mesh = _echo_window(_flat_scene(
-        [PlacedObject(0, "mesh_crate", 10.0, 6.0, 0.0, 0.53, 0.37, 0.31,
+        [PlacedObject(0, "trap_pot", 10.0, 6.0, 0.0, 0.53, 0.37, 0.31,
                       0.0, 0.7, "generic", fill_fraction=0.35)]))
     check("open-frame echo is diluted vs its solid twin (rendered)",
           e_mesh < 0.9 * e_solid and e_mesh > 0.05 * e_solid,
@@ -4011,9 +4024,9 @@ def main() -> None:
         return None
     _blk = PlacedObject(0, "concrete_block", 10.0, 6.0, 0.0, 0.60, 0.40, 0.35,
                         0.0, 0.8, "concrete")
-    _can = PlacedObject(0, "can", 10.0, 6.0, 0.0, 0.14, 0.08, 0.05, 0.0, 0.9,
+    _can = PlacedObject(0, "pipe_steel", 10.0, 6.0, 0.0, 0.14, 0.08, 0.05, 0.0, 0.9,
                         "metal")
-    _hidden = PlacedObject(1, "brick", 10.0, 6.6, 0.0, 0.22, 0.10, 0.06, 0.0,
+    _hidden = PlacedObject(1, "concrete_block", 10.0, 6.6, 0.0, 0.22, 0.10, 0.06, 0.0,
                            0.7, "brickclay")
     l_blk, l_can = _label([_blk]), _label([_can])
     l_hid = _label([_blk, _hidden], oid=1)
@@ -4028,8 +4041,11 @@ def main() -> None:
           f"{l_can.shadow_bins:.1f}, brick behind the block "
           f"{l_hid.shadow_bins:.1f} (visible {l_hid.visible})")
 
+    # every class of the object set version 2 but the mooring block (a 2-4 m
+    # structure, not litter: in this 3 m test basin it would BE the bottom)
     mixed = ObjectFieldConfig.from_dict({"classes": {
-        t: {"amount": {"kind": "count", "value": 2}} for t in new_types}})
+        t: {"amount": {"kind": "count", "value": 2}} for t in V2_CLASSES
+        if t != "mooring_block"}})
     sc_mix = _flat_scene(place_objects(
         GridSpec(0.0, -6.0, 0.05, 401, 241), mixed, lib8,
         np.random.default_rng(4)))
@@ -4178,10 +4194,10 @@ def main() -> None:
     # same uniform variate, so the later class does not move.
     base_b = {"drum_200l": {"amount": {"kind": "count", "value": 6}}}
     o_ab_rand = place_objects(grid8, ObjectFieldConfig.from_dict({"classes": {
-        "bottle_glass": {"amount": {"kind": "count", "value": 5}},
+        "debris": {"amount": {"kind": "count", "value": 5}},
         **base_b}}), lib8, np.random.default_rng(12))
     o_ab_fix = place_objects(grid8, ObjectFieldConfig.from_dict({"classes": {
-        "bottle_glass": {"amount": {"kind": "count", "value": 5},
+        "debris": {"amount": {"kind": "count", "value": 5},
                          "orientation": {"mode": "fixed",
                                          "heading_deg": -45.0}},
         **base_b}}), lib8, np.random.default_rng(12))
@@ -4191,7 +4207,7 @@ def main() -> None:
           _same_objs(drums_r, drums_f)
           and [(o.x, o.y) for o in o_ab_rand] == [(o.x, o.y) for o in o_ab_fix]
           and all(abs(o.yaw + math.radians(45.0)) < 1e-12
-                  for o in o_ab_fix if o.type == "bottle_glass"),
+                  for o in o_ab_fix if o.type == "debris"),
           f"{len(drums_f)} drums identical; positions identical")
 
     # (b) path_relative on a straight +x path, offset 90 -> yaw = pi/2.
@@ -4213,7 +4229,7 @@ def main() -> None:
                   - math.pi / 2) < 1e-12)
     o_hdg = place_objects(grid8, ObjectFieldConfig.from_dict({
         "path_heading_deg": 45.0,
-        "classes": {"brick": {
+        "classes": {"concrete_block": {
             "amount": {"kind": "count", "value": 3},
             "orientation": {"mode": "path_relative"}}}}),
         lib8, np.random.default_rng(14))
@@ -4222,7 +4238,7 @@ def main() -> None:
 
     # (d) jitter > 0: a gaussian spread of the right magnitude.
     o_jit = place_objects(grid8, ObjectFieldConfig.from_dict({"classes": {
-        "can": {"amount": {"kind": "count", "value": 200},
+        "pipe_steel": {"amount": {"kind": "count", "value": 200},
                 "orientation": {"mode": "fixed", "heading_deg": 0.0,
                                 "jitter_deg": 20.0}}}}),
         lib8, np.random.default_rng(15))
@@ -4243,8 +4259,8 @@ def main() -> None:
             pass
     try:
         place_objects(grid8, ObjectFieldConfig.from_dict({"classes": {
-            "brick": {"amount": {"kind": "count", "value": 1},
-                      "orientation": {"mode": "path_relative"}}}}),
+            "concrete_block": {"amount": {"kind": "count", "value": 1},
+                               "orientation": {"mode": "path_relative"}}}}),
             lib8, np.random.default_rng(1))
         bad.append("no-path")
     except ValueError as e:
@@ -4269,10 +4285,10 @@ def main() -> None:
     st8 = BuilderState(path=ps8, limits_rect={"x_min": 0.0, "y_min": 0.0,
                                               "x_max": 40.0, "y_max": 20.0},
                        objects=ObjectsState(seed=2, classes={
-                           "brick": {"amount": {"kind": "count",
-                                                "value": 2}}}))
+                           "concrete_block": {"amount": {"kind": "count",
+                                                         "value": 2}}}))
     raw_plain = state_to_world_config(st8)
-    st8.objects.classes["brick"]["orientation"] = {"mode": "path_relative",
+    st8.objects.classes["concrete_block"]["orientation"] = {"mode": "path_relative",
                                                    "heading_deg": 90.0}
     raw_rel = state_to_world_config(st8)
     check("state_to_world_config adds path_xy (world frame) only for "
@@ -4327,10 +4343,13 @@ def main() -> None:
     _terr = 0.25 * _XX - 3.0
     _worst = 0.0
     _n = 0
-    for _spec_name in ("drum_200l", "concrete_block", "traffic_cone",
-                       "tire_car", "pipe_pvc", "bottle_glass"):
-        _o = typical_instance(_CATALOG_V3[_spec_name])
-        _sol = _CATALOG_V3[_spec_name].solid(_o)
+    # the kept classes' primitives, and the cone and capsule primitives of
+    # worldgen/solids.py, which no class uses since 2026-11-15
+    _sols = [_CATALOG_V3[_n].solid(typical_instance(_CATALOG_V3[_n]))
+             for _n in ("drum_200l", "concrete_block", "tire_car", "pipe_steel",
+                        "plastic_box")]
+    _sols += [_Solid("cone", 0.19, 0.67), _Solid("capsule", 0.05, 0.35, axis=0)]
+    for _sol in _sols:
         for _p in _stable(_sol):
             _b, _pr, _cz, _Rw = _settle(_sol, _rpy(_p.roll, _p.pitch, 0.7),
                                         _XX, _YY, _terr)
@@ -4431,7 +4450,10 @@ def main() -> None:
                          params={"basin_depth": 3.0}),
         objects=ObjectsState(seed=7, classes={
             "drum_200l": {"amount": {"kind": "count", "value": 3}},
-            "mesh_crate": {"amount": {"kind": "count", "value": 2}}},
+            # a lattice in a SMOOTH material (as the deleted mesh crate was): it
+            # stays on the raster path and needs the roughness raster below
+            "trap_pot": {"amount": {"kind": "count", "value": 2},
+                         "material": "plastic"}},
             explicit=[{"type": "tire_car", "x": 5.0, "y": 5.0}]),
         world_name="smoke_world")
     wroot = OUT / "worlds"
@@ -4634,7 +4656,7 @@ def main() -> None:
                      "x_max": 8.0, "y_max": 8.0},
         depth=DepthState(mode="file", file=str(csv_path)),
         objects=ObjectsState(seed=3, classes={
-            "traffic_cone": {"amount": {"kind": "count", "value": 2}}}),
+            "drum_200l": {"amount": {"kind": "count", "value": 2}}}),
         world_name="csv_world")
     wdir4 = build_world_folder(st_file, worlds_root=wroot)
     st_file_back = load_builder_state(wdir4)
@@ -6975,8 +6997,8 @@ def main() -> None:
                                       "jitter_deg": 0.0,
                                       "rest": {"enabled": True,
                                                "randomness": 1.0}}},
-        "mesh_crate": {"amount": {"kind": "count", "value": 3}},
-        "rope": {"amount": {"kind": "count", "value": 2}}}
+        "trap_pot": {"amount": {"kind": "count", "value": 3}},
+        "chain": {"amount": {"kind": "count", "value": 2}}}
     st13 = _state13(seed=7, classes=classes13)
     scene13, _pre13, placed13 = _run13(st13)
     ox13, oy13 = st13.spawn_origin()
@@ -7043,14 +7065,14 @@ def main() -> None:
           engine_explicit(st13) == []
           and [i["type"] for i in engine_explicit(_dc13.replace(
               st13p, objects=_OS13(seed=7, placed=pinned13,
-                                   explicit=[{"type": "anchor", "x": 1.0,
+                                   explicit=[{"type": "debris", "x": 1.0,
                                               "y": 2.0}])))]
-          == [i["type"] for i in pinned13] + ["anchor"])
+          == [i["type"] for i in pinned13] + ["debris"])
 
     # (e) both lists re-base by the spawn origin, exactly like the walls.
     st13r = _state13(seed=7, placed=[{"type": "drum_200l", "x": 210.0,
                                       "y": 110.0, "yaw": 0.0}],
-                     explicit=[{"type": "anchor", "x": 220.0, "y": 120.0}])
+                     explicit=[{"type": "debris", "x": 220.0, "y": 120.0}])
     ex13r = _swc13(st13r)["objects"]["explicit"]
     check("pinned and hand-placed alike re-base into the world frame",
           (ex13r[0]["x"], ex13r[0]["y"]) == (10.0, 10.0)
@@ -7096,10 +7118,10 @@ def main() -> None:
 
     # (h) the click stamp: count, spread, pinned values, determinism.
     rng13 = np.random.default_rng(11)
-    one13 = make_explicit_instances("traffic_cone", 5.0, 7.0, rng13)
+    one13 = make_explicit_instances("tire_car", 5.0, 7.0, rng13)
     check("one click places one object exactly on the point",
           len(one13) == 1 and (one13[0]["x"], one13[0]["y"]) == (5.0, 7.0)
-          and one13[0]["type"] == "traffic_cone")
+          and one13[0]["type"] == "tire_car")
     clus13 = make_explicit_instances("drum_200l", 5.0, 7.0,
                                      np.random.default_rng(11),
                                      count=8, sigma_m=2.0)
@@ -7117,7 +7139,7 @@ def main() -> None:
     check("every stamped value is pinned, so the entry is stream-independent",
           all(pinned_keys13 <= set(i) and "material" in i for i in clus13))
     heading13 = make_explicit_instances(
-        "pipe_pvc", 0.0, 0.0, np.random.default_rng(3), count=3,
+        "pipe_steel", 0.0, 0.0, np.random.default_rng(3), count=3,
         orientation={"mode": "fixed", "heading_deg": 30.0, "jitter_deg": 0.0})
     check("a fixed heading is honoured by every object of the click",
           all(abs(np.degrees(i["yaw"]) - 30.0) < 1e-9 for i in heading13))
@@ -7132,22 +7154,30 @@ def main() -> None:
           and not any("roll_deg" in i or "rest" in i for i in flat13),
           "writing a tilt is what sends an instance down the solid path")
     check("a size distribution scales the class's regular size",
-          all(0.55 * _CAT13["polytank"].length_range[0]
+          all(0.55 * _CAT13["concrete_block"].length_range[0]
               <= i["length"]
-              <= 1.45 * _CAT13["polytank"].length_range[1]
+              <= 1.45 * _CAT13["concrete_block"].length_range[1]
               for i in make_explicit_instances(
-                  "polytank", 0.0, 0.0, np.random.default_rng(5), count=6,
+                  "concrete_block", 0.0, 0.0, np.random.default_rng(5), count=6,
                   size={"kind": "uniform", "lo": 0.6, "hi": 1.4})))
     check("an unknown class is refused by name",
           _raises(lambda: make_explicit_instances(
               "not_a_class", 0.0, 0.0, np.random.default_rng(0)), KeyError))
+    try:
+        make_explicit_instances("pipe_pvc", 0.0, 0.0, np.random.default_rng(0))
+        _del13 = ""
+    except KeyError as _e13:
+        _del13 = str(_e13)
+    check("a class deleted on 2026-11-15 is refused by name, with its replacement",
+          "pipe_pvc" in _del13 and "deleted on 2026-11-15" in _del13 and "pipe_steel" in _del13,
+          _del13[:120])
     check("path_relative without a path is refused with an actionable message",
           _raises(lambda: make_explicit_instances(
-              "pipe_pvc", 0.0, 0.0, np.random.default_rng(0),
+              "pipe_steel", 0.0, 0.0, np.random.default_rng(0),
               orientation={"mode": "path_relative", "heading_deg": 90.0,
                            "jitter_deg": 0.0}), ValueError))
     stamped13 = make_explicit_instances(
-        "mesh_crate", 0.0, 0.0, np.random.default_rng(6), count=2,
+        "trap_pot", 0.0, 0.0, np.random.default_rng(6), count=2,
         params={"fill_fraction": 0.42}, material="tinplate")
     check("class params and the material override reach the entry",
           all(i["fill_fraction"] == 0.42 and i["material"] == "tinplate"
@@ -7160,7 +7190,7 @@ def main() -> None:
                                                    rest_poses as _rp13,
                                                    typical_instance as _ti13)
     st13m = _state13(seed=7, explicit=[
-        {"type": "can", "x": 210.0, "y": 110.0, "material": "concrete"},
+        {"type": "pipe_steel", "x": 210.0, "y": 110.0, "material": "concrete"},
         {"type": "concrete_block", "x": 215.0, "y": 110.0,
          "material": "metal"}])
     scene13m, _pre13m, _ = _run13(st13m)
@@ -7797,13 +7827,20 @@ def _section_object_physics() -> None:
     # mirror share survives even at normal incidence. A fired brick (1 mm)
     # is on the smooth side of it: rough at normal incidence, but half its
     # echo is still coherent 80 deg off its normal -- the physics decides.
-    facet_yes = ["plastic_box", "drum_200l", "can", "bottle_plastic",
-                 "crate_plastic", "traffic_cone", "fire_extinguisher",
-                 "brick"]
-    facet_no = ["tire_car", "concrete_block", "tent_weight", "mesh_crate",
-                "bicycle", "rope", "chain", "anchor", "debris", "net_ball"]
-    wrong = ([t for t in facet_yes if not is_facet_object(_inst(t))]
-             + [t for t in facet_no if is_facet_object(_inst(t))])
+    # (class, material): since 2026-11-15 the classes of the object set
+    # version 2; the rule is the material's, so a kept class in a smooth
+    # material (brick, moulded plastic, sheet metal) stands for the deleted
+    # classes that carried it
+    facet_yes = [("plastic_box", None), ("drum_200l", None), ("pipe_steel", None),
+                 ("concrete_block", "brickclay"), ("concrete_block", "plastic"),
+                 ("pipe_steel", "metal"), ("drum_200l", "tinplate")]
+    facet_no = [("tire_car", None), ("concrete_block", None), ("trap_pot", None),
+                ("chain", None), ("debris", None), ("net_bundle", None),
+                ("mooring_block", None), ("mooring_pile", None), ("pipe_steel", "steel_rough"),
+                ("concrete_block", "rope")]
+    _ik = lambda t, m: _inst(t, **({"material": m} if m else {}))   # noqa: E731
+    wrong = ([f"{t}/{m}" for t, m in facet_yes if not is_facet_object(_ik(t, m))]
+             + [f"{t}/{m}" for t, m in facet_no if is_facet_object(_ik(t, m))])
     check("the rule is material physics: smooth solids go to the facet layer; "
           "rough materials (tread, concrete) and aggregates (lattices, rope, "
           "chain, debris) stay on the raster's Lambert path, as does a fully "
@@ -7825,7 +7862,7 @@ def _section_object_physics() -> None:
         box = _inst("plastic_box")
         box.length, box.width, box.proud_height = 0.45, 0.27, 0.20
         box.params = {"wall_mm": 2.0, "flooded": True}
-        wt = _inst("pail_20l", material="pe_cement")
+        wt = _inst("drum_200l", material="pe_cement")
         wt.length = wt.width = 0.228
         wt.proud_height = 0.094
         wt.params = {"nested": True} if flag else {}
@@ -8108,7 +8145,7 @@ def _section_consistency() -> None:
                           outside=outside)
 
     # ---- a smooth object behind a wall: image and label agree ------------
-    cyl = PlacedObject(0, "cylinder_metal", 0.0, 9.0, 0.0, 0.6, 0.2, 0.2,
+    cyl = PlacedObject(0, "pipe_steel", 0.0, 9.0, 0.0, 0.6, 0.2, 0.2,
                        0.0, 0.9, "metal", roughness_m=5e-5)
     quay = Wall(name="q", x0=-10.0, y0=6.0, x1=10.0, y1=6.0, top_z=1.0,
                 reflectivity=0.65)
@@ -8221,18 +8258,18 @@ def _section_consistency() -> None:
                    ny=401)
 
     def _place(explicit):
-        oc = ObjectFieldConfig.from_dict({"classes": {"can": {"amount": {
+        oc = ObjectFieldConfig.from_dict({"classes": {"pipe_steel": {"amount": {
             "kind": "count", "value": 3}}},
                                           "explicit": explicit})
         return place_objects_v2(g15, oc, lib15, np.random.default_rng(15))
-    base = _place([{"type": "can", "x": 1.0, "y": 1.0},
-                   {"type": "brick", "x": 4.0, "y": 1.0}])
-    over = _place([{"type": "can", "x": 1.0, "y": 1.0,
+    base = _place([{"type": "pipe_steel", "x": 1.0, "y": 1.0},
+                   {"type": "concrete_block", "x": 4.0, "y": 1.0}])
+    over = _place([{"type": "pipe_steel", "x": 1.0, "y": 1.0,
                     "material": "concrete"},
-                   {"type": "brick", "x": 4.0, "y": 1.0}])
+                   {"type": "concrete_block", "x": 4.0, "y": 1.0}])
     sized = _place([{"type": "plastic_box", "x": 1.0, "y": 1.0,
                      "params": {"length_m": 1.25}}])
-    conc, metal = lib15.get("concrete"), lib15.get("metal")
+    conc, metal = lib15.get("concrete"), lib15.get("steel_shell")      # pipe_steel's own material
     c0, c1 = base[3], over[3]
 
     def _band(m, v):
@@ -8247,7 +8284,7 @@ def _section_consistency() -> None:
           and all(dataclasses.asdict(a) == dataclasses.asdict(b)
                   for a, b in zip(base[:3] + base[4:], over[:3] + over[4:]))
           and abs(sized[3].length - 1.25) < 1e-12,
-          f"can metal {c0.reflectivity:.3f} -> concrete "
+          f"pipe steel {c0.reflectivity:.3f} -> concrete "
           f"{c1.reflectivity:.3f}; plastic_box length {sized[3].length:.3f} m")
 
 
@@ -8920,7 +8957,7 @@ def _section_calibration() -> None:
     _m18 = _rc18.shared_stage_model(_SMC18(), 126.6)
     _acq18 = _AP18()
     _a18, _hg18 = 10.0, 0.40
-    _ob18 = [PlacedObject(object_id=4, type="crate_plastic", x=float(_m18.mount_x_m),
+    _ob18 = [PlacedObject(object_id=4, type="plastic_box", x=float(_m18.mount_x_m),
                           y=float(_m18.mount_y_abs_m) + _a18, yaw=0.0, length=0.5,
                           width=0.4, proud_height=_hg18, burial=0.0, reflectivity=0.4,
                           material="plastic")]
@@ -8960,9 +8997,9 @@ def _section_calibration() -> None:
     _blk18 = PlacedObject(object_id=1, type="concrete_block", x=0.0, y=5.0, yaw=0.3,
                           length=0.6, width=0.4, proud_height=0.3, burial=0.25,
                           reflectivity=0.8, material="concrete")
-    _pal18 = PlacedObject(object_id=2, type="pallet_wood", x=0.0, y=8.0, yaw=0.0,
-                          length=1.1, width=1.1, proud_height=0.14, burial=0.0,
-                          reflectivity=0.35, material="wood", fill_fraction=0.6)
+    _pal18 = PlacedObject(object_id=2, type="drum_200l", x=0.0, y=8.0, yaw=0.0,
+                          length=0.585, width=0.585, proud_height=0.89, burial=0.0,
+                          reflectivity=0.95, material="steel_shell", params={"spec": 2})
     (_sb18,) = _om18.object_parts(_blk18, _flat18, _ML18(), 451127.0)
     _vb18, _fb18 = _om18.part_mesh(_sb18)
     _sp18 = _om18.object_parts(_pal18, _flat18, _ML18(), 451127.0)
@@ -8971,16 +9008,17 @@ def _section_calibration() -> None:
     _ms18 = _sm18.build_scene_mesh(_sc18, None, terrain=_terr18, objects_mode="solid")
     _mr18 = _sm18.build_scene_mesh(_sc18, None)
     check("ray-cast objects.mode solid: a rough block is its 12-triangle box with its top at "
-          "terrain + effective height; a pallet is 13 boards (wood, a smooth material: they "
-          "mirror too) standing 0.14 m; the sheet becomes the terrain and a scene without "
-          "depth.npz stays raster",
+          "terrain + effective height; a version 2 drum is its 5 parts (body, two hoops, two "
+          "chimes; a steel shell, smooth: they mirror) standing 0.89 m; the sheet becomes the "
+          "terrain and a scene without depth.npz stays raster",
           _fb18.shape[0] == 12 and not _sb18.coherent
           and abs(float(_vb18[:, 2].max()) + 7.0 - _blk18.effective_height) < 1e-9
-          and len(_sp18) == 13 and all(q.coherent and q.part.solid.kind == "box" for q in _sp18)
-          and abs(float(_zp18.max()) - 0.14) < 1e-9 and abs(float(_zp18.min())) < 1e-9
+          and len(_sp18) == 5
+          and all(q.coherent and q.part.solid.kind in ("cylinder", "annulus") for q in _sp18)
+          and abs(float(_zp18.max()) - 0.89) < 1e-6 and abs(float(_zp18.min())) < 1e-6
           and _ms18.objects_mode == "solid" and _mr18.objects_mode == "raster"
           and float(_ms18.vertices[:_g18.nx * _g18.ny, 2].max()) == -7.0,
-          f"block {_fb18.shape[0]} tris, pallet {len(_sp18)} parts")
+          f"block {_fb18.shape[0]} tris, drum {len(_sp18)} parts, {_zp18.min():.4f}..{_zp18.max():.4f} m")
 
     # ---- Gazebo object heights (worldgen/sdf_writer.py) ----------------------
     import re as _re18
@@ -9208,6 +9246,29 @@ def _section_calibration() -> None:
           all(c in _CAT20 for c in _V2C) and len(_V2C) == 11 and not _bad20
           and _n_parts["trap_pot"] > 100 and _n_parts["net_bundle"] <= _cp20.NET_MAX_STRANDS,
           f"most parts per class {_n_parts}; bad: {_bad20}")
+    # every part of every construction is an outward, closed mesh (a mirrored
+    # frame turned two funnel rings of the wire pot inside out until 2026-11-15)
+    from blueboat_sss_sim.sonar.raycast import object_mesh as _om20, scene_mesh as _sm20
+    _flat20 = lambda x, y: np.full(np.shape(x), -6.0)                    # noqa: E731
+    _var20 = [_po20(0, "trap_pot", "steel_rough", 0.61, 0.61, 0.55, spec=2, variant="us_wire"),
+              _po20(1, "trap_pot", "steel_rough", 0.98, 0.50, 0.42, spec=2, variant="jp_frame",
+                    r6="nominal"),
+              _po20(2, "net_bundle", "fibre", 1.2, 0.9, 0.3, spec=2),
+              _po20(3, "net_bundle", "fibre", 0.6, 0.6, 0.084, spec=2, variant="rope_coil"),
+              _po20(4, "drum_200l", "steel_shell", 0.585, 0.585, 0.89, spec=2, fill=0.3),
+              _po20(5, "tire_car", "rubber", 0.65, 0.65, 0.205, spec=2, r6="high"),
+              _po20(6, "plastic_box", "pp_shell", 0.65, 0.42, 0.28, spec=2, fill=0.25),
+              _po20(7, "concrete_block", "concrete", 0.8, 0.6, 0.4, spec=2, bevel_mm=20),
+              _po20(8, "chain", "steel_rough", 12.0, 0.07, 0.07, spec=2, z0_m=2.0, z1_m=4.0,
+                    sag_m=1.0)]
+    _neg20 = []
+    for _o20 in _var20:
+        for _k20, _q20 in enumerate(_om20.object_parts(_o20, _flat20, _lib20, 451127.0)):
+            _v20, _f20 = _om20.part_mesh(_q20)
+            if not _sm20.mesh_volume(_v20, _f20) > 0.0:
+                _neg20.append(f"{_o20.type}/{_o20.params.get('variant', '')}#{_k20}")
+    check("every part of every version 2 construction is an outward mesh (positive volume)",
+          not _neg20, f"{len(_var20)} constructions; inside out: {_neg20 or 'none'}")
     # ---- opt-in: a kept class without ``spec: 2`` builds exactly as before
     _d_old = _cp20.parts(_po20(0, "drum_200l", "metal", 0.585, 0.585, 0.89))
     _d_new = _cp20.parts(_po20(0, "drum_200l", "steel_shell", 0.585, 0.585, 0.89, spec=2))

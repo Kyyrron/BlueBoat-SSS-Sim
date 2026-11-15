@@ -23,8 +23,13 @@ Read this before touching `worldgen/campaign.py`, `population.py`, `domain.py`, 
 ## Rules that are easy to break
 
 1. **Version 2 parts are opt-in per instance** (`params.spec: 2`) for the seven classes that existed before
-   (`_BUILDERS_V2`). Changing what an instance *without* `spec` builds changes existing worlds and session 01's
-   evidence. New classes (`trap_pot`, `net_bundle`) have one construction.
+   (`_BUILDERS_V2`). The construction an instance *without* `spec` gets is a build path kept on purpose (owner,
+   2026-11-15), not a kept class: changing it changes existing worlds and session 01's evidence. **New worlds always
+   carry `spec: 2`.** New classes (`trap_pot`, `net_bundle`) have one construction.
+1b. **The catalogue is the 11 classes of the set** (since Stage 6, 2026-11-15). A deleted class is refused by name
+   with its replacement (`objects.REMOVED_CLASSES`, `check_class`): by `SceneModel.load`, the ray-cast mesher and
+   the placement. Do not bring a deleted class back to load an old world: rebuild the world as a new folder with
+   version 2 classes (`02_world_builder/worlds_src/build_sea_validation_v2.py` is the pattern).
 2. **Everything generated is pinned**: the population model writes complete `objects.explicit` entries. A new
    parameter read by a builder goes into `objects._CONSTRUCTION_PARAMS`, or a re-pinned entry loses it.
 3. **Random streams**: terrain `[seed, 0]`, objects `[seed, 1]`, layers `[seed, 2, layer]`, population
@@ -44,10 +49,15 @@ Read this before touching `worldgen/campaign.py`, `population.py`, `domain.py`, 
    string): add keys, never rename or retype one. The root interface tables are updated by a change request.
 9. A world folder is immutable: the generator skips an existing (case, seed) and never writes `_1`.
 
-## Known limits (stated in the handoff)
+## Known limits (stated in the handoff; the owner chose no correction, 2026-11-15)
+
+- The presets lower the mean level of the 16–20 m band by 0.45 dB (`nominal`) and 1.08 dB (`high`).
+- The real harbour's mooring blocks as concrete objects are 2–3 dB brighter in the near bands than as terrain.
+- `high`'s lag-3 correlation sits 0.049 over the real maximum; its fine relief (12 mm) is at its floor.
 
 - The simulated speckle at 40 m / 600 bins is more correlated along range than the device's: the dark-region
-  rate of B2 cannot be matched at the FIT acquisition by any seabed parameter.
+  rate cannot be matched at the FIT acquisition by any seabed parameter (amendment A-04: region rates are reported,
+  not judged).
 - A lying drum is never sediment-filled; a pipe is a closed shell; nets do not drape; no moored hulls, no
   vegetation; burial ranges hold for a sheltered basin with normal mud.
 - An Edit re-save of a generated world keeps the scene exactly but not the `campaign` / `conditions` /

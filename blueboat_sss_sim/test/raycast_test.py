@@ -1959,7 +1959,7 @@ def _label_scene(objects, walls=(), depth: float = -7.0, x_half: float = 5.5,
 
 
 def _box(oid: int, x: float, y: float, height: float, length: float = 0.5,
-         width: float = 0.4, typ: str = "crate_plastic", material: str = "plastic"):
+         width: float = 0.4, typ: str = "plastic_box", material: str = "plastic"):
     from blueboat_sss_sim.core.types import PlacedObject
     return PlacedObject(object_id=oid, type=typ, x=x, y=y, yaw=0.0, length=length,
                         width=width, proud_height=height, burial=0.0, reflectivity=0.4,
@@ -2002,7 +2002,7 @@ def label_checks() -> None:
     P, cs = contacts(rr, xs[1] - mount_x)
     mine = [c for c in cs if c.object_id == 1]
     ok = (len(mine) == 1 and isinstance(mine[0], GroundTruthContact)
-          and isinstance(mine[0].object_id, int) and mine[0].object_type == "crate_plastic"
+          and isinstance(mine[0].object_id, int) and mine[0].object_type == "plastic_box"
           and mine[0].side is Side.PORT and isinstance(mine[0].visible, bool)
           and mine[0].ghost is False and mine[0].via == ""
           and all(isinstance(getattr(mine[0], f), float)
@@ -2097,7 +2097,7 @@ def label_checks() -> None:
             lines.append(f"{a:g}/{hgt:g}: no contact")
             continue
         sp = r1.ping.pose
-        o = SL.WorldObject(object_id=i, type="crate_plastic", x=x, y=mount_y + a, yaw=0.0,
+        o = SL.WorldObject(object_id=i, type="plastic_box", x=x, y=mount_y + a, yaw=0.0,
                            length=0.5, width=0.4, height=hgt)
         kw = dict(bin_m=bin_m, range_max_m=float(acq.range_max_m), n_bins=int(acq.num_results))
         cd = {"shadow_bins": c.shadow_bins, "slant_range_m": c.slant_range_m}
@@ -2177,10 +2177,11 @@ def object_checks() -> None:
 
     # [O1] a class that is one solid: the catalog primitive, placed on the terrain
     lines, ok = [], True
-    for o in (obj(0, "tire_bicycle", "rubber", 0.65, 0.65, 0.20),
+    # (a car tyre at the R6 low end is one rubber body: the class primitive)
+    for o in (obj(0, "tire_car", "rubber", 0.65, 0.65, 0.20, params={"spec": 2, "r6": "low"}),
               obj(1, "concrete_block", "concrete", 0.6, 0.4, 0.30, burial=0.25),
               obj(2, "mooring_pile", "concrete", 0.4, 0.4, 2.0),
-              obj(3, "tent_weight", "concrete", 0.3, 0.14, 0.08)):
+              obj(3, "concrete_block", "concrete", 0.3, 0.14, 0.08)):
         (sf,) = surfaces(o)
         v, f = om.part_mesh(sf)
         sol = CATALOG[o.type].solid(o)
@@ -2195,7 +2196,7 @@ def object_checks() -> None:
           ok, "; ".join(lines))
 
     # [O2] a smooth one keeps the facet objects' own placement (M2's transform) and mirrors
-    box = obj(4, "crate_plastic", "plastic", 0.5, 0.4, 0.25, yaw=0.4)
+    box = obj(4, "plastic_box", "plastic", 0.5, 0.4, 0.25, yaw=0.4)
     (sf,) = surfaces(box)
     R, t = sm.facet_transform(box, CATALOG[box.type].solid(box), flat)
     pbox = obj(11, "plastic_box", "pp_shell", 0.716, 0.425, 0.323, params={"wall_mm": 2.0})
@@ -2217,19 +2218,23 @@ def object_checks() -> None:
         v = np.vstack([q for q, _ in vs])
         top = float(v[:, 2].max()) - depth - o.effective_height
         half = np.abs(v[:, :2] - [o.x, o.y]).max(axis=0) - 0.5 * np.array([o.length, o.width])
-        # a rope or chain wanders 1.5 widths about its line, as its mask does
-        slack = 0.015 + (1.5 * o.width if name in ("rope", "chain") else 0.0)
+        # a chain wanders 1.5 widths about its line, as its mask does; a net bundle's strands
+        # (version 2, 2026-11-15) may overtop its dome by their own diameter
+        slack = 0.015 + (1.5 * o.width if name == "chain" else 0.0)
+        top_tol = 0.012 + (0.03 if name == "net_bundle" else 0.0)
         good = (all(sm.mesh_volume(q, f) > 0.0 for q, f in vs)
-                and -0.35 * o.proud_height - 0.01 <= top <= 0.012 and float(half.max()) <= slack)
+                and -0.35 * o.proud_height - 0.01 <= top <= top_tol and float(half.max()) <= slack)
         ok &= good
         if len(sfs) > 1 or not good:
             lines.append(f"{name} {len(sfs)} parts ({'+'.join(sorted({q.material for q in sfs}))})"
                          + ("" if good else f" BAD top {top:+.3f} half {half.max():+.3f}"))
-    pal = surfaces(obj(5, "pallet_wood", "wood", 1.1, 1.1, 0.14, fill_fraction=0.6))
+    pal = surfaces(obj(5, "trap_pot", "steel_rough", 0.61, 0.61, 0.55, fill_fraction=0.07,
+                       params={"spec": 2}))
     tyre = surfaces(obj(6, "tire_car", "rubber", 0.65, 0.65, 0.20))
     check("[O3] every catalog class is 3-D parts: outward meshes inside the stored footprint, "
-          "top at the stored height; a pallet is boards, a car tyre a tread band on its body",
-          ok and len(pal) == 7 + 3 + 3 and all(q.part.solid.kind == "box" for q in pal)
+          "top at the stored height; a wire pot is rods, bars and funnels, a car tyre a tread "
+          "band on its body",
+          ok and len(pal) > 100 and all(q.part.solid.kind in ("box", "cylinder", "annulus") for q in pal)
           and [q.material for q in tyre] == ["tyre_tread", "rubber"],
           f"{len(CATALOG)} classes, {n_tri} triangles; " + "; ".join(lines))
     check("[O3b] nothing proud of the seabed: no parts",
@@ -2399,16 +2404,19 @@ def object_checks() -> None:
 
     # [O10] a car tyre: the steel-belted tread band over the same tyre in bare rubber
     def tyre_scene(typ):
-        o = obj(0, typ, "rubber", 0.65, 0.65, 0.20, x=mount_x, y=mount_y + a)
+        # "tire_bare": the same tyre at the R6 low end (rubber only: belts hidden)
+        o = (obj(0, "tire_car", "rubber", 0.65, 0.65, 0.20, x=mount_x, y=mount_y + a,
+                 params={"spec": 2, "r6": "low"}) if typ == "tire_bare"
+             else obj(0, typ, "rubber", 0.65, 0.65, 0.20, x=mount_x, y=mount_y + a))
         return _label_scene([o], x_half=2.0, y0=-1.0, y1=21.0, res=0.1)
     pt = {}
-    for typ in ("tire_car", "tire_bicycle"):
+    for typ in ("tire_car", "tire_bare"):
         sct = tyre_scene(typ)
         pt[typ] = np.asarray(render(sct, solid_mesh_of(sct))[1].ping.power)
     kt = slice(int(np.hypot(a - 0.33, dz - 0.2) * scale / bin_m) - 2,
                int(np.hypot(a + 0.33, dz) * scale / bin_m) + 3)
     hi_car = float(10 * np.log10(pt["tire_car"][kt].max() / p0[kt].max()))
-    hi_rub = float(10 * np.log10(pt["tire_bicycle"][kt].max() / p0[kt].max()))
+    hi_rub = float(10 * np.log10(pt["tire_bare"][kt].max() / p0[kt].max()))
     check("[O10] a car tyre's tread band (rubber on its steel belts) returns well over the "
           "same tyre in bare rubber, and over the seabed", hi_car > hi_rub + 6.0 and hi_car > 6.0,
           f"peak over the bare seabed: belted {hi_car:+.1f} dB, bare rubber {hi_rub:+.1f} dB")

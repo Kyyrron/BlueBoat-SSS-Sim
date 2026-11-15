@@ -59,7 +59,10 @@ def object_parts(o: PlacedObject, seabed, lib, frequency_hz: float
     nothing of it is proud of the seabed. An instance whose construction
     knobs change its reflection carries its own material name,
     ``<material>#<object id>``."""
-    if o.type not in CATALOG or (not o.rested and o.effective_height <= 0.0):
+    if o.type not in CATALOG:
+        from ...worldgen.objects import check_class
+        check_class(o.type, f"object {int(o.object_id)}")      # raises, naming the class
+    if not o.rested and o.effective_height <= 0.0:
         return []
     from ..facets import object_reflection
     Re, te = facet_transform(o, envelope(o), seabed)
