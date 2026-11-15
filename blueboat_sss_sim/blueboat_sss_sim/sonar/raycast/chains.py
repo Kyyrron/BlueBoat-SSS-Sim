@@ -98,6 +98,11 @@ class FloorBoundary:
     def __init__(self, sheet, max_iter: int = 20) -> None:
         self.sheet = sheet              # specular.SheetSpecular
         self.max_iter = int(max_iter)
+        #: the wavelength of the Fresnel-radius rule of :meth:`factor`. The
+        #: sheet's own, except while an object's echo is evaluated with
+        #: ``raycast.objects.corner_floor_coherence`` < 1 (``Multipath.
+        #: corner_floor``), which scales the radius by 1 / s through it.
+        self.lam = float(sheet.lam)
 
     def plane(self, xy: np.ndarray):
         z, tri, vn = self.sheet._locate(xy[:, 0], xy[:, 1])
@@ -125,7 +130,7 @@ class FloorBoundary:
         for mi in np.unique(mat):
             s = mat == mi
             V = surf.reflection(int(mi), sin_psi[s])
-            sig = surf.rms_height(int(mi), R_e[s], self.sheet.lam, self.sheet.dx)
+            sig = surf.rms_height(int(mi), R_e[s], self.lam, self.sheet.dx)
             g = 2.0 * self.sheet.k * sig * sin_psi[s]
             out[s] = V * np.exp(-0.5 * np.minimum(g * g, 1400.0))
         return out

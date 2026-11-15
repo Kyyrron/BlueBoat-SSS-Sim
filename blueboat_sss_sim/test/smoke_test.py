@@ -3614,8 +3614,10 @@ def main() -> None:
                  # 2026-09-18: the field target itself, and the harbour
                  # furniture a pontoon line is actually held by
                  "plastic_box", "mooring_pile"]
-    check("all target-family classes registered (29 total)",
-          all(t in CATALOG for t in new_types) and len(CATALOG) == 29,
+    # 33 since 2026-11-15: the 29 classes + the four new ones of the object set
+    # version 2 (trap_pot, pipe_steel, net_bundle, mooring_block; section [20])
+    check("all target-family classes registered (33 total)",
+          all(t in CATALOG for t in new_types) and len(CATALOG) == 33,
           f"{len(CATALOG)} classes")
     box8 = CATALOG["plastic_box"]
     check("the field target is a class of its own: the NAFCO box's exact "
@@ -6378,7 +6380,8 @@ def main() -> None:
     _bad = [r[0] for r in _rows
             if len(r) < 7 or not str(r[6]).strip() or not str(r[6]).strip().endswith(".")]
     check("texture, depth-preset and layer-kind rows all carry a one-sentence help",
-          not _bad and len(_TTS) == 16,
+          # 19 since 2026-11-15: a composition row for each of the three new sediment classes
+          not _bad and len(_TTS) == 19,
           f"{len(_rows)} rows; missing/unfinished: {_bad[:6]}")
     check("every layer kind names its family, channels and literature",
           all(sp.family and sp.channels and sp.reference.strip()
@@ -7173,8 +7176,9 @@ def main() -> None:
     check("a driven pile has no rest poses and stays a flat stamp",
           not pile13.rest_allowed and _rp13(pile13) == ()
           and o13p.rest == "canonical" and not o13p.rested
+          # the structures fixed in place: the pile, and since 2026-11-15 the mooring block
           and all(_CAT13[k].rest_allowed for k in _CAT13
-                  if k != "mooring_pile"))
+                  if k not in ("mooring_pile", "mooring_block")))
     tmp13o = Path(_tf13.mkdtemp(dir=OUT))
     scene13.save(tmp13o)
     sc13o = SceneModel.load(tmp13o)
@@ -9152,6 +9156,307 @@ def _section_calibration() -> None:
           "and the generic profiles carry no limit",
           _guard and _rc_pr.sampling.max_range_m == 30.0 and _rc_fz.sampling.max_range_m == 0.0
           and _rcc19.RaycastConfig().sampling.max_range_m == 0.0, f"guard raised: {_guard}")
+
+    print("[20] session 02 (2026-11-15): object set version 2, harbour population, seabed "
+          "heterogeneity, depth domain, campaign generator, brackets R5 and R6")
+    from collections import Counter as _Ctr20
+    import yaml as _yaml
+    from blueboat_sss_sim.core.geo import GeoAnchor as _GA20
+    anchor = _GA20(lat0=33.930824, lon0=130.7311812)
+    from blueboat_sss_sim.core import provenance as _pv20
+    from blueboat_sss_sim.core.types import GridSpec as _G20, PlacedObject as _PO20
+    from blueboat_sss_sim.worldgen import campaign as _cg20, compounds as _cp20
+    from blueboat_sss_sim.worldgen import domain as _dm20, groundtruth as _gt20
+    from blueboat_sss_sim.worldgen import population as _pp20
+    from blueboat_sss_sim.worldgen.depth.layers import LAYER_KINDS as _LK20
+    from blueboat_sss_sim.worldgen.depth.layers import heterogeneity as _het20
+    from blueboat_sss_sim.worldgen.materials import (MaterialLibrary as _ML20,
+                                                     acoustic_reflection as _ar20)
+    from blueboat_sss_sim.worldgen.objects import (CATALOG as _CAT20, V2_CLASSES as _V2C,
+                                                   V2_TARGETS as _V2T)
+    _lib20 = _ML20()
+
+    def _po20(i, typ, mat, L, W, H, yaw=0.0, roll=0.0, pitch=0.0, burial=0.0, **prm):
+        return _PO20(object_id=i, type=typ, x=1.0 + i, y=2.0, yaw=float(np.radians(yaw)), length=L,
+                     width=W, proud_height=H, burial=burial, reflectivity=0.5, material=mat,
+                     params=prm, roll=float(np.radians(roll)), pitch=float(np.radians(pitch)),
+                     rest="x" if (roll or pitch) else "canonical")
+
+    # ---- the classes: all registered, each builds at the extremes of its card
+    _spec20 = _pp20.PopulationSpec()
+    _n_parts, _bad20 = {}, []
+    for _c in list(_V2T) + ["debris"]:
+        _rng = np.random.default_rng([20, len(_c)])
+        _ext = {}
+        for _k in range(300):
+            _i = _pp20._instance(_c, _rng, _spec20)
+            for _d in ("length", "width", "proud_height"):
+                _lo, _hi = _ext.get(_d, (np.inf, -np.inf))
+                _ext[_d] = (min(_lo, _i[_d]), max(_hi, _i[_d]))
+            if _k < 40:
+                _o = _po20(_k, _c, _i["material"], _i["length"], _i["width"], _i["proud_height"],
+                           roll=np.degrees(_i["pose"][1]), pitch=np.degrees(_i["pose"][2]), **_i["params"])
+                _ps = _cp20.parts(_o)
+                _n_parts[_c] = max(_n_parts.get(_c, 0), len(_ps))
+                if not _ps or any(not np.isfinite(q.t).all() or min(q.solid.extent) <= 0 for q in _ps):
+                    _bad20.append(_c)
+        for _d, (_lo, _hi) in _ext.items():
+            if not (_lo > 0.0 and _hi <= 3.01):
+                _bad20.append(f"{_c}.{_d}")
+    check("object set version 2: the 11 classes are in the catalogue, and every target class and "
+          "debris builds its parts over its whole size range (300 seeded instances each)",
+          all(c in _CAT20 for c in _V2C) and len(_V2C) == 11 and not _bad20
+          and _n_parts["trap_pot"] > 100 and _n_parts["net_bundle"] <= _cp20.NET_MAX_STRANDS,
+          f"most parts per class {_n_parts}; bad: {_bad20}")
+    # ---- opt-in: a kept class without ``spec: 2`` builds exactly as before
+    _d_old = _cp20.parts(_po20(0, "drum_200l", "metal", 0.585, 0.585, 0.89))
+    _d_new = _cp20.parts(_po20(0, "drum_200l", "steel_shell", 0.585, 0.585, 0.89, spec=2))
+    _c_old = _cp20.parts(_po20(1, "chain", "metal", 3.0, 0.05, 0.05))
+    _c_new = _cp20.parts(_po20(1, "chain", "steel_rough", 12.0, 0.07, 0.07, spec=2, z0_m=2.8, z1_m=6.5,
+                               sag_m=1.0))
+    _zc = [float(q.t[2]) for q in _c_new]
+    check("version 2 is opt-in per instance: without `spec: 2` a drum is its one cylinder and a chain "
+          "its 12 lying rods; with it the drum has two hoops and two chimes, and a chain hangs between "
+          "its end heights, one rod per link",
+          len(_d_old) == 1 and len(_d_new) == 5 and len(_c_old) == 12 and len(_c_new) > 60
+          and abs(min(_zc) - 2.8) < 0.15 and abs(max(_zc) - 6.5) < 0.15,
+          f"drum {len(_d_old)} -> {len(_d_new)} parts; chain {len(_c_old)} -> {len(_c_new)} links, "
+          f"z {min(_zc):.2f}..{max(_zc):.2f} m")
+    # ---- poses and states: the class cards' frequencies
+    _rng = np.random.default_rng(2020)
+    _f20 = {c: _Ctr20() for c in ("plastic_box", "drum_200l", "tire_car", "trap_pot")}
+    _N20 = 3000
+    for _c, _ctr in _f20.items():
+        for _k in range(_N20):
+            _i = _pp20._instance(_c, _rng, _spec20)
+            _ctr[_i["pose"][0]] += 1
+            _ctr["state:" + str(_i["params"].get("state", ""))] += 1
+    _fr = lambda c, k: _f20[c][k] / _N20                                    # noqa: E731
+    _tol = 3.0 * np.sqrt(0.25 / _N20)
+    check("population: pose and state frequencies follow the class cards within sampling error "
+          "(box upright 0.5 / inverted 0.3, part filled 0.3; drum lying 0.6; tyre flat 0.85; trap upright 0.8)",
+          abs(_fr("plastic_box", "upright") - 0.5) < _tol and abs(_fr("plastic_box", "inverted") - 0.3) < _tol
+          and abs(_fr("plastic_box", "state:part_filled") - 0.3) < _tol
+          and abs(_fr("drum_200l", "lying") - 0.6) < _tol and abs(_fr("tire_car", "flat") - 0.85) < _tol
+          and abs(_fr("trap_pot", "upright") - 0.8) < _tol,
+          f"box {_fr('plastic_box', 'upright'):.3f} / {_fr('plastic_box', 'inverted'):.3f} / "
+          f"{_fr('plastic_box', 'state:part_filled'):.3f}; drum {_fr('drum_200l', 'lying'):.3f}; "
+          f"tyre {_fr('tire_car', 'flat'):.3f}; trap {_fr('trap_pot', 'upright'):.3f} (3 sigma {_tol:.3f})")
+    # ---- burial per sediment, the presets, the cap
+    _rng = np.random.default_rng(7)
+    _bs = np.array([_pp20._burial("pipe_steel", "lying", False, _spec20, _rng) for _ in range(2000)])
+    _bm = np.array([_pp20._burial("pipe_steel", "lying", True, _spec20, _rng) for _ in range(2000)])
+    _hi20 = _pp20.PopulationSpec(burial="high")
+    _bh = np.array([_pp20._burial("net_bundle", "flattened", True, _hi20, _rng) for _ in range(2000)])
+    check("population: burial is drawn per sediment (a pipe: sand U(0, 0.3), mud U(0, 0.6)), the high "
+          "preset scales by 1.5 and stops at 0.9, and burial over 0.7 is `effectively_buried`",
+          _bs.max() <= 0.3 and abs(_bs.mean() - 0.15) < 0.01 and _bm.max() <= 0.6
+          and abs(_bm.mean() - 0.30) < 0.02 and _bh.max() <= 0.9 and (_bh > 0.7).mean() > 0.2
+          and _pp20.EFFECTIVELY_BURIED == 0.7,
+          f"sand mean {_bs.mean():.3f} max {_bs.max():.3f}; mud mean {_bm.mean():.3f} max {_bm.max():.3f}; "
+          f"net, mud, high: max {_bh.max():.3f}, over 0.7: {(_bh > 0.7).mean():.2f}")
+    # ---- composition and density on a synthetic basin
+    _g20 = _G20(-60.0, -40.0, 0.1, 1200, 800)
+    _al = np.ones((800, 1200), bool)
+    _al[:30] = False
+    _ft = [dict(kind="quay", points=[[-60, -37], [60, -37]], name="quay_S"),
+           dict(kind="berth", points=[[-20, -37], [10, -37]], name="berth"),
+           dict(kind="mooring", points=[[20, 20]], name="block_1")]
+    _sb = _pp20.PopulationSpec.from_dict({"density_per_ha": 30, "composition": "balanced"})
+    _e1, _r1 = _pp20.populate(_g20, _al, _ft, _sb, np.random.default_rng([5, 3]))
+    _e2, _r2 = _pp20.populate(_g20, _al, _ft, _sb, np.random.default_rng([5, 3]))
+    _sr = _pp20.PopulationSpec.from_dict({"density_per_ha": 30, "composition": "realistic"})
+    _e3, _r3 = _pp20.populate(_g20, _al, _ft, _sr, np.random.default_rng([6, 3]))
+    _n20 = int(round(30 * _r1["area_ha"]))
+    _nt = int(round(0.5 * _n20))
+    _tg = np.array([(e["x"], e["y"]) for e in _e1 if e["params"]["role"] == "target"])
+    _dd = np.hypot(_tg[:, None, 0] - _tg[None, :, 0], _tg[:, None, 1] - _tg[None, :, 1])
+    np.fill_diagonal(_dd, np.inf)
+    _w20 = _pp20.weights("realistic")
+    check("population: density and target share come out as asked (30 per ha, half targets), `balanced` "
+          "gives every target class the same count within one, `realistic` each class within one of its "
+          "weight, targets keep 3 m apart, nothing falls outside the allowed water, and a seed repeats",
+          sum(_r1["placed"].values()) == _n20 and _r1["placed"]["debris"] == _n20 - _nt
+          and max(_r1["asked"][c] for c in _V2T) - min(_r1["asked"][c] for c in _V2T) <= 1
+          and all(abs(_r3["asked"][c] - _nt * _w20[c]) <= 1.0 for c in _V2T)
+          and float(_dd.min()) >= 3.0 and _e1 == _e2
+          and all(e["y"] > -37.0 for e in _e1) and _r1["hotspots"]["share_within_near_expected"] >= 0.7,
+          f"{_n20} objects on {_r1['area_ha']:.2f} ha: {_r1['placed']}; nearest targets "
+          f"{float(_dd.min()):.2f} m; share within 30 m expected "
+          f"{_r1['hotspots']['share_within_near_expected']:.2f}, amplitude {_r1['hotspots']['amplitude']:.2f}")
+    # ---- ground truth of known poses
+    _fl = lambda x, y: np.full(np.shape(x), -7.0)                             # noqa: E731
+    _fa, _ = _gt20.faces_and_axis(_po20(0, "plastic_box", "pp_shell", 0.7, 0.4, 0.3, yaw=30.0))
+    _az = {f["face"]: f["azimuth_deg"] for f in _fa}
+    _, _ax_l = _gt20.faces_and_axis(_po20(1, "pipe_steel", "steel_shell", 2.0, 0.2, 0.2, yaw=200.0))
+    _, _ax_s = _gt20.faces_and_axis(_po20(2, "drum_200l", "steel_shell", 0.585, 0.585, 0.89))
+    _, _ax_d = _gt20.faces_and_axis(_po20(3, "drum_200l", "steel_shell", 0.585, 0.585, 0.89, yaw=40.0,
+                                          roll=90.0))
+    _hb = _gt20.height_above_seabed(_po20(4, "concrete_block", "concrete", 0.8, 0.6, 0.4, burial=0.25), _fl)
+    check("ground truth: a box at yaw 30 deg has its +x face at azimuth 30 and its +y face at 120, a pipe "
+          "at yaw 200 an axis azimuth of 20 (an axis has no sign), a standing drum a vertical axis, a lying "
+          "one a horizontal axis, and a block buried by a quarter stands 0.30 m over the seabed",
+          abs(_az["+x"] - 30.0) < 1e-6 and abs(_az["+y"] - 120.0) < 1e-6 and _az["+z"] is None
+          and abs(_ax_l["azimuth_deg"] - 20.0) < 1e-6 and _ax_s["azimuth_deg"] == "vertical"
+          and abs(_ax_d["elevation_deg"]) < 1e-6 and abs(_hb - 0.30) < 1e-9,
+          f"box +x {_az['+x']:.1f}, +y {_az['+y']:.1f}; pipe axis {_ax_l['azimuth_deg']:.1f}; drum "
+          f"{_ax_s['azimuth_deg']} / lying axis {_ax_d['azimuth_deg']:.1f} deg; block top {_hb:.3f} m")
+    # ---- the heterogeneity generator returns what it is asked for
+    _rngh = np.random.default_rng([11, 2, 1])
+    _fld = _het20.gaussian_field(600, 600, 0.1, 2.0, _rngh)
+    _c0 = float(np.mean(_fld[:, :-20] * _fld[:, 20:]) / np.var(_fld))        # lag 2 m = the length
+    _cls = _het20.quantile_classes(_fld, 0.03, 0.02)
+    _sh = [float((_cls == k).mean()) for k in (0, 1)]          # 0 the lowest share, 1 the highest
+    _mr = _LK20["microrelief"]
+    from blueboat_sss_sim.worldgen.depth.layers import LayerContext as _LC20, coerce_params as _cpar20
+    _gh = _G20(0.0, 0.0, 0.1, 500, 500)
+    _out = _mr.fn(_gh, None, _cpar20(_mr.schema, {"rms_m": 0.012, "corr_len_m": 0.4}, "microrelief"),
+                  np.random.default_rng([3, 2, 2]), _LC20(grid=_gh, height=None, walls=[], anchor=None))
+    _out2 = _mr.fn(_gh, None, _cpar20(_mr.schema, {"rms_m": 0.012, "corr_len_m": 0.4}, "microrelief"),
+                   np.random.default_rng([3, 2, 2]), _LC20(grid=_gh, height=None, walls=[], anchor=None))
+    check("seabed heterogeneity: the random field has unit variance and the correlation exp(-1) at its "
+          "correlation length, the class shares are the ones asked for, a micro-relief layer has its RMS "
+          "height and a zero mean, and a seed repeats",
+          abs(float(np.var(_fld)) - 1.0) < 0.15 and abs(_c0 - np.exp(-1.0)) < 0.08
+          and abs(_sh[0] - 0.03) < 1e-3 and abs(_sh[1] - 0.02) < 1e-3
+          and abs(float(_out.delta.std()) - 0.012) < 0.0015 and abs(float(_out.delta.mean())) < 0.002
+          and np.array_equal(_out.delta, _out2.delta),
+          f"variance {np.var(_fld):.3f}, correlation at 2 m {_c0:.3f} (0.368), shares {_sh[0]:.4f} / "
+          f"{_sh[1]:.4f}, relief RMS {_out.delta.std() * 1e3:.2f} mm")
+    check("seabed heterogeneity: the R2 presets rise from low to high in every parameter, and `nominal` "
+          "is the fitted set (fine 12 mm at 0.4 m, broad 75 mm at 3 m, 1 % finer and 0.5 % coarser patches)",
+          all(_cg20.HETEROGENEITY["low"][k] <= _cg20.HETEROGENEITY["nominal"][k]
+              <= _cg20.HETEROGENEITY["high"][k] for k in ("fine_rms", "broad_rms", "share_finer",
+                                                         "share_coarser", "pit_cover", "drag"))
+          and _cg20.HETEROGENEITY["nominal"]["fine_rms"] == 0.012
+          and _cg20.HETEROGENEITY["nominal"]["broad_rms"] == 0.075
+          and not any(_cg20.HETEROGENEITY["none"][k] for k in ("fine_rms", "broad_rms", "share_finer")))
+    # ---- the campaign generator: a world per (case, seed), repeatable, never overwritten
+    _t20 = OUT / "campaign20"
+    _t20.mkdir()
+    _xs = np.linspace(-25.0, 25.0, 41)
+    _pts20 = [[float(i), float(x), -15.0, 0.0] for i, x in enumerate(_xs)] + \
+             [[41.0 + float(i), float(x), 15.0, 3.14] for i, x in enumerate(_xs[::-1])]
+    (_t20 / "lawn20.yaml").write_text(_yaml.safe_dump({
+        "format": "blueboat_trajectory/1", "name": "lawn20", "speed": 0.8, "loop": False,
+        "geo_anchor": {"lat0": anchor.lat0, "lon0": anchor.lon0, "theta_deg": 0.0}, "points": _pts20}))
+    _spec_doc = {"format": "blueboat_campaign/1", "name": "smoke", "path": str(_t20 / "lawn20.yaml"),
+                 "world": {"margin_m": 20, "resolution_m": 0.1},
+                 "defaults": {"objects": {"density_per_ha": 30}},
+                 "cases": [{"name": "nominal"},
+                           {"name": "shallow", "depth_band_m": [3.0, 3.0], "grade_max": 0.0,
+                            "basin": {"quays": 0, "pontoon": False, "mooring_blocks": 0},
+                            "objects": {"density_per_ha": 0}, "clutter": "none",
+                            "sediment": {"heterogeneity": "none"}}],
+                 "validation_instances": [{"class": "plastic_box", "variant": "nafco_68l"}]}
+    (_t20 / "spec.yaml").write_text(_yaml.safe_dump(_spec_doc))
+    _ma = _cg20.run_campaign(_t20 / "spec.yaml", [3], _t20 / "a")
+    _mb = _cg20.run_campaign(_t20 / "spec.yaml", [3], _t20 / "b", cases=["nominal"])
+    _mc = _cg20.run_campaign(_t20 / "spec.yaml", [3], _t20 / "a", cases=["nominal"])
+    _wa = {w["case"]: w for w in _ma["worlds"]}
+    _wb = {w["case"]: w for w in _mb["worlds"]}
+    _wd20 = _t20 / "a" / _wa["nominal"]["world"]
+    _meta20 = _yaml.safe_load((_wd20 / "metadata.yaml").read_text())
+    check("campaign: the same specification and seed give the same content digest in two folders, the "
+          "digest is the one `provenance.content_digest` recomputes from the folder, and an existing "
+          "(case, seed) is skipped, never overwritten",
+          _wa["nominal"]["content_digest"] == _wb["nominal"]["content_digest"]
+          and _pv20.content_digest(_wd20)["sha256"] == _meta20["content_digest"]
+          and _mc["worlds"][0].get("skipped_last_run") is True
+          and _wd20 == _t20 / "a" / "lawn20" / "smoke-nominal-s3"
+          and (_t20 / "a" / ".campaigns" / "smoke" / "manifest.yaml").is_file(),
+          f"digest {_wa['nominal']['content_digest'][:16]}, built in {_wa['nominal']['build_seconds']} s")
+    check("campaign, depth domain (C1): a basin in the band is in domain; a 3 m basin is built and flagged "
+          "`out of domain` (altitude 2.78 m against the sensor's 4.5-11.3 m)",
+          _wa["nominal"]["out_of_domain"] is False and _wa["nominal"]["domain"]["share_in_domain"] >= 0.95
+          and _wa["shallow"]["out_of_domain"] is True and _wa["shallow"]["domain"]["share_too_shallow"] > 0.99
+          and abs(_dm20.sensor_depth_m() - 0.22) < 1e-9,
+          f"in domain {_wa['nominal']['domain']['share_in_domain']:.3f} / "
+          f"{_wa['shallow']['domain']['share_in_domain']:.3f}")
+    _obj20 = _meta20["objects"]
+    _roles = _Ctr20(o["role"] for o in _obj20)
+    _old_keys = ("format", "world_name", "created", "source_path", "geo_anchor", "spawn", "limits",
+                 "walls", "objects", "depth", "seabed_material", "seed")
+    _gtr = np.load(_wd20 / "ground_truth_rasters.npz")
+    _sc20 = SceneModel.load(_wd20)
+    check("campaign, ground truth (C5): `metadata.yaml` keeps format blueboat_world_meta/1 and every "
+          "version 1 key, adds schema_version 2 with the conditions, the domain, the seabed classes and, per "
+          "object, role, family, state, burial flag, height over the seabed and face / axis directions; "
+          "the rasters are on the world grid; the validation box is there and is not a target",
+          _meta20["format"] == "blueboat_world_meta/1" and all(k in _meta20 for k in _old_keys)
+          and _meta20["schema_version"] == 2 and _meta20["campaign"] == {
+              "name": "smoke", "case": "nominal", "seed": 3, "generator_version": 1}
+          and all(k in _meta20 for k in ("conditions", "domain", "seabed", "population", "structures",
+                                         "run", "uncertain_materials", "face_geometry", "generator"))
+          and all(all(k in o for k in ("role", "family", "class", "nominal_target", "effectively_buried",
+                                       "state", "height_above_seabed_m", "face_normals", "axis", "hotspot",
+                                       "x", "y", "yaw_deg", "length", "burial", "material")) for o in _obj20)
+          and _roles["validation"] == 1 and _roles["target"] >= 3 and _roles["structure"] >= 1
+          and _gtr["seabed_class"].shape == _sc20.height.shape == _gtr["in_domain"].shape
+          and len(_obj20) == len(_sc20.objects)
+          and (_sc20.config_snapshot["world"]["seabed"]["reference"] == "sand"),
+          f"{dict(_roles)}; classes {_meta20['seabed']['classes']}")
+    try:
+        _cg20.check_spec({**_spec_doc, "defaults": {"sediment": {"grain": 1}}})
+        _unk = False
+    except KeyError as _e20:
+        _unk = "grain" in str(_e20)
+    try:
+        _cg20.check_spec({**_spec_doc, "defaults": {"sediment": {"reference": "mud"}}})
+        _ref = False
+    except ValueError:
+        _ref = True
+    check("campaign: an unknown key raises by name, and a reference sediment other than the calibrated "
+          "`sand` is refused", _unk and _ref)
+    # ---- brackets R5 and R6
+    from blueboat_sss_sim.sonar.raycast import config as _rc20
+    from blueboat_sss_sim.sonar.raycast.specular import k_low as _kl20
+    _lam20, _dx20 = 2.0 * np.pi / 1885.0, 1.0            # a coarse grid: the Fresnel term decides
+    _Re = np.array([5.0, 20.0])
+    _k1 = _kl20(_Re, _lam20, _dx20)
+    _k0 = _kl20(_Re, _lam20 / 1e-30, _dx20)
+    _kh = _kl20(_Re, _lam20 / 0.25, _dx20)
+    _doc_lo = _rc20.variant_profile_doc("raycast_harbour_fast_corner_low_sonar.yaml")["raycast"]
+    _doc_hi = _rc20.variant_profile_doc("raycast_harbour_fast_corner_high_sonar.yaml")["raycast"]
+    _doc_pr = _rc20.variant_profile_doc("raycast_harbour_fast_sonar.yaml")["raycast"]
+    _hi_eq = _doc_hi == _doc_pr
+    check("bracket R5: `raycast.objects.corner_floor_coherence` defaults to 1 (the Fresnel-zone rule, "
+          "as before); a wavelength over s^2 scales the Fresnel wavenumber by s and 0 leaves pi / dx, "
+          "the plain Kirchhoff loss; the low profile differs from production by that key alone and the "
+          "high profile is production under a name; the key is outside the correction's fingerprint",
+          _rc20.ObjectsConfig().corner_floor_coherence == 1.0
+          and np.allclose(_k1, np.pi / np.sqrt(0.5 * _lam20 * _Re))
+          and np.allclose(_k0, np.pi / _dx20) and np.allclose(_kh, np.maximum(0.5 * _k1, np.pi / _dx20))
+          and _doc_lo["objects"]["corner_floor_coherence"] == 0.0 and _hi_eq
+          and {k: v for k, v in _doc_lo["objects"].items() if k != "corner_floor_coherence"}
+          == _doc_pr["objects"] and all(_doc_lo[k] == _doc_pr[k] for k in _doc_pr if k != "objects")
+          and "corner_floor_coherence" not in _doc_pr["objects"],
+          f"K at R_e 5 / 20 m: {_k1[0]:.0f} / {_k1[1]:.0f} rad/m at s = 1, {_k0[0]:.1f} at s = 0")
+    _ty = {lv: _cp20.parts(_po20(0, "tire_car", "rubber", 0.65, 0.65, 0.205, spec=2, r6=lv, rim_m=0.381))
+           for lv in ("low", "nominal", "high")}
+    _band = next(q for q in _ty["nominal"] if q.material == "tyre_tread")
+    _nt = {lv: len(_cp20.parts(_po20(0, "net_bundle", _cp20.FIBRE_OF[lv], 1.2, 0.9, 0.3, spec=2,
+                                     volume_fraction=vf, strand_mm=15.0)))
+           for lv, vf in (("low", 0.05), ("nominal", 0.12), ("high", 0.30))}
+    _rf = [_ar20(_lib20.get(_cp20.FIBRE_OF[lv])) for lv in ("low", "nominal", "high")]
+    check("bracket R6: the tyre's low end is one rubber body (|R| 0.07), the nominal one adds the tread "
+          "band over the belts on 0.82 of the section width, the high one two steel bead rings; the "
+          "fibres reflect 0.1 / 0.2 / 0.4 and a net's volume fraction is its number of strands",
+          len(_ty["low"]) == 1 and _ty["low"][0].material is None
+          and abs(_ar20(_lib20.get("rubber")) - 0.07) < 0.005
+          and abs(_band.solid.c / 0.205 - 0.82) < 1e-9
+          and sum(q.material == "metal" for q in _ty["high"]) == 2
+          and not any(q.material == "metal" for q in _ty["nominal"])
+          and np.allclose(_rf, [0.1, 0.2, 0.4], atol=1e-3) and _nt["low"] < _nt["nominal"] <= _nt["high"],
+          f"tyre parts {[len(v) for v in _ty.values()]}, fibre |R| {[round(r, 3) for r in _rf]}, "
+          f"net strands {_nt}")
+    check("the new materials are physical constants: a steel shell is steel with water behind a 1.2 mm "
+          "wall and has its shear speed, rough steel and a timber pile are diffuse (no mirror)",
+          _lib20.get("steel_shell").backing == "water" and _lib20.get("steel_shell").wall_m == 1.2e-3
+          and _lib20.get("steel_shell").roughness_m < 1.6e-3
+          and _lib20.get("steel_rough").roughness_m >= 1.6e-3
+          and _lib20.get("wood_rough").roughness_m >= 1.6e-3
+          and abs(_ar20(_lib20.get("steel_rough")) - 0.936) < 0.002)
 
 if __name__ == "__main__":
     main()

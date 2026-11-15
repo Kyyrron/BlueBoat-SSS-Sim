@@ -650,6 +650,15 @@ turns them on. A correction artifact's fingerprint leaves them out at their defa
 | `diffraction.method` | `sampled` (`edge`) | `edge`: the closed form F(v) of the nearest free straight edge of a wall box (vertical corners in the water, submerged tops, pontoon bottoms), with the same window; no ray casts. Objects and seabed relief get no factor. CPU and GPU. |
 | `precision` | `fp64` (`fp32`) | The GPU's per-triangle visibility test in float32 (`seg_blocked32`). GPU only; the CPU reference stays float64. |
 
+**Session 02 additions (2026-11-15), each default-off: existing worlds and profiles render as before.**
+
+| Where | Key | What it does |
+|---|---|---|
+| Profile | `raycast.objects.corner_floor_coherence` (0…1, default 1) | Bracket R5. The seabed bounce of an object's own echo (mirror patches and diffuse scatterers) stays coherent against the roughness above `K = max(s·π / r_F, π / Δx)`: 1 = the roughness inside the Fresnel zone only (the rule of every other floor bounce), 0 = all the roughness the terrain does not draw (the plain Kirchhoff loss). Profiles `raycast_harbour_fast_corner_low_sonar.yaml` (0) and `…_corner_high…` (production under a name). Outside the correction's fingerprint |
+| World | `world.seabed: {reference, patch_classes}` (config snapshot; builder state `depth.seabed`) | The near-nadir correction judges its sediment domain on `reference` when the cell under the boat is one of `patch_classes`. Without it a patch of another class under the boat switches the correction off, as before |
+| Object | `params.face_state: used` | That instance takes the dented-face geometry (2° over 0.05 m, the `flash_wide` values) whatever the profile; `new` or absent: the profile's |
+| Sediments | rows `soft_mud`, `fine_sand`, `coarse_sand` of `seabed_ssa.SEDIMENTS` | Data only: `seabed_model.md` §9.1 |
+
 `raycast.correction` sets the **empirical correction layer** (`sonar/raycast/correction.py`; it is *not*
 physics).
 
@@ -756,3 +765,85 @@ installed share directory and writes timelines under
 - `source_path_world.yaml` — the source path in world coordinates
   (`blueboat_trajectory/1` points, first waypoint = (0, 0) = the spawn,
   no `geo_anchor`); a drop-in `trajectory_file` for the dev launch.
+- `ground_truth_rasters.npz` (every world built since 2026-11-15) —
+  `seabed_class` (int8 index into `class_names`), `in_domain` and
+  `survey_area` (bool), on the world grid (`origin_x`, `origin_y`,
+  `resolution`): §3.1.
+
+### 3.1 `metadata.yaml`, schema version 2 (2026-11-15) — additive
+
+`format` stays `blueboat_world_meta/1`, and every key above keeps its name, type and meaning: a reader of
+version 1 reads a version 2 file unchanged. Added by `worldgen/groundtruth.py` for **every** new world
+(hand-made ones included); the keys marked *campaign* only by the campaign generator.
+
+| Where | Key | Content |
+|---|---|---|
+| Top level | `schema_version` | 2 |
+| | `content_digest` | sha256 of what the folder contains (arrays, manifest and metadata without paths, dates and this key): the same for two builds of one specification and seed; `core/provenance.content_digest(world_dir)` recomputes it |
+| | `generator` | `{name, code_digest}`: the code of `worldgen/` and `core/` that built it |
+| | `domain` | Depth domain (C1): `altitude_band_m`, `transducer_depth_m`, `heave_margin_m`, `survey_area_m2`, `share_in_domain`, `share_too_shallow`, `share_too_deep`, altitude min / median / max, `in_domain`; with a source path also `share_in_domain_path_swath` (within 20 m of the path) |
+| | `seabed` | `reference`, `classes` (share of each class), `raster`, the world's `patch_classes` and heterogeneity preset |
+| | `object_counts`, `detectable_targets` | Counts per role and class; targets that are `nominal_target` and not `effectively_buried` |
+| | `campaign` *campaign* | `{name, case, seed, generator_version}` |
+| | `conditions` *campaign* | Every condition variable as specified, `drawn` (depth, grade, quays, berth, pontoon, blocks, rubble), the heterogeneity and clutter parameters used |
+| | `run` *campaign* | The specification's `run` block and `sonar_fouling`, the fouling value drawn for this world (pass it to the sonar: `sonar_fouling:=`) |
+| | `population` *campaign* | Density, target share, composition, burial preset, counts asked and placed, hotspot amplitude and shares |
+| | `structures` *campaign* | Mooring blocks with their tethers, the pontoon, every hotspot feature (kind, name, points) |
+| | `uncertain_materials`, `face_geometry` *campaign* | The R6 level; the face-geometry state |
+| Each object | `role` | `target` \| `structure` \| `clutter` \| `validation` \| `legacy` |
+| | `family`, `class` | T1…T7, S1…S3, C1; `class` = `type` |
+| | `nominal_target`, `effectively_buried` | Detection accounting (`seabed_model.md` §11) |
+| | `state`, `variant`, `pose` | E.g. `part_filled`, `us_wire`, `inverted` |
+| | `height_above_seabed_m` | Top of the object over the terrain at its position, after settling and burial |
+| | `face_normals` | Flat faces of its envelope: `{face, azimuth_deg, elevation_deg, area_m2}`; azimuth in the world's ENU frame, 0 = east, counter-clockwise; `null` for a face that looks up or down |
+| | `axis` | `{azimuth_deg, elevation_deg}` of a cylinder's or a tyre's axis; azimuth in [0, 180), or `vertical` |
+| | `hotspot`, `face_state`, `seabed_class` | The feature it was drawn near (within 30 m), `new` / `used` / `profile`, the sediment under it |
+| | `params` | Its construction: `spec`, wall, fill, tyre code, strand size, end heights of a chain … |
+
+Detection accounting for a consumer: a detection matched to a `target` with `nominal_target: true` and
+`effectively_buried: false` is a true positive; one matched to `clutter` (`debris`) is "other litter", reported
+apart; one matched to a `structure`, to small litter (a seabed layer: not in `objects`) or to nothing is a false
+positive.
+
+## 4. Campaign specification (`blueboat_campaign/1`, 2026-11-15)
+
+`worldgen_campaign --spec <file> --seeds 1,2,3 --out <worlds root> [--cases a,b] [--check]`
+(`python3 -m blueboat_sss_sim.worldgen.campaign` from the source tree). Example: `config/campaign_example.yaml`.
+Unknown keys raise by name.
+
+| Key | Meaning |
+|---|---|
+| `name` | Campaign name; a world is `<name>-<case>-s<seed>` |
+| `path` | An MCS Pattern Designer trajectory with a GPS anchor: a name in `~/.config/blueboat_mcs/trajectories/`, or a `.yaml` file (absolute, or beside the specification). World (0, 0) = its first waypoint |
+| `world.margin_m` | The limits are the path's bounding box plus this margin (default 25); at most 150 m a side |
+| `world.resolution_m` | 0.10; must be the resolution the builder derives for that size |
+| `defaults` | The condition variables (below); every one may be overridden per case |
+| `cases` | `[{name, <overrides>}]` |
+| `run` | Free block recorded with each world (`sonar_profile`, `sea_state`, `sim_config`); not used by the generator |
+| `validation_instances` | `[{class: plastic_box, variant: nafco_68l}]`: the 68 L validation box at a seeded place, role `validation`, never a target |
+
+Condition variables (`defaults`, and any case):
+
+| Key | Values | Default |
+|---|---|---|
+| `depth_band_m` | `[min, max]`: the floor depth at the centre is drawn in it. The sensor's domain needs 5.0–11.0 m everywhere | `[6.0, 8.0]` |
+| `grade_max` | Largest floor grade [m/m] | 0.008 |
+| `basin.quays` | 0…3 sides with a quay (which sides: seeded); with 2 or more the last is a breakwater with a rubble apron | 2 |
+| `basin.pontoon`, `basin.mooring_blocks` | A pontoon with four piles; the number of mooring blocks (each with its hollow and tethers) | true, 1 |
+| `sediment.reference` | `sand` only (the calibrated class) | sand |
+| `sediment.finer`, `sediment.coarser` | Patch classes | `soft_mud`, `gravel` |
+| `sediment.heterogeneity` | R2: `none` \| `low` \| `nominal` \| `high` (`seabed_model.md` §9.4) | nominal |
+| `clutter` | Small litter and cobbles: `none` \| `low` \| `nominal` \| `high` (0.01 / 0.06 / 0.5 hard items per m²) | nominal |
+| `objects.density_per_ha` | 2 \| 10 \| 30, `sparse` \| `nominal` \| `dense`, or a number | 10 |
+| `objects.target_share`, `objects.composition` | 0…1; `realistic` \| `balanced` \| `{class: weight}` | 0.5, realistic |
+| `objects.burial` | `low` \| `nominal` \| `high` (× 0.5 / 1 / 1.5) | nominal |
+| `objects.fouling` | `[min, max]`: one value per world is drawn in it | `[0.2, 1.0]` |
+| `objects.hotspots` | `{decay_m, share_within_30m}` | 15, 0.7 |
+| `objects.min_target_spacing_m` | | 3.0 |
+| `face_geometry` | `new` \| `used` \| a share of used instances in [0, 1] | new |
+| `uncertain_materials` | R6: `low` \| `nominal` \| `high` | nominal |
+
+Outputs: the world folders at `<root>/<path name>/<name>-<case>-s<seed>/` (an existing one is skipped, never
+overwritten), and `<root>/.campaigns/<name>/manifest.yaml`: the specification as read, the generator's code
+digest, and per world its conditions as drawn, content digest, file digest, depth-domain shares with the
+`out_of_domain` flag, object counts and build time.

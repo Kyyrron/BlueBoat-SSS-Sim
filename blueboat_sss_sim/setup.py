@@ -67,6 +67,7 @@ setup(
             "world_builder = blueboat_sss_sim.builder.app:main",
             # Offline tools
             "generate_world = blueboat_sss_sim.worldgen.generate:main",
+            "worldgen_campaign = blueboat_sss_sim.worldgen.campaign:main",
             "export_scene_maps = blueboat_sss_sim.worldgen.export_maps:main",
             "mission_metrics = blueboat_sss_sim.analysis.cli:main",
             "sss_calibration_report = blueboat_sss_sim.analysis.calibration_cli:main",

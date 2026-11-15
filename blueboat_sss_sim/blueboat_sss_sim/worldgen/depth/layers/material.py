@@ -111,7 +111,7 @@ register(LayerSpec(
 _PATCHES = (("patch_m", "Patch length [m]", "float", 8.0, 0.5, 200.0,
              "Characteristic size of one patch of the mosaic."),) + tuple(
     (f"share_{n}", f"Share of {n}", "float",
-     {"sand": 0.5, "mud": 0.2, "gravel": 0.15, "rocks": 0.1, "seagrass": 0.05}[n],
+     {"sand": 0.5, "mud": 0.2, "gravel": 0.15, "rocks": 0.1, "seagrass": 0.05}.get(n, 0.0),
      0.0, 1.0, f"Fraction of the area covered by {n} patches.")
     for n in _NAMES)
 

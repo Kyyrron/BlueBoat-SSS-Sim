@@ -1286,3 +1286,44 @@ Hollow bodies other than `plastic_box` (drums, tins, pipes are solids); rubber a
 layers (a tyre's tread echo stays an upper bound); rope constants; sheet-pile corrugation; the scatterer-mediated
 corner path (sound scattered diffusely by the seabed onto the object); the shadow fill as a computed quantity
 (the 18 dB stand-in of NC #15 is kept); the beam's elevation pattern and tilt against data.
+
+### 15.9 Additions of session 02 (2026-11-15): brackets R5 and R6, sediment classes, flooded steel shells
+
+Four additions to the ray-cast sensor, each default-off: every existing world and profile renders as before
+(checked against renders saved before the edits: 3.5e-16 of the peak, the device's own run-to-run difference).
+
+**Bracket R5: `raycast.objects.corner_floor_coherence` = s (0…1, default 1).** The corner path of 15.5 weighs
+the seabed bounce by `V exp(−(2 k σ sin ψ)² / 2)`, σ the RMS height of the sediment's roughness above
+`K = max(π / r_F, π / Δx)`: only the roughness inside the bounce's Fresnel zone decorrelates it. That rule is a
+choice; the other defensible one counts all the roughness the terrain mesh does not draw (`K = π / Δx`), the
+plain Kirchhoff coherent-reflection loss. The key interpolates: `K = max(s π / r_F, π / Δx)`. No new constant:
+the spectrum is the sediment's own (σ = 2.7 mm for the harbour sand at Δx = 0.1 m).
+- It applies to every echo path that **ends on an object** and bounces on the seabed: the object's mirror
+  patches and its diffuse scatterers (one rule for both shares). The seabed's own paths, the walls' and the
+  seabed's mean field keep the Fresnel rule.
+- How: the stages that render an object's echo are handed a second sheet table whose wavelength in the
+  Fresnel-radius rule is `λ / s²` (`multipath.Multipath.corner_lam`, `gpu_render.GpuMultipath._corner_spec`;
+  CPU reference: `chains.FloorBoundary.lam`). No kernel changes; at 1 the same table object is used. In the
+  diffuse stage the scatterers on objects are evaluated in a second launch of the same kernel; the choice of
+  echo paths is made with the plain table (it can only keep a path too many).
+- Size of the bracket (7 m of water, 12 m across): see `.claude/raycast-live.md`, last entry. An upright smooth
+  object loses most of its echo at the low end; rough objects do not move.
+- Profiles: `raycast_harbour_fast_corner_low_sonar.yaml` (0); `…_corner_high…` is the production profile under
+  a name. A result must hold at both ends.
+
+**Bracket R6** (materials without a usable constant at 450 kHz) is a property of the world, not of the sensor:
+the tyre's construction and the fibre's reflection and volume fraction (`seabed_model.md` §10).
+
+**Sediment classes.** Rows `soft_mud`, `fine_sand`, `coarse_sand` of `seabed_ssa.SEDIMENTS` (Jackson &
+Richardson 2007, Table 13.1, as printed). A world's patch field uses them through the same law; the near-nadir
+correction judges its sediment domain on the world's declared reference (`world.seabed`), so a patch under the
+boat does not switch it off (`seabed_model.md` §9.1).
+
+**Per-object face state.** An instance marked `params.face_state: used` takes the dented-face geometry of the
+wide flash end (2° over 0.05 m) whatever the profile (`renderer._patches`).
+
+**Flooded steel shells** (change request CR-02-1 of session 01). `steel_shell` (mild steel, water behind the
+wall, shear speed 3200 m/s) makes `drum_200l` and `pipe_steel` elastic shells under `layer_model: elastic`,
+with the instance's wall (drum 0.9–1.6 mm, pipe 3–8 mm). This supersedes the first clause of 15.8 for the
+instances of the object set version 2 (`params.spec: 2`); a drum without it stays a solid, as before. The wall
+is nearly opaque (|R| 0.988–0.998), so the difference from a solid is small: the shadow is not quite black.

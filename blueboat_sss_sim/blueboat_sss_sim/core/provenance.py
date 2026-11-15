@@ -224,6 +224,81 @@ def world_digest(world_dir: str | Path | None) -> dict[str, Any]:
     return {"dir": str(d), "sha256": digest_of(files) if files else None, "files": files}
 
 
+# ------------------------------------------------------- content of a world
+#: array files of a world folder that the content digest covers (those present)
+CONTENT_ARRAYS = ("scene.npz", "depth.npz", "ground_truth_rasters.npz")
+#: ``metadata.yaml`` keys that are not content: when it was built, the digest
+#: itself, and which code built it
+CONTENT_SKIP_META = ("created", "content_digest", "generator")
+
+
+def code_digest(subpackages: tuple = ("worldgen", "core")) -> str:
+    """sha256 over the ``*.py`` files of the named subpackages of the running
+    package: which generator code built a world."""
+    pkg = package_dir()
+    files = {}
+    for sub in subpackages:
+        for p in sorted((pkg / sub).rglob("*.py")):
+            if "__pycache__" not in p.parts:
+                files[f"{PACKAGE}/{p.relative_to(pkg).as_posix()}"] = file_sha256(p)
+    return digest_of(files)
+
+
+def _neutral(obj: Any, prefixes: tuple) -> Any:
+    """``obj`` with every string that starts with one of ``prefixes`` (a
+    world's own folder path) rewritten to ``<world>``, floats rounded to 12
+    significant digits, keys sorted: what two builds of one world share."""
+    if isinstance(obj, dict):
+        return {str(k): _neutral(obj[k], prefixes) for k in sorted(obj, key=str)}
+    if isinstance(obj, (list, tuple)):
+        return [_neutral(v, prefixes) for v in obj]
+    if isinstance(obj, str):
+        for pre in prefixes:
+            if pre and obj.startswith(pre):
+                return "<world>" + obj[len(pre):]
+        return obj
+    if isinstance(obj, float):
+        return float(f"{obj:.12g}")
+    return obj
+
+
+def content_digest(world_dir: str | Path, also: tuple = ()) -> dict[str, Any]:
+    """``{sha256, parts}``: a digest of what a world folder CONTAINS, the same
+    for two builds of one specification and seed wherever and whenever they
+    were built (the file digest :func:`world_digest` is not: the manifest
+    records the folder's own path, and a compressed file its write time).
+
+    Covered: every array of :data:`CONTENT_ARRAYS` (name, dtype, shape and
+    bytes), the scene manifest and ``metadata.yaml`` with the folder's path
+    neutralised and without :data:`CONTENT_SKIP_META`. ``also``: other
+    prefixes to neutralise (the hidden folder a build writes into)."""
+    import numpy as np
+    import yaml
+    d = Path(world_dir).expanduser()
+    pre = tuple(str(x) for x in (d, d.resolve(), *also))
+    parts: dict[str, str] = {}
+    for name in CONTENT_ARRAYS:
+        f = d / name
+        if not f.is_file():
+            continue
+        h = hashlib.sha256()
+        with np.load(f, allow_pickle=False) as z:
+            for key in sorted(z.files):
+                a = np.ascontiguousarray(z[key])
+                h.update(f"{key}|{a.dtype.str}|{a.shape}|".encode())
+                h.update(a.tobytes())
+        parts[name] = h.hexdigest()
+    for name, skip in (("scene_manifest.yaml", ()), ("metadata.yaml", CONTENT_SKIP_META)):
+        f = d / name
+        if not f.is_file():
+            continue
+        doc = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
+        doc = {k: v for k, v in doc.items() if k not in skip}
+        blob = json.dumps(_neutral(doc, pre), sort_keys=True, separators=(",", ":"), default=str)
+        parts[name] = hashlib.sha256(blob.encode()).hexdigest()
+    return {"sha256": digest_of(parts) if parts else None, "parts": parts}
+
+
 # ---------------------------------------------------------------------- CLI
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(

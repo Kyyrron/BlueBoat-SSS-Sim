@@ -236,6 +236,11 @@ def state_to_world_config(state: "BuilderState",
             [round(float(x), 3), round(float(y), 3)]
             for x, y in state.path_world_xy()]
     raw["depth"] = depth_section(state, depth_file, ox, oy, baked=baked)
+    # The sediment declaration the ray-cast sensor reads (reference class and
+    # the world's own patch classes). Only when the state has one, so every
+    # other world's snapshot is byte-identical.
+    if getattr(state.depth, "seabed", None):
+        raw["world"]["seabed"] = copy.deepcopy(dict(state.depth.seabed))
     return raw
 
 
@@ -370,7 +375,13 @@ def _plain(d: Mapping[str, Any] | None) -> dict[str, Any]:
 
 def _write_metadata(out: Path, state: "BuilderState", scene: SceneModel,
                     pre_stamp: np.ndarray, world_name: str,
-                    survey_info: Mapping[str, Any] | None = None) -> None:
+                    survey_info: Mapping[str, Any] | None = None,
+                    truth: tuple | None = None) -> None:
+    """``truth``: ``(world fields, per-object fields)`` of
+    ``groundtruth.world_truth`` -- the additive fields of schema version 2
+    (2026-11-15). Every key that existed keeps its name, type and meaning,
+    and ``format`` stays ``blueboat_world_meta/1``: a reader of version 1
+    reads a version 2 file unchanged."""
     anchor: GeoAnchor = scene.geo_anchor
     g = scene.grid
     xmin, ymin, xmax, ymax = g.extent
@@ -458,17 +469,28 @@ def _write_metadata(out: Path, state: "BuilderState", scene: SceneModel,
         "seabed_material": state.depth.material,
         "seed": int(state.objects.seed),
     }
+    if truth is not None:
+        world, objs = truth
+        for rec, extra in zip(doc["objects"], objs):
+            rec.update({k: v for k, v in extra.items() if k not in rec})
+        doc.update({k: v for k, v in world.items() if k not in doc})
     with open(out / "metadata.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=None)
 
 
 def build_world_folder(state: "BuilderState",
                        worlds_root: str | Path | None = None,
-                       progress: Callable[[str], None] | None = None) -> Path:
+                       progress: Callable[[str], None] | None = None,
+                       extras: Mapping[str, Any] | None = None) -> Path:
     """Generate one immutable world folder from the wizard state.
 
     Returns the created directory (its basename is the final, possibly
     ``_i``-deduped world name).
+
+    ``extras``: what a generator knows about the world and the scene does
+    not (``worldgen.campaign``: campaign, conditions, population report,
+    structures): written into ``metadata.yaml`` beside the ground truth
+    that every world gets since 2026-11-15 (``worldgen.groundtruth``).
     """
     def step(msg: str) -> None:
         if progress:
@@ -579,7 +601,23 @@ def build_world_folder(state: "BuilderState",
                        default_flow_style=None)
 
     step("writing metadata")
-    _write_metadata(out, state, scene, pre_stamp, world_name, survey_info)
+    from ..core import provenance
+    from . import groundtruth
+    world, objs, rasters = groundtruth.world_truth(scene, pre_stamp, extras,
+                                                   path_xy=state.path_world_xy())
+    np.savez_compressed(out / groundtruth.RASTERS_NAME, **rasters)
+    _write_metadata(out, state, scene, pre_stamp, world_name, survey_info,
+                    truth=(world, objs))
+    # The content digest: what this folder contains, whatever its path and
+    # date (computed on the files as written, the digest's own keys aside).
+    digest = provenance.content_digest(out, also=(str(final),))
+    with open(out / "metadata.yaml", "r", encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+    doc["content_digest"] = digest["sha256"]
+    doc["generator"] = {"name": "blueboat_sss_sim.worldgen",
+                        "code_digest": provenance.code_digest()}
+    with open(out / "metadata.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=None)
     saved = dataclasses.replace(state, world_name=world_name)
     if depth_copy:
         saved.depth = dataclasses.replace(

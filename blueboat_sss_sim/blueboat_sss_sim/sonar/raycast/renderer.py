@@ -78,6 +78,14 @@ class RaycastRenderer(SonarRenderer):
         snap = getattr(scene, "config_snapshot", None) or {}
         #: the scene's materials: the defaults with its world's overrides
         self.lib = MaterialLibrary(snap.get("materials") or None)
+        #: A world may declare its reference sediment and the classes of its own patches (``world.seabed`` in
+        #: its configuration: ``{reference: sand, patch_classes: [soft_mud, gravel]}``, written by
+        #: worldgen/campaign.py). The empirical correction's sediment gate is then judged on the reference: the
+        #: table was fitted over a real seabed that is itself patchy, and without this it would switch off and
+        #: on as the boat passes over a patch (a 13-15 dB step at u = 1). No declaration: as before.
+        _sb = (snap.get("world") or {}).get("seabed") or {}
+        self._nadir_alias = ({str(n): str(_sb["reference"]) for n in (_sb.get("patch_classes") or [])}
+                             if _sb.get("reference") else {})
         self.mesh = mesh if mesh is not None else build_scene_mesh(
             scene, world_dir, objects_mode=str(rc.objects.mode), lib=self.lib,
             frequency_hz=float(OMNISCAN_FREQ_HZ))
@@ -556,7 +564,8 @@ class RaycastRenderer(SonarRenderer):
         if t < 0:
             return False, None
         m = self.mesh
-        return (not bool(m.dry[t]), m.material_names[int(m.material[t])])
+        name = m.material_names[int(m.material[t])]
+        return (not bool(m.dry[t]), self._nadir_alias.get(name, name))
 
     def nadir_below(self, sensor: Pose3D) -> tuple[bool, str | None]:
         """:meth:`nadir_surface` for a transducer pose (the calibration
@@ -681,8 +690,16 @@ class RaycastRenderer(SonarRenderer):
             else:
                 from .object_mesh import FaceGeometry, part_patches
                 oc = self._rc.objects
+                tilt, corr = float(oc.face_tilt_rms_deg), float(oc.face_corr_len_m)
+                # an instance the world marks as used, dented litter (``params.face_state:
+                # used``, the population model's face-geometry state) takes the dented-face
+                # geometry whatever the profile; ``new`` or nothing: the profile's
+                if str(dict(getattr(self._facet_objs[i], "params", None) or {}).get(
+                        "face_state", "")) == "used":
+                    from .config import FACE_STATE_USED
+                    tilt, corr = FACE_STATE_USED
                 face = FaceGeometry(
-                    float(oc.face_tilt_rms_deg), float(oc.face_corr_len_m),
+                    tilt, corr,
                     float(oc.face_draft_deg),
                     # the WORLD's seed and the object's id: the same object is the same
                     # in every ping and every run

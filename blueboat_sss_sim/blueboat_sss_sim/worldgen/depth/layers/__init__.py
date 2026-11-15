@@ -45,7 +45,13 @@ GEOMETRY_TYPES = ("polygon", "polyline", "ellipse", "rect", "axis", "radial",
                   "strokes")
 LAYER_KEYS = {"id", "kind", "name", "enabled", "opacity", "blend", "mask",
               "geometry", "params", "targets", "seed"}
-MATERIAL_CHOICE = "choice:sand|mud|gravel|rocks|seagrass"
+def _material_choice() -> str:
+    """Every seabed material of the library (was a literal list of five until 2026-11-15)."""
+    from ...materials import MaterialLibrary
+    return "choice:" + "|".join(MaterialLibrary().seabed_names)
+
+
+MATERIAL_CHOICE = _material_choice()
 
 
 @dataclass
@@ -314,4 +320,5 @@ def schema_rows() -> list[tuple]:
 
 
 # The kinds register themselves on import (order = menu order).
-from . import source, gradients, landforms, relief, adjust, material, survey, paint_ops  # noqa: E402,F401
+from . import (source, gradients, landforms, relief, adjust, material, survey, paint_ops,  # noqa: E402,F401
+               heterogeneity)

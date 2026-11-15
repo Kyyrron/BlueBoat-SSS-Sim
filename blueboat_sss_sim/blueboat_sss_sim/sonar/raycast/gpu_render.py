@@ -3860,6 +3860,9 @@ class GpuMultipath:
         self.law = self._law()
         self.oracle = self._oracle()
         self.spec = self._spec()
+        #: bracket R5: the sheet table an OBJECT's floor bounces are evaluated
+        #: with -- ``self.spec`` itself unless corner_floor_coherence < 1
+        self.spec_corner = self._corner_spec()
         self.faces = self._faces(list(mp.faces) + list(mp.object_faces))
         self.layers = self._layers()
         self.alpha_np = float(rr.alpha) * float(np.log(10.0) / 20.0)
@@ -4010,6 +4013,19 @@ class GpuMultipath:
                   device=dev)
         o = out.numpy()
         return o[:, 0] + 1j * o[:, 1]
+
+    def _corner_spec(self) -> SpecSheet:
+        """``self.spec`` with the wavelength of ``Multipath.corner_lam`` in the
+        Fresnel-radius rule of ``floor_factor`` (the one place a pair kernel
+        reads it); every array is shared. ``self.spec`` itself when bracket R5
+        is at its default."""
+        if not self.mp.corner_active:
+            return self.spec
+        S = SpecSheet()
+        for name in self.spec._cls.vars:
+            setattr(S, name, getattr(self.spec, name))
+        S.lam = wp.float64(self.mp.corner_lam)
+        return S
 
     def _spec(self) -> SpecSheet:
         sp, dev, m = self.mp.sheet, self.dev, self.rr.mesh
@@ -4240,15 +4256,34 @@ class GpuMultipath:
         self._tick("select")
         kinds, faces, koff = self._seq_arrays(kept)
         npairs = wp.empty(n, dtype=wp.int32, device=dev)
-        wp.launch(pair_kernel("pairs", len(kept) + 1), n, [gsc.pos, gsc.normal, gsc.area, gsc.material, gsc.phase,
-                                gsc.rayleigh, onfl, wallof, R, b, state, D, Tt, self.layers,
-                                Pv, ea, en, ev,
-                                self.beam, self.law, self.oracle, self.spec, self.faces,
-                                kinds, faces, koff, len(kept), wp.float64(rr.k),
-                                wp.float64(mp.surface.rms), wp.float64(self.alpha_np),
-                                wp.float64(rr.c), wp.float64(rr._floor), wp.float64(offset),
-                                wp.float64(eps), wp.float64(self.lam), self.max_iter, x, npairs],
-                  device=dev)
+
+        def pairs(st, spec, out):
+            wp.launch(pair_kernel("pairs", len(kept) + 1), n, [gsc.pos, gsc.normal, gsc.area, gsc.material, gsc.phase,
+                                    gsc.rayleigh, onfl, wallof, R, b, st, D, Tt, self.layers,
+                                    Pv, ea, en, ev,
+                                    self.beam, self.law, self.oracle, spec, self.faces,
+                                    kinds, faces, koff, len(kept), wp.float64(rr.k),
+                                    wp.float64(mp.surface.rms), wp.float64(self.alpha_np),
+                                    wp.float64(rr.c), wp.float64(rr._floor), wp.float64(offset),
+                                    wp.float64(eps), wp.float64(self.lam), self.max_iter, x, out],
+                      device=dev)
+        n_own_pairs = 0
+        if self.spec_corner is self.spec:
+            pairs(state, self.spec, npairs)
+        else:
+            # bracket R5: the scatterers on objects through the corner table, the others
+            # through the plain one -- the same kernel twice, each on its own share (state
+            # bit 4 = not a contributor). The paths were chosen with the plain table.
+            from .multipath import OBJECT_KINDS
+            st = state.numpy()
+            own = np.isin(gsc.kind.numpy(), OBJECT_KINDS)
+            pairs(wp.array(np.where(own, st | 4, st).astype(np.int32), dtype=wp.int32, device=dev),
+                  self.spec, npairs)
+            if own.any():
+                np_own = wp.empty(n, dtype=wp.int32, device=dev)
+                pairs(wp.array(np.where(own, st, st | 4).astype(np.int32), dtype=wp.int32, device=dev),
+                      self.spec_corner, np_own)
+                n_own_pairs = int(np_own.numpy().sum())
         fo = wp.empty(x.n, dtype=wp.vec2d, device=dev)
         wp.launch(_reduce_c_k, x.n, [x.field, fo], device=dev)
         fn = fo.numpy()
@@ -4258,7 +4293,7 @@ class GpuMultipath:
         cnt = wp.zeros(2, dtype=wp.int32, device=dev)
         wp.launch(_diffuse_report_k, n, [state, npairs, cnt], device=dev)
         cn = cnt.numpy()
-        rep.update(contributors=int(cn[0]), pairs=int(cn[1]), **drep)
+        rep.update(contributors=int(cn[0]), pairs=int(cn[1]) + n_own_pairs, **drep)
         mp.last_report["diffuse"] = rep
         return rep
 
@@ -4412,7 +4447,7 @@ class GpuMultipath:
                 kept, rep = self._select_set(P, Pv, ea, en, ev, Xp, n, R, best, amp0, state, zeros,
                                              minus, x, level, grid,
                                              [mp.object_faces[j] for j in live],
-                                             int(mp.pc.max_object_bounces))
+                                             int(mp.pc.max_object_bounces), spec=self.spec_corner)
                 n_cull = int(len(ix) - len(live))
                 if n_cull:
                     rep["sequences"] += n_cull
@@ -4423,7 +4458,7 @@ class GpuMultipath:
             is_out = wp.array(np.array([int(all(b_.kind != "O" for b_ in q)) for q in kept] or [1],
                                        np.int32), dtype=wp.int32, device=dev)
             wp.launch(pair_kernel("facets", len(kept) + 1), n, [Xp, Np, Up, Vp, Ap, Bp, state, Pv, ea, en, ev, self.beam,
-                                          self.oracle, self.layers, self.spec, self.faces, kinds,
+                                          self.oracle, self.layers, self.spec_corner, self.faces, kinds,
                                           faces, koff, is_out, len(kept), wp.float64(refl),
                                           wp.float64(rms), rt, wp.float64(r_inv), int(r_on),
                                           wp.float64(k), wp.float64(mp.surface.rms),
@@ -4599,11 +4634,13 @@ class GpuMultipath:
                                 wallof, x, level, grid, None, 0)
 
     def _select_set(self, P, Pv, ea, en, ev, pos, n, R, best, amp0, state, onfl, wallof, x, level,
-                    grid, extra, max_obj):
+                    grid, extra, max_obj, spec=None):
         """``Multipath.select_chains``: the same enumeration and rule, the
-        bound summed on the device."""
+        bound summed on the device. ``spec``: the sheet table of the floor
+        bounces (``self.spec``; an object's patches: ``self.spec_corner``)."""
         from . import chains as ch
         mp, rr, dev = self.mp, self.rr, self.dev
+        spec = self.spec if spec is None else spec
         bnds = mp.boundaries(P) + list(extra or [])
         levels = ch.sequences_by_order(bnds, int(mp.pc.max_order), int(mp.pc.max_wall_bounces),
                                        int(max_obj))
@@ -4622,7 +4659,7 @@ class GpuMultipath:
                 def bound(refine, _k=kinds, _f=faces, _m=len(seq)):
                     bound2.zero_()
                     wp.launch(_bound_k, n, [pos, onfl, wallof, state, R, best, amp0, Pv, ea, en,
-                                            ev, self.beam, _k, _f, _m, self.spec, self.faces,
+                                            ev, self.beam, _k, _f, _m, spec, self.faces,
                                             wp.float64(rr.k), wp.float64(mp.surface.rms),
                                             wp.float64(self.alpha_np), wp.float64(rr.c), x, refine,
                                             wp.float64(self.lam), self.max_iter, one, bound2],

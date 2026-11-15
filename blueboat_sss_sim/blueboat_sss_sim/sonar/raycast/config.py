@@ -441,15 +441,34 @@ class ObjectsConfig:
     ``face_draft_deg``: the draft angle of the near-vertical side walls of
     moulded plastic boxes (they lean outward towards the top) [deg]. The
     waviness is a pure function of (world seed, object id, position): the
-    same object is the same from ping to ping and from run to run."""
+    same object is the same from ping to ping and from run to run.
+
+    ``corner_floor_coherence`` (2026-11-15, bracket R5 of the completion
+    round; ``multipath.Multipath.corner_lam``): how much of the seabed's
+    roughness the floor bounce of an OBJECT's echo stays coherent against.
+    An echo path that ends on an object and bounces on the seabed (the
+    object-seabed corner) is weighted by ``V exp(-(2 k sigma sin psi)^2 / 2)``,
+    sigma the RMS height of the sediment's roughness spectrum above
+    ``K = max(s pi / r_F, pi / dx)`` (r_F the Fresnel radius of the bounce, dx
+    the terrain grid step, s this key). 1 (default, as before): the roughness
+    inside the Fresnel zone only -- the rule of every other floor bounce.
+    0: all the roughness the terrain mesh does not draw, the plain Kirchhoff
+    coherent-reflection loss at the path's grazing angle. No new constant:
+    the spectrum is the sediment's own. Both shares of an object's echo take
+    it (its mirror patches and its diffuse scatterers); the seabed's and the
+    walls' own paths never do. A bracket, not a calibration."""
     mode: str = "raster"
     fouling: float = 0.0
     layer_model: str = "fluid"
     face_tilt_rms_deg: float = 0.0
     face_corr_len_m: float = 0.10
     face_draft_deg: float = 0.0
+    corner_floor_coherence: float = 1.0
 
     def __post_init__(self) -> None:
+        if not 0.0 <= float(self.corner_floor_coherence) <= 1.0:
+            raise ValueError("raycast.objects.corner_floor_coherence "
+                             f"{self.corner_floor_coherence}: [0, 1]")
         if not 0.0 <= float(self.face_tilt_rms_deg) <= 5.0:
             raise ValueError(f"raycast.objects.face_tilt_rms_deg {self.face_tilt_rms_deg}: [0, 5]")
         if not 0.05 <= float(self.face_corr_len_m) <= 2.0:
@@ -929,6 +948,15 @@ FLASH_WIDE: dict[str, Any] = {
     "objects": {"face_tilt_rms_deg": 2.0, "face_corr_len_m": 0.05},
 }
 SHELL_OPAQUE_DROPS = ("objects.layer_model",)
+#: Face geometry of an instance the world marks ``face_state: used`` (RMS
+#: tilt [deg], correlation length [m]): the dented faces of FLASH_WIDE, per
+#: object instead of per profile (``renderer._patches``; 2026-11-15).
+FACE_STATE_USED = (float(FLASH_WIDE["objects"]["face_tilt_rms_deg"]),
+                   float(FLASH_WIDE["objects"]["face_corr_len_m"]))
+#: Bracket R5 (2026-11-15): ``objects.corner_floor_coherence`` at its low end
+#: (``ObjectsConfig``). The high end is the engine default, 1: the production
+#: profile itself, also generated under the name ``..._corner_high_...``.
+CORNER_LOW: dict[str, Any] = {"objects": {"corner_floor_coherence": 0.0}}
 
 
 def _harbour_20261112(engine: Mapping[str, Any]) -> dict:
@@ -1043,6 +1071,28 @@ RAYCAST_VARIANTS: dict[str, dict] = {
                        "the deep-shadow end of the shell bracket." + _BRACKET_NOTE,
         "raycast": _strip(_harbour(_FAST_ENGINE), *SHELL_OPAQUE_DROPS),
         "header": "BRACKET END (shells opaque) of the harbour-fast production profile",
+    },
+    # Bracket R5 (completion round, session 02, 2026-11-15): the floor bounce
+    # of an object's echo. ``corner_high`` IS the production profile, written
+    # out under a name so that a study can cite both ends.
+    "raycast_harbour_fast_corner_low_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast, corner low",
+        "order": 44,
+        "description": "The seabed bounce of an object's echo loses coherence to all the "
+                       "roughness the terrain does not draw (the plain Kirchhoff loss): the "
+                       "weak end of the object-seabed corner echo." + _BRACKET_NOTE,
+        "raycast": _deep_merge(_harbour(_FAST_ENGINE), CORNER_LOW),
+        "header": "BRACKET END (corner low, R5) of the harbour-fast production profile",
+    },
+    "raycast_harbour_fast_corner_high_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast, corner high",
+        "order": 45,
+        "description": "The production profile under a bracket name: the seabed bounce of an "
+                       "object's echo loses coherence to the roughness inside its Fresnel zone "
+                       "only. The strong end of the object-seabed corner echo." + _BRACKET_NOTE,
+        "raycast": _harbour(_FAST_ENGINE),
+        "header": "BRACKET END (corner high, R5) = the harbour-fast production profile "
+                  "(objects.corner_floor_coherence at its default, 1)",
     },
     # Frozen copies of the two harbour profiles as they rendered on 2026-11-12
     # (owner, 2026-11-13): regression only. ``listed: False`` = no ``variant``

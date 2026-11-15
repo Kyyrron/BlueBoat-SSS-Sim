@@ -19,6 +19,10 @@ literature are cited by the issuing agency's own page.*
 7. [The editing model](#7-the-editing-model)
    - 7.1 [Measured seabed from a recording: reflectivity and relief](#71-measured-seabed-from-a-recording-reflectivity-and-relief)
 8. [References](#8-references)
+9. [Sediment classes and seabed heterogeneity](#9-sediment-classes-and-seabed-heterogeneity-2026-11-15) (after the references: added 2026-11-15)
+10. [The object set version 2](#10-the-object-set-version-2)
+11. [Structures, litter population, depth domain](#11-structures-litter-population-depth-domain)
+12. [The campaign generator](#12-the-campaign-generator)
 
 ---
 
@@ -458,3 +462,230 @@ thesis (the A–D50 table is taken from [3]); Flemming (1988) (the H–λ law
 is cited through [19]); USACE EM 1110-2-1613 (publisher returned 403;
 [26] carries the same depth increments); the Fisheries Agency reference's
 tonnage-class basin-depth table (not in the fetched chapter overview).
+
+Added 2026-11-15 for §9–§12 (completion round, session 02). Each DOI was compared with its Crossref record
+(title, authors, year) or its page was opened that day; **[full]** = the cited pages were read in full text,
+**[abs]** = abstract or record only. The reading notes, pages and paper requests are in the session's evidence
+folder (`~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/stage0/`, this machine only).
+
+51. Abraham, D. A., & Lyons, A. P. (2002). Novel physical interpretations of K-distributed reverberation. *IEEE Journal of Oceanic Engineering*, 27(4), 800–813. https://doi.org/10.1109/JOE.2002.804324 [full] (the counting model of patchy scatterers; its data are at 450–700 Hz)
+52. Nickell, L. A., & Atkinson, R. J. A. (1995). Functional morphology of burrows and trophic modes of three thalassinidean shrimp species. *Marine Ecology Progress Series*, 128, 181–197. https://doi.org/10.3354/meps128181 [full]
+53. Townsend, E. C., & Fonseca, M. S. (1998). Bioturbation as a potential mechanism influencing spatial heterogeneity of North Carolina seagrass beds. *Marine Ecology Progress Series*, 169, 123–132. https://doi.org/10.3354/meps169123 [full]
+54. Dworschak, P. C., & Rodrigues, S. de A. (1997). A modern analogue for the trace fossil *Gyrolithes*. *Lethaia*, 30(1), 41–52. https://doi.org/10.1111/j.1502-3931.1997.tb00443.x [full]
+55. Watson, S. J., et al. (2022). The footprint of ship anchoring on the seafloor. *Scientific Reports*, 12, 7500. https://doi.org/10.1038/s41598-022-11627-5 [full] (large ships in 35 m: an upper bound)
+56. Watson, S. J., et al. (2020). Anchor and chain scour as disturbance agents: mooring-block chain scars. *Frontiers in Marine Science*, 7, 579626. https://doi.org/10.3389/fmars.2020.579626 [full]
+57. Madricardo, F., et al. (2019). Assessing the human footprint on the sea-floor of coastal systems: the case of the Venice Lagoon. *Scientific Reports*, 9, 6615. https://doi.org/10.1038/s41598-019-43027-7 [full]
+58. Schernewski, G., et al. (2023). Litter in harbours and marinas of the southern Baltic. *Applied Sciences*, 13(20), 11424. https://doi.org/10.3390/app132011424 [full]
+59. NILIM (2022). *Supplemental Explanation Note to the Technical Standards for Port and Harbour Facilities in Japan* (draft). National Institute for Land and Infrastructure Management. https://www.ysk.nilim.go.jp/kakubu/kouwan/sisetu/tscphf.pdf [full, pages cited]
+60. Lyons, A. P., & Abraham, D. A. (1999) = [35] above, read in full for §9 (80 kHz: patch contrasts and the cell-size law transfer; shape parameters are upper bounds).
+61. Le Chenadec, G., Boucher, J.-M., & Lurton, X. (2007). Angular dependence of K-distributed sonar data. *IEEE Transactions on Geoscience and Remote Sensing*, 45(5), 1224–1235. https://doi.org/10.1109/TGRS.2006.888454 [full]
+62. Nakajima, et al. (2007). *Proceedings of the Annual Meeting of the Japanese Society of Fisheries Engineering*, 249–252. https://doi.org/10.18903/pamjsfe.2007.0_249 [full] (sediment of an enclosed Japanese fishing port: sand 7 %, silt 60 %, clay 33 %)
+63. Papatheodorou, G., et al. (2021). CEST2021, paper 00599. https://doi.org/10.30955/gnc2021.00599 [full] (a port surveyed by a USV with 455 / 800 kHz side-scan; 56 detected targets in 120 × 160 m)
+64. Nippon Steel Drum Co., catalogue sheets reproducing JIS Z 1600 and Z 1601 (drum.nipponsteel.com, en-A1.pdf, en-A2.pdf) [full]; JIS Z 1600:2017 preview (Japanese Standards Association) [abs]
+65. Andrews, E. (1947). *Crab pot construction (Chesapeake Bay type)*. Fishery Leaflet 262, US Fish and Wildlife Service [full]; Isaacson, P. A. (1963). *Commercial Fisheries Review*, 25(1), 12–16 [full]; Code of Maryland Regulations 08.02.03.07 [full]
+66. Kochi Prefecture fisheries report FY2012, p. 75–77 (two Japanese pots, measured) [full]
+67. UN Regulation No. 30, Rev. 3 (2007), §2 and §6.1 (tyre size designation) [full]; Gent, A. N., & Walter, J. D. (eds.) (2006). *The Pneumatic Tire*. NHTSA DOT HS 810 561 [full: ch. 1, cited passages of ch. 3, 6, 17]
+68. Prado, J., & Dremière, P. Y. (1990). *Fisherman's Workbook*. FAO / Fishing News Books [full, sections cited] (fibre densities, twine and rope sizes)
+69. Friedrichs, C. T., Rennie, S. E., & Brandt, A. (2016). Self-burial of objects on sandy beds by scour. In *Scour and Erosion*, 179–189. https://doi.org/10.1201/9781315375045-23 [full]; Chu, P. C., & Fan, C. (2007). *IEEE Journal of Oceanic Engineering*, 32(1), 34–48. https://doi.org/10.1109/JOE.2007.890942 [full]; Shrestha, et al. (2024). *Applied Ocean Research*, 148, 103948. https://doi.org/10.1016/j.apor.2024.103948 [full]
+70. IHO (2024). *Standards for Hydrographic Surveys*, S-44 Edition 6.2.0 (adopted text) [full]
+71. Mujal-Colilles et al. (2017) = [29] above, read in full for §11 (final scour depth "up to one propeller diameter").
+72. Selfridge, A. R. (1985). Approximate material properties in isotropic materials. *IEEE Transactions on Sonics and Ultrasonics*, 32(3), 381–394. https://doi.org/10.1109/T-SU.1985.31608 [full, Table I] (mild steel: 5.9 and 3.2 mm/µs, 7.80 g/cm³)
+
+Not obtained, and therefore not used (paper requests): APL-UW TR 9407 chapter IV as issued (the DTIC record
+refuses the download; [34] is cited through [33] only); Stanic et al. (1988), doi:10.1121/1.396341; Williams
+et al. (2002), doi:10.1109/JOE.2002.1040925, and (2009), doi:10.1109/JOE.2009.2018335 (the roughness model
+against data above 100 kHz); Lyons et al. (2009), doi:10.1109/JOE.2008.2008410 (patchy seafloors at high
+frequency); Broad, Rees & Davis (2020) full text (anchor marks of small boats).
+
+---
+
+## 9. Sediment classes and seabed heterogeneity (2026-11-15)
+
+*Completion round, session 02. Evidence, proxies and the fit: `02_world_builder/` (handoff_02.md, design_note.md).*
+
+**Why.** A world with one uniform sediment has no ping-to-ping correlation and none of the dark and bright
+patches of a real harbour floor. The real FIT recording (`reflectionEvidenceFullharbour.svlog`, object-free
+stretches) shows, against uniform simulated sand rendered at the same acquisition: a correlation of 0.03–0.15
+three pings apart (uniform: 0.00), patch means that spread by 1.05–2.46 dB at 0.5 m and 0.37–2.08 dB at 2 m
+(uniform: 0.93 and 0.22 dB), and 7–36 bright regions per 100 m² (uniform: 2.5).
+
+### 9.1 Sediment classes
+
+A seabed patch is a **sediment class**: a row of acoustic parameters, never a grey level (NC #17). The ray-cast
+sensor's law per class is `sonar/raycast/seabed_ssa.SEDIMENTS` (density and sound-speed ratios, loss, roughness
+spectrum, volume scattering); the legacy geometric renderer reads `worldgen/materials._SEABED_DEFAULTS`.
+
+| Class | Parameters | Level against `sand` at 451 kHz (10° / 20° / 30° of grazing) | Role |
+|---|---|---|---|
+| `sand` | The calibrated harbour sediment (session 01; [33] SAX99 with the harbour core) | 0 | The **reference**: the only class the harbour sensor's first-return correction is calibrated on |
+| `soft_mud` | [33] Table 13.1, Key West (carbonate sand-silt-clay, φ 7.0), as printed | −1.3 / −6.5 / −7.4 dB | The **finer** patch class (dark patches) |
+| `fine_sand` | [33] Table 13.1, Quinault (φ 2.95) | −9.7 / −8.9 / −5.8 dB | Available; not in the presets |
+| `coarse_sand` | [33] Table 13.1, Panama City 98 (φ 0.62) | +2.6 / +1.6 / −0.7 dB | Available; not in the presets |
+| `gravel`, `rocks` | The sand law plus 3.0 / 6.5 dB (`scattering.SEABED_CONTRAST_DB`, as before) | +3.0 / +6.5 dB | `gravel` is the **coarser** patch class (bright patches, rubble, small litter) |
+
+- No parameter set read gives a credible *bright* shell or gravel class through the roughness model: measured
+  shell-hash spectra come out about 9 dB darker than sand. The bright class therefore stays the level class
+  `gravel`. Stated limit.
+- The roughness model is validated to about 100 kHz only [33]; at 450 kHz the classes are an extrapolation, as
+  the calibrated `sand` itself is.
+- The existing `mud` row cannot serve as a patch class in the harbour profiles (they override its spectrum):
+  hence the new name `soft_mud`.
+- **Reference sediment.** A world declares `world.seabed: {reference: sand, patch_classes: [...]}` in its
+  configuration (the builder state's `depth.seabed`; the campaign generator writes it). Over a declared patch
+  class the sensor's near-nadir correction stays on, judged on the reference; without the declaration a patch
+  under the boat would switch it off (a 13–15 dB step). A world without it behaves as before.
+
+### 9.2 The generator: six layer kinds
+
+`worldgen/depth/layers/heterogeneity.py`; each is an ordinary layer of the editor (masks, opacity, its own
+random stream `[seed, 2, layer]`).
+
+| Kind | What it draws | Parameters | Source |
+|---|---|---|---|
+| `sediment_field` | A Gaussian random field (correlation `exp(−r²/L²)`), cut at two quantiles: the lowest share becomes the finer class, the highest the coarser one | `corr_len_m`, `finer`, `share_finer`, `coarser`, `share_coarser` | Patchiness as a mixture of scatterer populations [51], [60], [61] |
+| `microrelief` | A zero-mean Gaussian random relief of a given RMS height and correlation length; used twice (fine 0.4 m, broad 3 m) | `rms_m`, `corr_len_m` | Fitted (9.4); the fine scale is what a burrowed floor looks like [52]–[54] |
+| `bioturbation` | Feeding pits (0.3–1.0 m across, 0.03–0.12 m deep, up to 1.3 % of the floor) and large mounds (0.3–0.4 m across) | `pit_cover`, `pit_radius_m`, `pit_depth_m`, `mounds_per_m2`, … | [52]–[54]; the common mounds (under 15 cm) are smaller than two grid cells and are left to the sediment's roughness |
+| `drag_marks` | Troughs with berms along an arc (keel, anchor and chain drags) | `per_hectare`, `width_m`, `depth_m`, `length_m` | [55]–[57]: sizes of large-vessel marks are upper bounds; the defaults for small boats are [DESIGN] |
+| `small_litter` | Bottle- and can-size hard bumps of the coarser class; their list is kept (`small_litter_arrays`) | `per_m2`, sizes | [58]: 0.02–3.71 items per m² in 14 harbours |
+| `cobbles` | Stones 0.1–0.4 m; with a mask along a quay toe, the blocks of a rubble apron | `per_m2`, sizes | [59]: foundation rubble 10–200 kg per piece |
+
+### 9.3 Statistic definitions (acceptance criterion B2)
+
+Computed by `analysis/seabed_stats.py` on a recording or a rendered session, on object-free stretches (straight
+track, no wall or reflector, slant range past 1.4 × altitude):
+- **lag-3 correlation**: of the gain-removed level in dB at the same bin, three pings apart, bin means removed;
+- **patch spread** at 0.5 m and 2 m: standard deviation of the cell means of the level;
+- **dark / bright regions per 100 m²**: connected regions of at least 0.05 m² whose power, smoothed over
+  0.15 m, lies 4 dB under / over the per-bin reference (bands across 90 % of the window are rejected).
+
+### 9.4 The fit, and the R2 presets
+
+Fitted on the FIT stretches only (14 stretches, 40 m / 600 bins / 106 µs, window to 29.5 m), on physical
+parameters: RMS heights, patch shares. `low` and `high` reproduce the smallest and the largest statistics over
+the stretches, `nominal` their median (`worldgen/campaign.HETEROGENEITY`).
+
+| Preset | Fine relief (0.4 m) | Broad relief (3 m) | Finer / coarser share, patch length | Pits, mounds, drag marks |
+|---|---|---|---|---|
+| `low` | 12 mm | 40 mm | 0 / 0 | none |
+| `nominal` | 12 mm | 75 mm | 1 % / 0.5 %, 2 m | pits 0.5 %, 0.01 mounds per m², 4 marks per ha |
+| `high` | 20 mm | 200 mm | 8 % / 3 %, 3 m | pits 1.3 %, 0.05 mounds per m², 12 marks per ha |
+
+Generated against real, at the FIT acquisition (worlds built by the campaign generator: flat, 8.3 m, 800
+pings, mean of two seeds; real: the 14 FIT stretches). [Batch B of session 02]
+
+| Statistic | Real min / median / max | `uniform` | `low` | `nominal` | `high` |
+|---|---|---|---|---|---|
+| Correlation 3 pings apart | 0.025 / 0.044 / 0.146 | 0.005 | 0.024 | 0.066 | 0.216 |
+| Spread of 0.5 m patch means [dB] | 1.05 / 1.24 / 2.46 | 0.95 | 1.13 | 1.52 | 2.62 |
+| Spread of 2 m patch means [dB] | 0.37 / 0.60 / 2.08 | 0.25 | 0.38 | 0.68 | 1.71 |
+| Dark regions per 100 m² | 26.4 / 31.6 / 37.1 | 49.8 | 59.4 | 51.4 | 42.1 |
+| Bright regions per 100 m² | 6.8 / 9.3 / 36.4 | 2.8 | 8.2 | 15.0 | 47.3 |
+
+Read against the tolerances of acceptance criterion B2 (correlation ±0.05, spreads ±30 %):
+- `low` against the real minimum: correlation -0.001, spreads +8 % and +4 %: inside.
+- `nominal` against the real median: correlation +0.022, spreads +22 % and +13 %: inside, on the rough side of the median.
+- `high` against the real maximum: correlation +0.070 (outside ±0.05), spreads +7 % and -18 % (inside). The largest real stretch lies beside structures.
+- The dark-region rate is outside the real range for every preset, the uniform seabed included (below).
+- Mean level of a range band against the uniform world, largest shift: `low` -0.22 dB, `nominal` -0.45 dB, `high` -1.17 dB (all in the 16–20 m band).
+
+What the fit cannot do, and why:
+- The **dark-region rate** of the simulated picture exceeds the real one already on uniform sand (50 against
+  26–37 per 100 m²) at this acquisition: the simulated speckle is more correlated along range (0.23 against
+  0.12) than the device's at 40 m / 600 bins. It is a property of the sensor model at that setting, not of the
+  seabed, and no seabed parameter can lower it. Session 05 judges it at the thesis setting.
+- Four generator parameters cannot match four statistics at three levels exactly; the table states the misses.
+- One harbour, one recording: the presets are a bracket, not a calibration.
+
+**Level.** The dominant class is the calibrated `sand`, unchanged. The presets move the mean level of a range
+band by the amounts listed above: relief changes the local grazing angle, the patches are few. The regression
+worlds of the real harbour keep a uniform seabed (`harbour_wl1p50_blocks`).
+
+## 10. The object set version 2
+
+*`target_families_and_surrogates.md` (Version 2) is the specification; this is what is built.* A class is its
+**parts** (`worldgen/compounds.py`: primitives with a material) and its **card** (`worldgen/population.py`:
+sizes, states, poses, burial). How a part sounds is its material's physics (NC #17); there is no level anywhere.
+
+| Class | Parts | Material | Sizes [m] | States and poses | Source of the sizes |
+|---|---|---|---|---|---|
+| `plastic_box` (T1) | The closed shell; a sediment block inside when part filled | `pp_shell`, wall 2–4 mm | L U(0.50, 0.75), W = L × U(0.55, 0.70), H U(0.22, 0.35) | Flooded 0.7, part filled 0.3; upright 0.5, inverted 0.3, on a side 0.2 | Six fish boxes of 42–70 L measure 0.60–0.84 × 0.37–0.51 × 0.18–0.31 m; wall thickness not stated by any source [DESIGN] |
+| `drum_200l` (T2) | Body shell, two rolling hoops, two chimes; a sediment column when upright and filled | `steel_shell`, wall 0.9–1.6 mm | 0.568 body, 0.585 over the hoops, 0.890 high; hoops 0.300 apart | Lying 0.6, standing 0.4; flooded (never air-filled) | JIS Z 1600 / Z 1601 [64]; hoop width 20 mm and chime 15 mm [DESIGN] |
+| `concrete_block` (T3) | A block with a chipped upper edge (0–30 mm) | `concrete` | U(0.5, 1.0) × U(0.4, 0.8) × U(0.2, 0.6) | Largest face down 0.8 | [DESIGN] |
+| `trap_pot` (T4) | `us_wire`: frame of 4.8 mm rod, six mesh panels and the partition, four entrance funnels, a rebar rim, an anode. `jp_frame`: a 10 mm rebar frame under netting, a funnel in each end | `steel_rough`; netting: fibre | US 0.61 × 0.61 × U(0.51, 0.61); Japanese U(0.95, 1.00) × U(0.40, 0.68) × U(0.40, 0.45) | Upright 0.8, on a side 0.2 | [65]: 24 × 24 × 20–24 in, 38 mm mesh, wire 1.2 or 1.6 mm; [66] |
+| `pipe_steel` (T5) | A closed flooded shell | `steel_shell`, wall 3–8 mm | Ø U(0.10, 0.30), L U(1.0, 3.0) | Lying | [DESIGN] |
+| `tire_car` (T6) | Rubber body; the tread band over the belts on 0.82 of the section width; bead rings (bracket R6) | `rubber`, `tyre_tread`, `metal` | From a tyre code: outer Ø = rim + 2 × width × aspect ratio, within 0.55–0.80 | Flat 0.85, on its tread 0.15 | [67] |
+| `net_bundle` (T7) | A seeded tangle of strands under a flattened dome; or a coil of rope 12–16 mm | Fibre (bracket R6) | U(0.5, 2.0) × U(0.4, 1.5) × U(0.1, 0.5); coil 0.3–0.8 across | Flattened | [68]; volume fraction and strand radius [DESIGN] |
+| `mooring_block` (S1) | A box | `concrete` | Per instance (the harbour's: 4 × 4 m, 2.0–2.4 m over their hollows) | Fixed | Surveyed |
+| `chain` (S2) | One rod per link along a line that may hang between two end heights | `steel_rough` | Per instance | — | Link 6 × bar, width 3.4 × bar [DESIGN] |
+| `mooring_pile` (S3) | A cylinder | `concrete`, `steel_rough`, `wood_rough` | Ø 0.3–0.6, to the surface | Fixed | As before |
+| `debris` (C1) | Two lumps | `steel_rough`, `concrete`, `generic` | 0.2–1.2 | — | As before |
+
+Stated departures from the specification, each a drawing economy with the same physics:
+- **Trap mesh**: a square mesh of twice the pitch (76 mm) and twice the bar of the real 38 mm hexagons: the
+  same fill fraction, a third fewer parts.
+- **Pipe**: a closed shell, not an open tube: half the mirror patches; the wall is nearly opaque either way
+  (|R| 0.99). An end cap flashes when the sonar looks within about 1° of the pipe's axis.
+- **Net**: a tangle, not an envelope with a volume fraction: sound passes between the strands, so the shadow
+  is partial, and the volume fraction is the number of strands.
+- **Thin steel** (wire, rebar, chain links, a pile in seawater) is rated rough (`steel_rough`): thinner than the
+  3.3 mm wavelength, or scaled and overgrown, it has no flat facet to mirror from. It scatters diffusely with
+  steel's reflection.
+- **Fouling** is one value per world (the sonar's `fouling` parameter, recorded as `run.sonar_fouling`), not
+  one per object.
+
+**Bracket R6** (materials without a usable constant at 450 kHz; `uncertain_materials: low | nominal | high`):
+
+| | `low` | `nominal` | `high` |
+|---|---|---|---|
+| Tyre | Belts hidden: the rubber body alone (|R| 0.07) | The tread band over the belts (rubber on steel, |R| 0.93) on the body | Nominal plus the two steel bead rings |
+| Net, rope | Fibre |R| 0.1, volume fraction 0.05 | 0.2, 0.12 | 0.4, 0.30 |
+
+The nominal tyre was chosen from rendered pictures (owner's rule: its shape must read easily, without a strong
+flash): the tread band gives a small bright arc at the near edge (peak +10 dB over the seabed in a few bins,
++0.3 dB of echo energy) and the shadow; the low end is a shadow alone. The real belts are two plies of
+0.15–0.35 mm filaments, not a steel band, so the truth lies between `low` and `nominal`.
+
+**An existing world is not changed by any of this**: a class that existed before builds its version 2 parts
+only for an instance that says `params.spec: 2` (the population model writes it).
+
+## 11. Structures, litter population, depth domain
+
+**Structures** (`worldgen/campaign.plan_basin`). Quays on 0–3 sides; a pontoon with four piles; mooring blocks
+(2–4 m square, 1.0–2.8 m tall) each in a chain-scar hollow (radius 3–10 m, 0.1–0.4 m deep; rings up to 40 m
+across and under 0.5 m deep are reported [56]) with a riser chain to under the surface and, near a pontoon, a
+hanging line to it; a fishing berth with its propeller scour (0.3–0.8 m deep: "up to one propeller diameter"
+[71], scaled to a fishing boat); a rubble apron 2–4 m wide at the breakwater's toe, blocks 0.2–0.5 m [59]. No
+vegetation: a turbid basin of 4.5–11 m is at or below the eelgrass limit. No moored hulls.
+
+**Population** (`worldgen/population.py`; the specification's section 5).
+
+| Quantity | Value | Bracket |
+|---|---|---|
+| Sonar-size litter (targets + `debris`) | 2 / 10 / 30 per hectare of survey water [57], [63] | — |
+| Share of targets | 0.5 | 0.3–0.7 |
+| Composition | `realistic` (tyre 0.30, trap 0.15, net 0.15, box 0.15, block 0.10, pipe 0.10, drum 0.05) or `balanced` | — |
+| Spatial pattern | `λ(x) = 1 + A Σ a exp(−d / 15 m)` over quays, pontoons, mooring blocks, the berth, outlets, the breakwater; `A` solved so that 0.7 of the expected count lies within 30 m of a feature (never under 1) | 5–40 m; 0.5–0.9 |
+| Spacing | At least 3 m between targets | — |
+| Burial | Per class and sediment (sand / mud), preset × 0.5 / 1 / 1.5, at most 0.9 [69] | — |
+| `effectively_buried` | Burial over 0.7: in the ground truth, out of the detectable-target count | — |
+| `nominal_target` | A target whose largest dimension is at least 0.5 m [70] | — |
+
+Everything drawn is written as a pinned `objects.explicit` entry; the counts asked for and placed, the
+amplitude and the realised share near a hotspot go into `metadata.yaml` (`population`).
+
+**Depth domain** (`worldgen/domain.py`; acceptance criterion C1). Altitude = depth − 0.22 m (the sonar model's
+transducer depth) ∓ 0.10 m of heave margin; survey water = wet cells reachable from the spawn without crossing
+a quay; a world is in domain when 95 % of it lies in 4.5–11.3 m. Every world built since 2026-11-15 carries
+the report in `metadata.yaml` (`domain`, with the share along the source path's own 20 m swath) and the mask in
+`ground_truth_rasters.npz`; `domain.domain_report(terrain, grid, walls, path_xy=...)` gives it for any other
+world (a real harbour holds much water its survey path never goes near).
+
+## 12. The campaign generator
+
+`worldgen_campaign --spec <campaign.yaml> --seeds 1,2,3 --out <worlds root>` (`worldgen/campaign.py`;
+`config/campaign_example.yaml`; format and every key: `configuration_guide.md` §4). One world per (case,
+seed), an ordinary world folder; nothing is overwritten; the same specification and seed give the same
+**content digest** (`core/provenance.content_digest`: arrays, manifest and metadata without paths and dates).
+Random streams: terrain `[seed, 0]`, objects `[seed, 1]`, layers `[seed, 2, layer]`, population `[seed, 3]`,
+basin `[seed, 4]`.
+

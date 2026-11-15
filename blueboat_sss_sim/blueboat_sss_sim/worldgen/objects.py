@@ -367,7 +367,48 @@ CATALOG: dict[str, ObjectSpec] = {
                                    "metal", (0.0, 0.3), False, "box",
                                    label="shopping trolley (lying)",
                                    fill_fraction_range=(0.18, 0.35)),
+
+    # ---- object set version 2 (2026-11-15, completion round session 02;
+    # target_families_and_surrogates.md Version 2): the new classes. Their
+    # parts are built by worldgen/compounds.py; the classes kept from above
+    # (plastic_box, drum_200l, concrete_block, tire_car, chain, mooring_pile,
+    # debris) take their version 2 construction when an instance says
+    # ``params.spec: 2`` (the population model writes it), so no world built
+    # before changes. Sources and [DESIGN] values: docs/seabed_model.md par. 10.
+    # T4: a wire or netted pot. US crab pot 0.61 x 0.61 x 0.51-0.61 m; the
+    # Japanese frame pot 0.95-1.00 x 0.40-0.68 x 0.40-0.45 m.
+    "trap_pot":        ObjectSpec("trap_pot", _mask_lattice(_mask_box),
+                                  (0.61, 1.00), (0.40, 0.68), (0.40, 0.61),
+                                  "steel_rough", (0.0, 0.3), False, "box",
+                                  label="trap / pot (wire or netted frame)",
+                                  fill_fraction_range=(0.06, 0.08)),
+    # T5: a steel pipe, flooded, closed (CR-02-1): wall 3-8 mm (``wall_mm``).
+    "pipe_steel":      ObjectSpec("pipe_steel", _mask_cylinder_lying,
+                                  (1.0, 3.0), (0.10, 0.30), (0.10, 0.30),
+                                  "steel_shell", (0.0, 0.4), False, "cylinder",
+                                  label="steel pipe (flooded)"),
+    # T7: a bundle of net, or a coil of rope (``variant``): fibre of bracket R6.
+    "net_bundle":      ObjectSpec("net_bundle", _mask_coil, (0.5, 2.0),
+                                  (0.4, 1.5), (0.1, 0.5), "fibre",
+                                  (0.0, 0.4), False, "box",
+                                  label="net bundle / rope coil"),
+    # S1: a concrete mooring block. A structure: placed by hand or by a
+    # campaign's basin, with its surveyed size; never a random-litter class.
+    "mooring_block":   ObjectSpec("mooring_block", _mask_box, (2.0, 4.0),
+                                  (2.0, 4.0), (1.0, 3.0), "concrete",
+                                  (0.0, 0.0), False, "box",
+                                  label="mooring block (concrete)",
+                                  rest_allowed=False),
 }
+
+#: The object set version 2 (target_families_and_surrogates.md): what a
+#: campaign world may contain, by role. ``small_litter`` is a seabed layer
+#: (worldgen/depth/layers/heterogeneity.py), not a class.
+V2_TARGETS = ("plastic_box", "drum_200l", "concrete_block", "trap_pot",
+              "pipe_steel", "tire_car", "net_bundle")
+V2_STRUCTURES = ("mooring_block", "chain", "mooring_pile")
+V2_CLUTTER = ("debris",)
+V2_CLASSES = V2_TARGETS + V2_STRUCTURES + V2_CLUTTER
 
 #: Cells whose terrain height (z, negative down) is at or above this are
 #: dry or awash -- a beach above the waterline -- and never receive a
@@ -1319,7 +1360,14 @@ PINNED_FIELDS = ("length", "width", "proud_height", "burial",
 #: Class knobs that describe how an instance is BUILT and that the renderer
 #: reads (NC #17), so a pinned entry carries them. The size knobs
 #: (``length_m`` ...) are already pinned as the sizes they produced.
-_CONSTRUCTION_PARAMS = ("wall_mm", "flooded", "nested")
+_CONSTRUCTION_PARAMS = ("wall_mm", "flooded", "nested",
+                        # object set version 2 (worldgen/compounds.py reads them)
+                        "spec", "variant", "r6", "fill", "fill_material",
+                        "bevel_mm", "rim_m", "wire_mm", "strand_mm",
+                        "volume_fraction", "z0_m", "z1_m", "sag_m", "link_m",
+                        "bar_mm", "face_state", "role", "state", "hotspot",
+                        "hotspot_distance_m", "nominal_target", "tyre_code",
+                        "pose", "sediment")
 
 
 def placed_to_explicit(o: PlacedObject) -> dict[str, Any]:

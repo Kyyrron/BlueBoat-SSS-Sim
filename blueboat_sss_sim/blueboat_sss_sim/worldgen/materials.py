@@ -103,6 +103,13 @@ _SEABED_DEFAULTS: dict[str, Material] = {
     "gravel":   Material("gravel",   0.70, 0.22, 320, 0.025, (0.55, 0.53, 0.50)),
     "rocks":    Material("rocks",    0.85, 0.30, 260, 0.080, (0.42, 0.42, 0.44)),
     "seagrass": Material("seagrass", 0.22, 0.35, 300, 0.030, (0.20, 0.45, 0.25)),
+    # Sediment classes of the ray-cast sensor's patch field (2026-11-15; their acoustic parameters are the
+    # rows of the same name in sonar/raycast/seabed_ssa.SEDIMENTS, measured sites of Jackson & Richardson's
+    # Table 13.1). The numbers here are only what the legacy geometric renderer and the previews read
+    # (relative reflectivity, texture, micro-relief, colour): judged against their neighbours, not calibrated.
+    "soft_mud":    Material("soft_mud",    0.28, 0.06, 150, 0.004, (0.40, 0.37, 0.31)),
+    "fine_sand":   Material("fine_sand",   0.45, 0.08, 220, 0.006, (0.70, 0.65, 0.48)),
+    "coarse_sand": Material("coarse_sand", 0.62, 0.14, 260, 0.014, (0.74, 0.66, 0.46)),
 }
 
 #: Surface RMS height above which the coherent (mirror) fraction is zero to
@@ -150,6 +157,22 @@ _ROUGHNESS_M: dict[str, float] = {
     # Rotomoulded polyethylene skin of a cement-filled weight (pass 3, the
     # pool's RISU #60R pickling weights): moulded, smooth like any PE part.
     "pe_cement": 1.0e-4,
+    # ---- object set version 2 (2026-11-15, completion round session 02) ----
+    # Rolled steel sheet of a drum or a pipe (as ``metal``).
+    "steel_shell": 5.0e-5,
+    # Steel that cannot mirror at 450 kHz: wire and thin rod (a trap's mesh,
+    # 1.2-3.2 mm, thinner than the 3.3 mm wavelength: no flat facet), ribbed
+    # rebar, a chain's links, a pile in seawater (rust scale and growth of a
+    # millimetre and more). Rated rough [DESIGN, as ``concrete``]: it scatters
+    # diffusely, scaled by steel's |R|; its geometry is drawn by its parts.
+    "steel_rough": 2.0e-3,
+    # A timber pile in seawater: growth and borer damage of millimetres
+    # [DESIGN]; sawn timber (``wood``, 0.5 mm) is what a pallet is made of.
+    "wood_rough": 2.0e-3,
+    # Fibre of nets and ropes (bracket R6): braided or twisted, rough.
+    "fibre_low": 3.0e-3,
+    "fibre": 3.0e-3,
+    "fibre_high": 3.0e-3,
 }
 
 _OBJECT_DEFAULTS: dict[str, Material] = {
@@ -202,6 +225,18 @@ _OBJECT_DEFAULTS: dict[str, Material] = {
     # cement half-space (`_ACOUSTIC`, backing "concrete"); opaque (no
     # transmission). `reflectivity` is read only on the raster path.
     "pe_cement": Material("pe_cement", 0.40, 0.05, 0, 0.0, (0.88, 0.88, 0.86)),
+    # ---- object set version 2 (2026-11-15). ``reflectivity`` is what the
+    # legacy geometric renderer reads; the ray-cast reads the constants of
+    # ``_ACOUSTIC`` only (NC #17).
+    # A flooded steel shell (drum, pipe): mild steel with water behind the
+    # wall (change request CR-02-1 of session 01). Never air-filled: an
+    # instance says ``flooded: false`` only for a sealed body.
+    "steel_shell": Material("steel_shell", 0.95, 0.05, 0, 0.0, (0.42, 0.44, 0.47)),
+    "steel_rough":  Material("steel_rough",  0.60, 0.10, 0, 0.0, (0.50, 0.52, 0.54)),
+    "wood_rough":  Material("wood_rough",  0.35, 0.10, 0, 0.0, (0.40, 0.30, 0.20)),
+    "fibre_low":   Material("fibre_low",   0.25, 0.10, 0, 0.0, (0.30, 0.45, 0.40)),
+    "fibre":       Material("fibre",       0.35, 0.10, 0, 0.0, (0.30, 0.45, 0.40)),
+    "fibre_high":  Material("fibre_high",  0.50, 0.10, 0, 0.0, (0.30, 0.45, 0.40)),
 }
 
 
@@ -263,6 +298,21 @@ _ACOUSTIC: dict[str, tuple[float, float, str, float]] = {
     # ``worldgen.compounds._tyre_car``; a tyre's sidewalls and a bicycle
     # tyre have no steel and stay ``rubber``.
     "tyre_tread": (1100.0, 1600.0, "metal", 12.0e-3),
+    # ---- object set version 2 (2026-11-15) ----
+    # Mild steel [K] as a flooded shell: the wall thickness is the instance's
+    # (``wall_mm``: drum 0.9-1.6 mm, JIS Z 1600; pipe 3-8 mm); 1.2 mm here.
+    "steel_shell": (7850.0, 5900.0, "water", 1.2e-3),
+    "steel_rough":  (7850.0, 5900.0, "solid", 0.0),
+    "wood_rough":  (600.0, 4000.0, "solid", 0.0),     # as ``wood``
+    # Net and rope fibre, bracket R6 (amendment A-02): no reflection
+    # coefficient of a fibre bundle at 450 kHz was found at a source. The
+    # bracket is |R| 0.1 / 0.2 / 0.4, written as EQUIVALENT constants: a
+    # polyamide's density (1140 kg/m3) and the sound speed that gives exactly
+    # that |R| against the model's water (Z = Z_w (1 + R) / (1 - R)).
+    # ASSUMED, registered with the bracket; never fitted.
+    "fibre_low":  (1140.0, 1648.4, "solid", 0.0),
+    "fibre":      (1140.0, 2023.0, "solid", 0.0),
+    "fibre_high": (1140.0, 3146.9, "solid", 0.0),
 }
 
 #: A layer on a solid backing whose thickness is only bounded (``pe_cement``)
@@ -322,6 +372,7 @@ _ELASTIC: dict[str, tuple[float, float, float]] = {
     # 1985 Table I, "Steel, mild": c_L 5.9, c_S 3.2 mm/us, 7.80 g/cm3.
     "metal": (3200.0, 0.0, 0.0),
     "tinplate": (3200.0, 0.0, 0.0),
+    "steel_shell": (3200.0, 0.0, 0.0),
 }
 
 

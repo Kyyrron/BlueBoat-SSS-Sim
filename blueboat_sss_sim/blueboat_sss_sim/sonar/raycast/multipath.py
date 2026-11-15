@@ -38,12 +38,19 @@ ROS-free, Qt-free, numpy only.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 
 from . import chains as ch
 from . import propagation as _prop
 from .receiver import BinGrid
-from .scene_mesh import KIND_APRON, KIND_ROUGH_OBJECT, KIND_SEABED, KIND_WALL
+from .scene_mesh import (KIND_APRON, KIND_ROUGH_OBJECT, KIND_SEABED, KIND_SMOOTH_OBJECT,
+                         KIND_SOLID, KIND_WALL)
+
+#: mesh kinds of an object's own surface in ``raycast.objects.mode: solid``:
+#: the scatterers bracket R5 (``corner_floor_coherence``) applies to
+OBJECT_KINDS = (KIND_SMOOTH_OBJECT, KIND_SOLID)
 
 LN10_OVER_20 = np.log(10.0) / 20.0
 
@@ -98,6 +105,13 @@ class Multipath:
         self.sheet = sheet
         self.surface = ch.SurfaceBoundary(rr.k, pc.surface_rms_m)
         self.floor = ch.FloorBoundary(sheet) if pc.floor_bounces else None
+        #: bracket R5 (``raycast.objects.corner_floor_coherence`` = s): the
+        #: wavelength the floor bounce of an OBJECT's echo takes in the
+        #: Fresnel-radius rule, lam / s^2 (the radius over s; s = 0: no
+        #: Fresnel limit, all sub-grid roughness). The sheet's own at s = 1.
+        s_c = float(rr._rc.objects.corner_floor_coherence)
+        self.corner_lam = (float(sheet.lam) if s_c >= 1.0
+                           else float(sheet.lam) / max(s_c * s_c, 1e-30))
         self.faces, self.face_wall = self._wall_faces() if pc.walls else ([], [])
         self.object_faces = self._object_faces() if pc.object_faces else []
         self.last_report: dict = {}
@@ -225,6 +239,25 @@ class Multipath:
             if np.linalg.norm(P - near) <= rmax and (P - f.c) @ f.n > 0.0:
                 out.append(f)
         return out
+
+    @property
+    def corner_active(self) -> bool:
+        """True when bracket R5 changes an object's floor bounces."""
+        return self.floor is not None and self.corner_lam != float(self.sheet.lam)
+
+    @contextmanager
+    def corner_floor(self):
+        """The floor boundary under bracket R5's rule while an object's own
+        echo is evaluated (nothing at s = 1)."""
+        if not self.corner_active:
+            yield False
+            return
+        fl = self.floor
+        keep, fl.lam = fl.lam, self.corner_lam
+        try:
+            yield True
+        finally:
+            fl.lam = keep
 
     def _threshold(self, grid: BinGrid, level: np.ndarray) -> np.ndarray:
         """Per bin: (noise before TVG + level) x 10^(-cutoff/10)."""
@@ -459,6 +492,16 @@ class Multipath:
                                     weights=p0, minlength=grid.n)
         kept, rep = self.select_chains(P, X, e_a, e_n, e_v, grid, direct,
                                        level, amp0, on_floor, wall_of)
+        if self.corner_active:
+            # bracket R5: the scatterers on objects take the corner rule on
+            # their floor bounces (the paths were chosen with the plain rule,
+            # which can only keep one too many)
+            own = np.flatnonzero(np.isin(kind, OBJECT_KINDS))
+            if own.size:
+                with self.corner_floor():
+                    for c, seq in kept[1:]:
+                        if any(bd is self.floor for bd in seq):
+                            c.factor[own] = ch.build(P, X[own], seq, None, self.lam).factor
         for c, seq in kept[1:]:
             ch.check_visibility(P, Xv, c, rr.oracle,
                                 idx=np.flatnonzero(c.visible & (np.abs(c.b) > 0)))
@@ -510,7 +553,12 @@ class Multipath:
     # --------------------------------------------------------- smooth solids
     def facets(self, P, e_a, e_n, e_v, grid: BinGrid, level: np.ndarray) -> dict:
         """The PO patches of every smooth solid in reach through every kept
-        chain pair (bistatic Kirchhoff, coherent)."""
+        chain pair (bistatic Kirchhoff, coherent). Their floor bounces take
+        bracket R5's rule (``corner_floor``)."""
+        with self.corner_floor():
+            return self._facets(P, e_a, e_n, e_v, grid, level)
+
+    def _facets(self, P, e_a, e_n, e_v, grid: BinGrid, level: np.ndarray) -> dict:
         rr = self.rr
         k = rr.k
         n_dep = 0

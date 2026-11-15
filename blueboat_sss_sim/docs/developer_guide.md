@@ -90,6 +90,18 @@ bit-for-bit and switching one class's mode never moves another class),
 and only `jitter_deg > 0` adds a further `rng.normal` draw. The smoke
 test's `[8]` section guards both.
 
+**The object set version 2 (2026-11-15).** A class of the set has, besides its `CATALOG` row:
+- its **parts** in `worldgen/compounds.py` (`_BUILDERS` for a new class, `_BUILDERS_V2` for a class that existed
+  before: used only when the instance says `params.spec: 2`, so no existing world changes). Parts are primitives
+  with a material *name*; parameters the builder reads from `params` must be listed in
+  `objects._CONSTRUCTION_PARAMS` so that a pinned entry carries them;
+- its **card** in `worldgen/population._instance` (sizes, states, poses with their odds) and `BURIAL_MAX`
+  (sand, mud), its affinity row in `AFFINITY`, its family in `groundtruth.FAMILY`;
+- a material that is physical constants with a source (`worldgen/materials.py`), registered in
+  `config/parameter_registry.yaml` with a bracket when it is an assumption.
+Test it in smoke `[20]` (builds over its size range, frequencies, ground truth) and look at it once in the
+picture (`02_world_builder/proxies/gallery.py` in the evidence folder is the pattern).
+
 ### Hand placement and pinning (Screen 5)
 
 Two Qt-free helpers in `worldgen/objects.py` carry the semantics, so the

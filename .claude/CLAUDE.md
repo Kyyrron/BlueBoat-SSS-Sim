@@ -269,6 +269,19 @@ question, and their caveats — are in the superproject skill
 `.claude/skills/svlog/SKILL.md`. Run `sss_svlog_compare` on every model
 change; run `svlog_digest` first on any `.svlog`.
 
+### 3.4b Generated worlds (2026-11-15, completion round session 02)
+
+`worldgen_campaign --spec <yaml> --seeds 1,2,3 --out <root>` builds harbour worlds headless from a
+`blueboat_campaign/1` specification: a procedural basin, a seabed with sediment patches and relief (R2 presets
+fitted on the FIT recording), structures, and litter of the **object set version 2** (11 classes) drawn from
+the population model, all pinned, with a content digest that repeats. Every new world, hand-made included, gets
+its ground truth: `metadata.yaml` schema version 2 (additive, `format` unchanged) and
+`ground_truth_rasters.npz`. Brackets: R5 (`raycast.objects.corner_floor_coherence`, profiles
+`…_corner_low` / `…_corner_high`) and R6 (`uncertain_materials`). **Read `.claude/worldgen-campaign.md` before
+touching `worldgen/campaign.py`, `population.py`, `domain.py`, `groundtruth.py`, the version 2 builders of
+`compounds.py` or `depth/layers/heterogeneity.py`** (opt-in `spec: 2`, pinned entries, random streams, the
+digest, `sand` as the only reference sediment).
+
 ### 3.5 Launch files
 
 `full_mission_launch.py`, `sss_sim_launch.py`, `sim_world_launch.py`, `sea_state_launch.py`.
@@ -488,6 +501,10 @@ scientific argument.
 - `metadata.yaml` is **the cross-module contract** (`blueboat_world_meta/1`:
   anchor, spawn, limits, walls and every object in local + GPS). Downstream
   reads it, **never** `builder_state.yaml` (GUI-internal, may churn).
+- `ground_truth_rasters.npz` (since 2026-11-15) holds `seabed_class`, `in_domain` and `survey_area` on the
+  world grid; `metadata.yaml` gained the additive fields of schema version 2 (per object: role, family, state,
+  `nominal_target`, `effectively_buried`, height over the seabed, face and axis directions; per world: depth
+  domain, seabed classes, content digest). `docs/configuration_guide.md` §3.1.
 - `depth.npz` is the **terrain-only** height raster (pre-object-stamp). The Gazebo
   visuals (`world.sdf` objects and walls, `seabed.stl`) stand on it since 2026-11-02
   (`write_world_sdf(terrain_height=...)`); before, they stood on the stamped raster, so
@@ -561,8 +578,8 @@ of `controller_type`.
 python3 -m test.smoke_test        # from the package source root
 ```
 
-The only automated gate of the Stop hook (no lint, no type-check). ~500
-checks, ~220–250 s, on the system python; the venv runs one visible `SKIP`
+The only automated gate of the Stop hook (no lint, no type-check). ~540
+checks (sections to `[20]`: object set version 2, population, campaign), ~260 s, on the system python; the venv runs one visible `SKIP`
 fewer checks (the bridge checks and the `ApplyLinkWrench` detection need
 ROS; one more SKIP when the `BlueBoat-SSS` checkout beside it is missing). The venv
 interpreter is `~/ros2_ws/.venv/bin/python3` (`env.sh` activates it only

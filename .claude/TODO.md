@@ -79,10 +79,16 @@ A straightedge and feeler gauge on the real containers, or the real heading-resp
 ### [P2] Port is brighter than starboard on every harbour file
 +0.1 to +1.3 dB at u 1.4-2, not consistent in size (evidence `portstbd/`). Not modelled.
 
-### [P2] `owner_measurements.yaml` does not exist
-Mount values are the pass-3 ones. The day it exists: values into `config/default_sonar.yaml` `model:`,
-regenerate the ray-cast profiles, re-baseline the render fixture, rerun V7. Change requests for the processor
-and GCS fore/aft arm (0.0 against -0.345 m): evidence `inputs/lever_arm.md`.
+### [P2] The mount is not measured (`owner_measurements.yaml` holds adopted values)
+`~/ros2_ws/sim_runs/sim_acceptance/owner_measurements.yaml` exists since 2026-11-15 (session 06, BlueBoat-SSS,
+the owner's decision of 2026-11-14). It holds this module's own four pass-3 values (`mount_x_m` -0.345,
+`mount_y_abs_m` 0.285, `sensor_depth_m` 0.22, `beam_tilt_deg` 20), each marked "adopted from
+config/default_sonar.yaml, not measured". **Nothing to do here for that file:** no profile to regenerate, no
+fixture to re-baseline; I5 is "adopted, not measured". The day an entry there says `status: measured`: its value
+into `config/default_sonar.yaml` `model:`, regenerate the ray-cast profiles, re-baseline the render fixture,
+rerun V7. The processor and the GCS use the same values since 2026-11-15, and BlueBoat-SSS
+`tests/test_fore_aft_arm.py` reads this module's `config/default_sonar.yaml` and fails when they differ: a
+change of a mount value here needs the same change there (a request to BlueBoat-SSS, CM-3).
 
 ---
 
@@ -1169,9 +1175,13 @@ frozen at 0.15/0.0), registry entries with the evidence. Open: (1) the pool wall
 −0.60 m from the navigation fix (FIT; VALIDATION −0.71), i.e. −0.10…−0.21 m from the hull
 centre with the GPS where the operator put it, against −0.345 m on the drawing — measure
 the acoustic centre / the EKF reference (reciprocal passes over a point target);
-(2) `sss_processor_node` / the GCS moved to 0.22 m on 2026-11-02 (operator's order); their
-fore/aft is still 0.0 and no georeference uses one — a per-session arm is BlueBoat-SSS's
-(`~/calib/pass3/GCS_PLAN.md` item 4).
+(2) `sss_processor_node` / the GCS moved to 0.22 m on 2026-11-02 (operator's order) and to the
+fore/aft arm of this module on 2026-11-15: the processor publishes it in
+`ProcessedSSSPing.transducer_x_offset` (parameter `transducer_x_offset_m`) and the GCS places
+every ping from the transducers' point (seabed pictures: georef convention 3). BlueBoat-Belief
+and BlueBoat-Perception do not apply it yet. A simulated session recorded before 2026-11-15 was
+placed without the arm: 0.69 m between two opposite passes. Evidence:
+`~/ros2_ws/sim_runs/sim_acceptance/06_sss/handoff_06.md`.
 
 ### [P2] Object edges (D) and walls (E) not calibrated in pass 2
 D needs attitude/heave replay over the field-box pass before any `penumbra_deg`;
@@ -1332,3 +1342,25 @@ Harbour plain seabed, gain 4, 18–27 m / 1200: 9×9 high-pass std 4.7–4.8 dB 
 ray-cast 5.4), dark tail p1 −16.5 dB re the mean (real −20.2…−20.4, ray-cast −20.0),
 intensity contrast 0.97 (real 1.06–1.09). Same diagnosis as B3 ("per-ping level fluctuation
 missing", pool per-bin std 6.29 vs 4.99).
+
+## Session 02 of the completion round (2026-11-15): generated worlds — open items
+
+Evidence and handoff: `~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/handoff_02.md`.
+
+- **Stage 6 (clean-up) waits for the owner**: `02_world_builder/cleanup_plan.md` (delete the 22 classes outside
+  the object set version 2 and the worlds that use them; two decisions asked). Until then the catalogue holds
+  33 classes and nothing is deleted.
+- **B2 on the HELD-OUT recording is session 05's.** The heterogeneity presets were fitted on the FIT recording
+  only. Its dark-region rate cannot be matched at the FIT acquisition (the simulated speckle's range
+  correlation at 40 m / 600 bins, 0.23 against the device's 0.12): judge it at the thesis setting.
+- **Not built** (stated, P1 / P2): a sediment-filled lying drum, an open pipe bore, net draping over objects,
+  moored hulls, vegetation, a tyre on a rim, the beach-day kit (no beach day confirmed), pontoon anchor chains.
+- **Paper requests** (no figure rests on them): APL-UW TR 9407 ch. IV; Williams et al. 2002 and 2009 (the
+  roughness model above 100 kHz); Lyons et al. 2009 (patchy seafloors); Broad, Rees & Davis 2020 (small-boat
+  anchor marks).
+- **Change requests to other modules** (not edited, CM-3): the root interface tables for the new
+  `metadata.yaml` keys and `ground_truth_rasters.npz`; BlueBoat-Perception's class map (`yolo_classes_v1`: the
+  29 classes) for the version 2 set; the Replanner emulator's `CLASS_MAP` (`pipe_pvc`, `mesh_crate`).
+- **The Gazebo sea gate's two worlds** (`sea_validation/flat_1p5m`, `flat_5p0m`) hold `pipe_pvc`: to be rebuilt
+  with `pipe_steel` at Stage 6; the gate itself must then be rerun by a session that is allowed to launch Gazebo.
+

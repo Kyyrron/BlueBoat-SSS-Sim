@@ -125,6 +125,9 @@ _MATERIAL_HELP = {
     "gravel": "Coarse, bright, speckled return that hides small objects in clutter.",
     "rocks": "Brightest and roughest floor, with strong shadows behind each rock.",
     "seagrass": "Patchy, mottled, dark-to-mid return with a soft edge.",
+    "soft_mud": "Soft fine sediment, several dB darker than sand: the dark patches of a harbour floor.",
+    "fine_sand": "Fine sand, darker than the reference sand at low grazing angles.",
+    "coarse_sand": "Coarse sand, slightly brighter than the reference sand at low grazing angles.",
 }
 TERRAIN_TEXTURE_SCHEMA: tuple[tuple, ...] = (
     ("dunes.enabled", "Sand dunes", "bool", False, 0, 1,
@@ -168,7 +171,7 @@ TERRAIN_TEXTURE_SCHEMA: tuple[tuple, ...] = (
      "make large regions, more make a fine mosaic."),
 ) + tuple(
     (f"materials.composition.{name}", f"Patches: {name} weight", "float",
-     _DEFAULT_COMPOSITION[name], 0.0, 1.0,
+     _DEFAULT_COMPOSITION.get(name, 0.0), 0.0, 1.0,
      f"Share of the area covered by {name} patches (patches layout only). "
      + _MATERIAL_HELP[name])
     for name in MaterialLibrary().seabed_names

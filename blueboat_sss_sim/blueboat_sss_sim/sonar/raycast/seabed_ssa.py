@@ -213,6 +213,21 @@ SEDIMENTS = {
                            "JR07 Table 13.1, SAX99 (phi 1.28)"),
     "mud": SedimentParams("mud", 1.499, 1.003, 0.0153, 3.29, 4.64e-4, 2e-3,
                           "JR07 Table 13.1, Key West (phi 7.0)"),
+    # Completion round, session 02 (2026-11-15): three more measured sites of the same table (p. 349, SI
+    # units: w2 in m^(4 - gamma2)), for the sediment patches of generated harbour worlds
+    # (worldgen/depth/layers/heterogeneity.py). Data rows only, appended: "sand" and "mud" keep their place,
+    # and nothing that exists names the new ones. "soft_mud" is the Key West row AS PRINTED: the harbour
+    # profiles carry a leftover override of "mud" (w2 at 1/100 of the book's value), which a patch class must
+    # not inherit. Relative to "sand" at 451 kHz (this module's own law, volume parameter 0.002), at
+    # 15 / 20 / 30 / 40 deg of grazing: soft_mud -4.7 / -6.5 / -7.4 / -4.7 dB; fine_sand -9.6 / -8.9 / -5.8 /
+    # -0.1 dB; coarse_sand +2.1 / +1.6 / -0.7 / +0.1 dB. The book validates this model up to about 100 kHz
+    # only: these contrasts are extrapolations, uncertain by about 5 dB (docs/seabed_model.md, section 9).
+    "soft_mud": SedimentParams("soft_mud", 1.499, 1.003, 0.0153, 3.29, 4.64e-4, 2e-3,
+                               "JR07 Table 13.1, Key West (carbonate sand-silt-clay, phi 7.0), as printed"),
+    "fine_sand": SedimentParams("fine_sand", 1.94, 1.113, 0.0115, 3.92, 0.0041, 2e-3,
+                                "JR07 Table 13.1, Quinault (phi 2.95)"),
+    "coarse_sand": SedimentParams("coarse_sand", 1.98, 1.113, 0.0324, 3.12, 1.4e-4, 2e-3,
+                                  "JR07 Table 13.1, Panama City 98 (phi 0.62)"),
 }
 
 

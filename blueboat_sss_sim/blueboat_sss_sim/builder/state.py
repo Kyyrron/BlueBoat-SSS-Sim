@@ -113,6 +113,15 @@ class DepthState:
     #: before; non-empty = the build bakes ``source + paint + layers`` into
     #: a GeoTIFF and a material map (``worldgen.depth.bake``).
     layers: list = field(default_factory=list)
+    #: The world's sediment declaration for the ray-cast sensor (2026-11-15):
+    #: ``{reference: <class>, patch_classes: [<class>, ...], ...}``. The
+    #: reference is the class the sensor's seabed calibration was made on;
+    #: the patch classes are the other classes the world's own patch field
+    #: draws, over which the near-nadir correction stays on. Empty (every
+    #: world before, every hand-made world): nothing is written and the
+    #: sensor behaves as it did. Written to the config snapshot as
+    #: ``world.seabed``; a generator (``worldgen.campaign``) fills it.
+    seabed: dict[str, Any] = field(default_factory=dict)
 
 
 def scatter_signature(seed: int, classes: Mapping[str, Any]) -> str:

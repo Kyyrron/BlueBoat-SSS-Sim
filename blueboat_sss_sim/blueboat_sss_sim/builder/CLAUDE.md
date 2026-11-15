@@ -178,3 +178,18 @@ the window first and scrolls only below its own minimum (every screen fits
 6. **Preview & save** — objects + depth maps (same PIL code the folder
    stores), name → generate. Collisions get a silent `_1`, `_2`… suffix,
    **always**, Edit re-saves included. Worlds are immutable.
+
+## Additions of 2026-11-15 (completion round, session 02)
+
+- Six layer kinds of the seabed heterogeneity appear in the layer editor like any other
+  (`worldgen/depth/layers/heterogeneity.py`): `sediment_field`, `microrelief`, `bioturbation`, `drag_marks`,
+  `small_litter`, `cobbles`. Three sediment classes joined the material lists (`soft_mud`, `fine_sand`,
+  `coarse_sand`); `MATERIAL_CHOICE` is derived from the material library, never a literal list.
+- `DepthState.seabed` (`{reference, patch_classes, ...}`) is written into the world configuration as
+  `world.seabed` when it is not empty. The wizard has no control for it: the campaign generator fills it. An
+  Edit re-save of a generated world keeps it.
+- Four classes joined the catalogue (`trap_pot`, `pipe_steel`, `net_bundle`, `mooring_block`); the Screen 4 and 5
+  lists show them without a GUI edit. A world built by the campaign generator opens in Edit mode: its litter is
+  a pinned field (`objects.placed`), its structures are explicit instances.
+- Every saved world now also gets its ground truth (`metadata.yaml` schema version 2, additive;
+  `ground_truth_rasters.npz`) and a content digest: `worldgen/groundtruth.py`, called by `build_world_folder`.
