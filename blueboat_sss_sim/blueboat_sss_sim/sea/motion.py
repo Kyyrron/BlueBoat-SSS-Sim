@@ -40,11 +40,13 @@ import numpy as np
 
 from ..core.types import Pose3D
 from .hull import HullBoxes, WaveExcitation, rotation_zyx
+from .plant import IDENTIFIED, LEGACY, PlantVertical
 from .spectrum import G
 
-#: URDF / Hydrodynamics-plugin figures of blueboat_description (read-only
-#: mirror for the offline integrator; BlueROV2 coefficients, von Benzon
-#: 2022).
+#: URDF / Hydrodynamics-plugin figures of blueboat_description for the
+#: LEGACY plant (read-only mirror for the offline integrator; BlueROV2
+#: coefficients, von Benzon 2022). Both plants, the identified one included,
+#: live in :mod:`.plant` (2026-11-15); these names stay for the legacy plant.
 URDF_MASS_KG = 16.15
 #: The ``<inertia>`` attributes (ixx, iyy, izz) of ``blueboat.xacro``'s base
 #: link AS WRITTEN -- in the inertial frame, which the xacro rotates by
@@ -77,9 +79,60 @@ class DampingSpec:
                 or self.pitch_nms_per_rad > 0.0)
 
 
-def hull_damping_from_config(cfg: Mapping[str, Any] | None) -> DampingSpec:
-    """``hull.damping`` of ``config/sea_states.yaml``; unknown keys raise."""
+DAMPING_RATIO_KEYS = ("heave", "roll", "pitch")
+
+
+def damping_ratios_from_config(cfg: Mapping[str, Any] | None) -> dict | None:
+    """``hull.damping_ratio`` (2026-11-15) or None; unknown keys raise."""
+    raw = (cfg or {}).get("damping_ratio")
+    if raw is None:
+        return None
+    raw = dict(raw)
+    if set(raw) != set(DAMPING_RATIO_KEYS):
+        raise KeyError(f"hull.damping_ratio needs exactly {list(DAMPING_RATIO_KEYS)}, got {sorted(raw)}")
+    return {k: float(v) for k, v in raw.items()}
+
+
+def damping_from_ratios(ratios: Mapping[str, float], hull: HullBoxes, plant: PlantVertical) -> tuple:
+    """Hull damping giving the damping ratios on the plant Gazebo integrates: b = 2 zeta sqrt(K (I + A)) per
+    mode, K from the hull's own restoring (``HullBoxes.restoring_summary``), I + A the plant's rigid inertia plus
+    the plugin's added mass, MINUS the plugin's own linear damping (so the share is the complement of whatever the
+    plugin carries: all of it after R-8, today's split before). Returns (DampingSpec, details)."""
+    r = hull.restoring_summary(inertia=plant.inertia_link, cog_z=plant.cog_z_m,
+                               added_mass=plant.added_mass_positive)
+    a33, a44, a55 = plant.added_mass_positive
+    modes = {"heave": (r["c33_up_n_per_m"], plant.mass_kg + a33, plant.linear[0]),
+             "roll": (r["c44_nm_per_rad"], plant.inertia_link[0] + a44, plant.linear[1]),
+             "pitch": (r["c55_nm_per_rad"], plant.inertia_link[1] + a55, plant.linear[2])}
+    b = {k: damping_for_zeta(ratios[k], K, I, lin) for k, (K, I, lin) in modes.items()}
+    det = {k: {"zeta": ratios[k], "stiffness": K, "inertia_with_added": I,
+               "b_total": 2.0 * ratios[k] * np.sqrt(K * I), "b_plugin": -lin, "b_sim": b[k],
+               "f_n_hz": float(np.sqrt(K / I) / (2.0 * np.pi))}
+           for k, (K, I, lin) in modes.items()}
+    det["plant"] = plant.name
+    det["plant_source"] = plant.source
+    return DampingSpec(b["heave"], b["roll"], b["pitch"]), det
+
+
+def default_plant_for(cfg: Mapping[str, Any] | None) -> PlantVertical:
+    """The plant a presets file floats when nothing else says: the CAD hull (a ``catamaran.fin``) is the
+    identified plant's, the box catamaran the legacy plant's."""
+    cat = dict((cfg or {}).get("catamaran") or {})
+    return IDENTIFIED if "fin" in cat else LEGACY
+
+
+def hull_damping_from_config(cfg: Mapping[str, Any] | None, plant: PlantVertical | None = None,
+                             hull: HullBoxes | None = None) -> DampingSpec:
+    """``hull.damping`` (fixed coefficients, the legacy file) or ``hull.damping_ratio`` (ratios sized on the
+    plant, which needs the hull); unknown keys raise."""
     raw = dict((cfg or {}).get("damping") or {})
+    ratios = damping_ratios_from_config(cfg)
+    if raw and ratios is not None:
+        raise KeyError("hull.damping and hull.damping_ratio are exclusive")
+    if ratios is not None:
+        if hull is None:
+            hull = HullBoxes.from_config(dict(cfg))[1]
+        return damping_from_ratios(ratios, hull, plant or default_plant_for(cfg))[0]
     known = {"heave_ns_per_m", "roll_nms_per_rad", "pitch_nms_per_rad"}
     unknown = set(raw) - known
     if unknown:
@@ -223,22 +276,26 @@ def coarse_hulls(presets_hull: Mapping[str, Any], cells_per_m: float = 10.0
     return (HullBoxes(gz.mass_kg, gz.boxes, gz.water_density, gz.name,
                       cells_per_m),
             HullBoxes(cat.mass_kg, cat.boxes, cat.water_density, cat.name,
-                      cells_per_m))
+                      cells_per_m, pressure_depth_m=cat.pressure_depth_m,
+                      wetted_lever=cat.wetted_lever))
 
 
 def simulate_3dof(presets, state, *, duration_s: float = 60.0,
                   dt: float = 0.02, pose_hold_s: float = 0.05,
                   predict: bool = True, damping: DampingSpec | None = None,
                   seed: int = 3, xy=(3.0, 2.0), yaw: float = 0.3,
-                  depth_m: float = 5.0, cells_per_m: float = 10.0) -> dict:
+                  depth_m: float = 5.0, cells_per_m: float = 10.0,
+                  plant: PlantVertical | None = None) -> dict:
     """Heave / roll / pitch of the boat under ``state``, the wave wrench
     computed from a pose the "node" holds for ``pose_hold_s`` (Gazebo's
     20 Hz odometry) and optionally predicts.
 
     Forces on the true state: Gazebo's flat-plane box buoyancy, gravity at
-    the CoG, the plugin's linear + quadratic damping (BlueROV2 values),
+    the CoG, the plugin's linear + quadratic damping and added mass of
+    ``plant`` (default: the presets hull's plant, :func:`default_plant_for`),
     and the model's wrench (excitation, plus the hull damping when
-    ``damping`` is active). Returns the time series and the summary the
+    ``damping`` is active; None = the presets' own for a ``damping_ratio``
+    hull, else none, as before). Returns the time series and the summary the
     smoke test gates on.
     """
     from .model import SeaModel
@@ -247,15 +304,21 @@ def simulate_3dof(presets, state, *, duration_s: float = 60.0,
     gz_box, hull = coarse_hulls(presets.hull, cells_per_m)
     exc = WaveExcitation(gz_box, hull, **WaveExcitation.clip_from_config(
         presets.hull))
+    pl = plant if plant is not None else default_plant_for(presets.hull)
+    # damping None: the box catamaran (legacy file) ran with no hull damping
+    # here, the plugin carrying the BlueROV2 terms; a ratio-based hull (the
+    # identified plant, R-8) gets its own, because its plugin carries none.
+    if damping is None and damping_ratios_from_config(presets.hull) is None:
+        damping = DampingSpec()
     model = SeaModel(presets, SeaSchedule.constant(state), excitation=exc,
-                     depth_m=depth_m, seed=seed,
-                     damping=damping if damping is not None else DampingSpec())
+                     depth_m=depth_m, seed=seed, damping=damping, plant=pl)
     flat = lambda x, y: np.zeros_like(x)  # noqa: E731
     z_eq = gz_box.equilibrium_z()
-    m_eff = URDF_MASS_KG + PLUGIN_ADDED_MASS[0]
-    i_eff = (URDF_LINK_INERTIA[0] + PLUGIN_ADDED_MASS[1],
-             URDF_LINK_INERTIA[1] + PLUGIN_ADDED_MASS[2])
-    weight = URDF_MASS_KG * G
+    a33, a44, a55 = pl.added_mass_positive
+    m_eff = pl.mass_kg + a33
+    i_eff = (pl.inertia_link[0] + a44, pl.inertia_link[1] + a55)
+    weight = pl.mass_kg * G
+    lin, quad, cog_z = pl.linear, pl.quadratic, pl.cog_z_m
 
     n = int(round(duration_s / dt))
     # Torques are produced in world axes (ApplyLinkWrench semantics);
@@ -285,15 +348,15 @@ def simulate_3dof(presets, state, *, duration_s: float = 60.0,
         fxs[k], mzs[k] = f_w[0], t_w[2]
         # Gazebo's own terms on the true state.
         f_gz, t_gz = gz_box.submerged_wrench(true_pose, flat)
-        r_cog = rotation_zyx(roll, pitch, yaw) @ np.array([0.0, 0.0, URDF_COG_Z])
+        r_cog = rotation_zyx(roll, pitch, yaw) @ np.array([0.0, 0.0, cog_z])
         t_grav = np.cross(r_cog, np.array([0.0, 0.0, -weight]))
         fz = (f_gz[2] - weight + f_w[2]
-              + PLUGIN_LINEAR[0] * vz + PLUGIN_QUADRATIC[0] * vz * abs(vz))
+              + lin[0] * vz + quad[0] * vz * abs(vz))
         tau_b = to_body @ (t_gz + t_grav + t_w)
         mx = (tau_b[0]
-              + PLUGIN_LINEAR[1] * p + PLUGIN_QUADRATIC[1] * p * abs(p))
+              + lin[1] * p + quad[1] * p * abs(p))
         my = (tau_b[1]
-              + PLUGIN_LINEAR[2] * q + PLUGIN_QUADRATIC[2] * q * abs(q))
+              + lin[2] * q + quad[2] * q * abs(q))
         # Semi-implicit Euler (velocity first).
         vz += fz / m_eff * dt
         p += mx / i_eff[0] * dt

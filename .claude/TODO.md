@@ -1368,3 +1368,38 @@ where after Stage 6: `02_world_builder/command_map.md`.
 - **Change requests to other modules** (not edited, CM-3): the root interface tables (new `metadata.yaml` keys,
   `ground_truth_rasters.npz`); BlueBoat-Perception's class map `yolo_classes_v1` (29 classes) for the version 2
   set; the Replanner emulator's `CLASS_MAP` (`pipe_pvc`, `mesh_crate`, both deleted).
+
+## Session 03 (2026-11-15) -- open after the sea-state round
+
+- [ ] **R-8 in Control** (`~/ros2_ws/sim_runs/sim_acceptance/03_sea_state/R8_request_for_control.md`): applied by
+  session 04b in Control's working tree on 2026-11-15 (not yet committed): plugin vertical damping 0, heave added mass
+  capped at 14.5 kg (the plugin's explicit added mass diverges above), roll / pitch added inertia as rigid inertia,
+  the physical CoG (+0.1376 m). `sea/plant.py` mirrors it; the derivation as applied is `r8/r8_derivation_04b.json`
+  (heave 1.35, roll 1.18, pitch 0.74 Hz). Open: the Coriolis terms of A44 / A55 are lost; sway added mass stays 14 kg
+  where the CAD gives 133 (the same stability bound).
+- [ ] **Pitch inertia** [UNCERTAIN]: the CAD pitch stiffness with Control's link pitch inertia (5.64 kg·m²) puts the
+  pitch mode at 0.74 Hz (as 04b applied R-8). The July harbour attitude's output-only 1.05-1.20 Hz is report-only since 2026-11-15 (SEEN /
+  HELD-OUT recordings); no FIT 25 Hz attitude exists to check it (session 04b kept the pitch inertia).
+- [ ] **A harbour wave and wind measurement**: `harbour_chop` (Hs 0.030 m, Tp 0.59 s) is a fetch-limited estimate from
+  a land station 10.7 km away (JMA Kasaoka, 6.4 m anemometer, no height correction) and the world's fetch; a wave staff
+  or pressure gauge with a co-located anemometer in the harbour would replace it. It omits waves through the entrance.
+- [ ] **No FIT roll / pitch reference at 25 Hz**: the FIT control runs have no `.svlog`, the FIT harbour file has a
+  frozen clock; the 2026-09-07 beach `.svlog` (sonar FIT) belong to motion-HELD-OUT runs. A FIT attitude record needs
+  an owner decision or a new recording.
+- [ ] **Sway at the real draft** (R-8 §4.2): Control's sway added mass / drag were derived for a 0.06 m draft; the
+  CAD draft is 0.212 m.
+- [ ] MCS cannot pick a sea situation file or a wind (it writes its own schedule): an add-only request to MCS if the
+  operator needs it.
+- [x] **Spawn near-capsize** (found 2026-11-16 in Batch 1a): with the physical CoG Gazebo's box hull capsized the boat
+  for ~4 s before the sea node armed. Fixed by the start hold (`launch/CLAUDE.md`); still open on
+  `use_stock_world:=true` (Control's world launch runs Gazebo immediately).
+- [ ] **Stale poses under a few pings** (2026-11-16): with the ray-cast (render hold) 0.4-0.7 % of pings after
+  start-up use a 90-110 ms old pose (up to 11 mm / 2.0° of roll error at field_matched); with the geometric sonar the
+  Gazebo gate saw 0.16-0.19 % (worst 140 ms) on flat_5p0m_v2 while a second Gazebo shared the CPU, 0 % on
+  flat_1p5m_v2. Cause not isolated (`03_sea_state/batches/batch2a_pose/pose_check.json`, `gate/`).
+- [ ] **The closed-loop motion is a stated limitation** (session 03 MISS, session 04c): one sea cannot match the
+  three controllers; refit the disturbance and the controller response when more field data exist. The simulation
+  also lacks the field gyro's 0.5-1.6 Hz yaw content (not roll / pitch leakage).
+- [ ] `sea/plant.parse_urdf` adds only links named "prop": the identified description names them `thruster1/2`, so the
+  run-time plant mass is 16.01 kg, not 16.15 (heave damping 155.4 instead of 155.8 N·s/m, -0.2 %). Left as is during
+  the session-03 batches (comparability; no physics change); fix with the owner's OK.

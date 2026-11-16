@@ -5246,6 +5246,34 @@ def main() -> None:
     def _hold(mode, ok=True):
         c = _FakeCtl(ok)
         return c, RenderHold(c, mode, 0.1, timer_factory=_ManualTimer)
+    # The start hold (2026-11-16): the world starts paused; the sea node
+    # releases it once armed, on a bootstrap failure, or at the deadline.
+    from blueboat_sss_sim.core.sim_hold import StartHold  # noqa: E402
+    _cs = _FakeCtl()
+    _sh = StartHold(lambda: _cs, deadline_s=60.0, timer_factory=_ManualTimer, sleep=lambda _s: None)
+    _sh_timer = _ManualTimer.last
+    _sh_first = _sh.release("armed")
+    _sh_again = _sh.release("deadline")                  # idempotent: no second request
+    _cd2 = _FakeCtl()
+    _sd = StartHold(lambda: _cd2, deadline_s=60.0, timer_factory=_ManualTimer, sleep=lambda _s: None)
+    _ManualTimer.last.fn()                               # the node never armed: the deadline releases
+    _cf = _FakeCtl(ok=False)
+    _flogs = []
+    _sf = StartHold(lambda: _cf, deadline_s=60.0, log=_flogs.append, timer_factory=_ManualTimer,
+                    attempts=3, sleep=lambda _s: None)
+    _sf.release("armed")
+    _sx = StartHold(lambda: (_ for _ in ()).throw(ImportError("no gz")), deadline_s=60.0,
+                    timer_factory=_ManualTimer, attempts=2, sleep=lambda _s: None)
+    _sx.release("bootstrap failed: Gazebo not found")
+    check("start hold: one unpause request on arming (timer cancelled), idempotent, the deadline "
+          "releases a world the node never armed, a refused request is retried and logged, a missing "
+          "control never raises",
+          _sh_first and _sh_again and _cs.calls == [False] and _sh_timer.cancelled
+          and _sh.released_by == "armed" and not _sh.held
+          and _cd2.calls == [False] and _sd.released_by == "deadline"
+          and _cf.calls == [False, False, False] and not _sf.ok and any("could not release" in m for m in _flogs)
+          and _sx.released_by.startswith("bootstrap failed") and not _sx.ok,
+          f"arm {_cs.calls}, deadline {_cd2.calls}, refused {_cf.calls}")
     _c1, _h1 = _hold("when_needed")
     _h1.run(lambda: 1)                                    # fast: never paused
     _fast = _c1.calls == [] and _ManualTimer.last.cancelled \
@@ -5401,9 +5429,17 @@ def main() -> None:
     fc, _ = ex(Pose3D(0.0, 0.0, z_eq), lambda x, y: np.full_like(x, 0.1))
     ft, _ = ex(Pose3D(0.0, 0.0, z_eq), lambda x, y: np.full_like(x, -0.1))
     rho_g_a = 1000.0 * 9.80665 * hull.waterplane_area_m2
-    check("crest lifts by rho*g*A_wp*eta, trough drops (saturating at -m*g)",
-          abs(fc[2] / (rho_g_a * 0.1) - 1.0) < 0.02 and ft[2] < -0.9 * 16.15 * 9.80665,
-          f"crest {fc[2]:+.1f} N (rho g A eta = {rho_g_a*0.1:.1f}), trough {ft[2]:+.1f} N")
+    # Trough: the buoyancy lost is the volume between the two waterlines, box
+    # by box (2026-11-15: the CAD hull floats 0.212 m deep on a keel fin, so a
+    # 0.1 m trough no longer unloads the whole weight as the 4.5 cm box hull's did).
+    def _wet(b, wl):
+        zb = z_eq + b.cz - b.lz / 2.0
+        return min(max(wl - zb, 0.0), b.lz) * b.lx * b.ly
+    _lost = 1000.0 * 9.80665 * sum(_wet(b, -0.1) - _wet(b, 0.0) for b in hull.boxes)
+    check("crest lifts by rho*g*A_wp*eta, trough drops by the volume between the waterlines",
+          abs(fc[2] / (rho_g_a * 0.1) - 1.0) < 0.02 and abs(ft[2] - _lost) < 0.02 * abs(_lost),
+          f"crest {fc[2]:+.1f} N (rho g A eta = {rho_g_a*0.1:.1f}), trough {ft[2]:+.1f} N "
+          f"(box volumes {_lost:+.1f} N)")
     _, t_sx = ex(Pose3D(0.0, 0.0, z_eq), lambda x, y: 0.2 * x)
     _, t_sy = ex(Pose3D(0.0, 0.0, z_eq), lambda x, y: 0.2 * y)
     check("a surface rising toward +x pitches the bow up (My < 0); toward +y "
@@ -5509,12 +5545,24 @@ def main() -> None:
           f"Fx {f_h[0]:+.1f} N (expect {-1000 * 9.80665 * v_sub * 0.2:+.1f})")
     ff_trim = gz_box.submerged_wrench(Pose3D(0.0, 0.0, z_eq), flat)[0][2]
     mg_ = hull.mass_kg * 9.80665
-    fc2, _ = ex(Pose3D(0.0, 0.0, z_eq), lambda x, y: np.full_like(x, 0.33))
-    e_clip = fc2[2] + ff_trim - mg_
-    check("excess buoyancy is soft-clipped above 2.5 weights (a buried hull "
-          "cannot slam five weights); the +0.1 m crest above stays exact",
-          2.5 * mg_ < e_clip <= 3.5 * mg_ + 1e-6,
-          f"buried demihull publishes {e_clip / mg_:.2f} weights")
+    # The clip is a property of WaveExcitation, tested on the legacy box hull
+    # (reserve 7.4 weights); the CAD hull (2026-11-15) holds only 2.28 weights
+    # of reserve, so buried it publishes exactly that, below the knee.
+    _gzl, _hl = HullBoxes.from_config(load_presets(
+        PKG_ROOT / "config" / "sea_states_legacy.yaml").hull)
+    _exl = WaveExcitation(_gzl, _hl)
+    _zl = _gzl.equilibrium_z()
+    fc2, _ = _exl(Pose3D(0.0, 0.0, _zl), lambda x, y: np.full_like(x, 0.33))
+    e_clip = fc2[2] + _gzl.submerged_wrench(Pose3D(0.0, 0.0, _zl), flat)[0][2] - mg_
+    fc3, _ = ex(Pose3D(0.0, 0.0, z_eq), lambda x, y: np.full_like(x, 0.6))
+    e_cad = fc3[2] + ff_trim - mg_
+    _res = hull.volume_m3 * hull.water_density / hull.mass_kg - 1.0
+    check("excess buoyancy is soft-clipped above 2.5 weights (a buried box hull "
+          "cannot slam five weights); the buried CAD hull publishes its reserve, unclipped",
+          2.5 * mg_ < e_clip <= 3.5 * mg_ + 1e-6
+          and (abs(e_cad / mg_ - _res) < 0.01 if _res < 2.4 else 2.5 * mg_ < e_cad <= 3.5 * mg_ + 1e-6),
+          f"buried box demihull {e_clip / mg_:.2f} weights; CAD hull {e_cad / mg_:.2f} "
+          f"(reserve {_res:.2f})")
     pp = predict_pose(Pose3D(0.0, 0.0, 0.0, yaw=np.pi / 2),
                       [1.0, 0.0, 0.0], [0.0, 0.0, 0.1], 0.05)
     pp_far = predict_pose(pp, [9.0, 0.0, 0.0], [0.0, 0.0, 0.0], 10.0)
@@ -5657,24 +5705,28 @@ def main() -> None:
           and all(p.label and p.description and p.reference
                   for p in list(presets.current.values())
                   + list(presets.waves.values())))
-    # Since 2026-11-10 every level is a fetch-limited young sea, Tp = 3.6
-    # sqrt(Hs) (the owner's re-derivation; it was 2-4.5 s, above the DNV
+    # Since 2026-11-10 every ladder level is a fetch-limited young sea, Tp =
+    # 3.6 sqrt(Hs) (the owner's re-derivation; it was 2-4.5 s, above the DNV
     # wind-sea band): JONSWAP / Kahma & Calkoen growth give Tp/sqrt(Hs) =
-    # 3.0-4.0 for a harbour and 3.6 reproduces the real boat's ~1.1 Hz
-    # motion; gamma 1.5 broadens the spectrum; every non-calm preset has a
-    # random wave-group (events) block for the long-period energy.
+    # 3.0-4.0 for a harbour, 3.6 is DNV's lower bound; gamma 1.5 broadens the
+    # spectrum; every non-calm preset has a random wave-group (events) block
+    # for the long-period energy. Since 2026-11-15 the site level
+    # `harbour_chop` is outside the ladder rule: its Hs and Tp are its own
+    # fetch-limited derivation (sea/fetch.py; checked below).
     from blueboat_sss_sim.sea.spectrum import (TP_PER_SQRT_HS,  # noqa: E402
                                                hybrid_frequencies,
                                                tp_fetch_limited)
-    check("wave presets: Tp = 3.6 sqrt(Hs) (fetch-limited, +-1.5 %), gamma 1.5, "
-          "short-crested, events on, Hs monotonic",
+    _ladder = [p for n, p in presets.waves.items() if n != "harbour_chop"]
+    check("wave presets: Tp = 3.6 sqrt(Hs) on the ladder (fetch-limited, +-1.5 %; "
+          "harbour_chop has its own derivation), gamma 1.5, short-crested, events on, "
+          "ladder Hs monotonic",
           all(abs(p.tp_s / tp_fetch_limited(p.hs_m) - 1.0) < 0.015
-              and p.gamma <= 2.0 and p.events.active and p.spread_s <= 3.0
-              for p in presets.waves.values() if p.hs_m > 0)
+              for p in _ladder if p.hs_m > 0)
+          and all(p.gamma <= 2.0 and p.events.active and p.spread_s <= 3.0
+                  for p in presets.waves.values() if p.hs_m > 0)
           and TP_PER_SQRT_HS == 3.6
           and not presets.waves["calm"].events.active
-          and [p.hs_m for p in presets.waves.values()]
-          == sorted(p.hs_m for p in presets.waves.values()))
+          and [p.hs_m for p in _ladder] == sorted(p.hs_m for p in _ladder))
     # Plain-language keys (2026-10-08, additive): a mean speed with a
     # variation level; a wave height with automatic period, crest length
     # and wakes; WMO 3700 codes; per-keyframe transitions.
@@ -5872,27 +5924,49 @@ def main() -> None:
           and _wf1.discretisation == "equal_energy",
           f"decay at 1 Hz {np.interp(2*np.pi, _wfd.omega, _wfd.decay(0.045)):.3f} "
           f"(e^-kd {np.exp(-_k1*0.045):.3f}); {len(_wfd.omega)} components")
-    _st_hc = resolve_state(presets, "none", 0.0, "harbour_chop", 180.0)
-    _st_hc = dataclasses.replace(_st_hc, waves=dataclasses.replace(
-        _st_hc.waves, events=dataclasses.replace(_st_hc.waves.events,
-                                                 rate_per_hour=0.0)))
-    _hc = simulate_3dof(presets, _st_hc, duration_s=70.0, dt=0.02, seed=3,
-                        cells_per_m=20.0)
+    # harbour_chop (2026-11-15, the owner's ruling on condition D): a PHYSICAL
+    # fetch-limited wind sea (sea/fetch.py: Kahma & Calkoen 1992 at the JMA
+    # Kasaoka wind of the July survey hours over the harbour world's fetch).
+    # The gate is that the preset IS the formula's output; the July attitude
+    # band (SEEN / HELD-OUT recordings) is printed against the offline motion,
+    # REPORT ONLY, never passed or failed on.
+    from blueboat_sss_sim.sea.fetch import HARBOUR_CHOP, fetch_limited  # noqa: E402
+    _hc_hs, _hc_tp = HARBOUR_CHOP.sea()
+    _hc_p = presets.waves["harbour_chop"]
+    _hc_sit = SeaSchedule.from_yaml(presets, PKG_ROOT / "config" / "sea_situations"
+                                    / "harbour_chop.yaml").state_at(0.0).waves
+    check("harbour_chop = the fetch-limited wind sea of its inputs (Kahma & Calkoen 1992, "
+          "stable): preset Hs / Tp equal the formula's output (3 / 2 decimals), its "
+          "situation's waves come from the measured wind direction",
+          abs(_hc_p.hs_m - round(_hc_hs, 3)) < 1e-9 and abs(_hc_p.tp_s - round(_hc_tp, 2)) < 1e-9
+          and abs(_hc_sit.from_deg - HARBOUR_CHOP.from_deg) < 1e-9
+          and abs(fetch_limited(10.0, 1.0e4)[0] - 4.0 * np.sqrt(9.25e-7 * (9.81e4 / 100.0)
+                                                              ** 0.766 * 1.0e4 / 9.81 ** 2)) < 1e-12,
+          f"preset {_hc_p.hs_m} m / {_hc_p.tp_s} s; formula {_hc_hs:.4f} m / {_hc_tp:.3f} s at "
+          f"U10 {HARBOUR_CHOP.u10_mps} m/s, fetch {HARBOUR_CHOP.fetch_m} m; wind bracket "
+          f"{[tuple(round(v, 3) for v in b) for b in HARBOUR_CHOP.bracket_wind()]}")
+    # Report only: the offline motion at harbour_chop, heading-averaged (waves
+    # from 180 and 45 deg relative to a 0.3 rad heading), printed against the
+    # July attitude band.
     _kk = int(10.0 / 0.02)
-    _hsp = attitude_spectra(_hc["t"][_kk:], _hc["roll"][_kk:], _hc["pitch"][_kk:],
-                            np.full(_hc["t"].size - _kk, 0.3))
+    _hsp_l = []
+    for _frm in (180.0, 45.0):
+        _st_hc = resolve_state(presets, "none", 0.0, "harbour_chop", _frm)
+        _st_hc = dataclasses.replace(_st_hc, waves=dataclasses.replace(
+            _st_hc.waves, events=dataclasses.replace(_st_hc.waves.events,
+                                                     rate_per_hour=0.0)))
+        _hc = simulate_3dof(presets, _st_hc, duration_s=70.0, dt=0.02, seed=3,
+                            cells_per_m=20.0)
+        _hsp_l.append(attitude_spectra(_hc["t"][_kk:], _hc["roll"][_kk:], _hc["pitch"][_kk:],
+                                       np.full(_hc["t"].size - _kk, 0.3)))
+    _hsp = {ax: {k: (round(float(np.mean([h[ax][k] for h in _hsp_l])), 3)
+                     if isinstance(_hsp_l[0][ax][k], (int, float)) else _hsp_l[0][ax][k])
+                 for k in _hsp_l[0][ax]} for ax in ("roll", "pitch")}
     _tb = (_tdoc or {}).get("bands", {})
-    _cb = _tb.get("roll_centroid_hz", [1.11, 1.17])
-    check("harbour_chop reproduces the real boat's motion SPECTRUM (offline "
-          "loop): roll centroid within 0.15 Hz of the corpus band, >= 75 % of "
-          "roll power in 0.8-2 Hz, roll/pitch std 0.6-1.6 deg",
-          _cb[0] - 0.15 <= _hsp["roll"]["centroid_hz"] <= _cb[1] + 0.15
-          and _hsp["roll"]["frac_band"] >= 0.75
-          and 0.6 <= _hsp["roll"]["std_deg"] <= 1.6
-          and 0.6 <= _hsp["pitch"]["std_deg"] <= 1.6,
-          f"roll {_hsp['roll']} / pitch {_hsp['pitch']}; corpus roll centroid "
-          f"{_cb} Hz, roll std {_tb.get('roll_std_deg')}, pitch std "
-          f"{_tb.get('pitch_std_deg')}")
+    print(f"  REPORT (not gated; July attitude, SEEN / HELD-OUT): harbour_chop offline roll "
+          f"{_hsp['roll']} / pitch {_hsp['pitch']}; July band: roll centroid "
+          f"{_tb.get('roll_centroid_hz')} Hz, roll std {_tb.get('roll_std_deg')}, pitch std "
+          f"{_tb.get('pitch_std_deg')} deg; output-only roll 1.15-1.30 Hz")
     bad_yaml = OUT / "bad_sea.yaml"
     bad_yaml.write_text("format: blueboat_sea_state_presets/1\n"
                         "current: {x: {speed_mps: 1.0, bogus: 2}}\nwaves: {}\n")
@@ -5968,7 +6042,12 @@ def main() -> None:
           and not smp0.waves_active and smp1.state.is_null
           and smp1.wrench_active and null_model.hydrostatics == "catamaran"
           and np.abs(smp1.force).max() < 0.5 and np.abs(smp1.torque).max() < 0.05
-          and smp_p.torque[1] > 5.0,
+          # at least half the waterplane's own pitch restoring, rho g I_L theta
+          # (hull-independent since 2026-11-15; was a fixed 5 N.m for the box hull)
+          and smp_p.torque[1] > 0.5 * 1000.0 * 9.80665 * sum(
+              b.ly * b.lx ** 3 / 12.0 for b in hull.boxes
+              if b.cz + b.lz / 2.0 >= max(c.cz + c.lz / 2.0 for c in hull.boxes) - 1e-9)
+          * np.radians(2.0),
           f"trim residual {np.abs(smp1.force).max():.1e} N; bow-up 2 deg -> "
           f"My {smp_p.torque[1]:+.1f} N.m (positive = bow down)")
     _legacy_presets = dataclasses.replace(
@@ -6149,6 +6228,12 @@ def main() -> None:
           and parse_real_time_factor("4.0") == 4.0
           and read_max_step_size(str(world_dir / "world.sdf")) == 0.01
           and _rtf_refused)
+    check("start hold flags: a paused start drops only -r (the sea node unpauses once armed); "
+          "unpaused flags unchanged",
+          gz_args_for(True, 1.0, 0.01, paused=True) == "-s"
+          and gz_args_for(False, 1.0, 0.01, paused=True) == ""
+          and gz_args_for(True, 0.1, 0.01, paused=True) == "-s -z 10"
+          and gz_args_for(True, 1.0, 0.01, paused=False) == "-r -s")
     check("the sea-state launch arguments are the six the launches forward",
           set(SEA_ARGS) == {"sea_current", "sea_current_from_deg", "sea_waves",
                             "sea_waves_from_deg", "sea_schedule", "sea_seed"})
@@ -6389,6 +6474,221 @@ def main() -> None:
           "ground: " + ", ".join(f"{k} {_g10[k][0]:.3f}" for k in _g10)
           + f"; line (default, record only): level {_l10['level'][0]:.3f}, "
           f"yaw {_ly10:.3f}; level vs line {_dlg10:+.3f} dB")
+
+    # ---- 10b. Session 03 (2026-11-15): plant, CAD hull, wind, stand-in, launch --
+    # Plants: the two plants Gazebo can integrate, re-derived from Control's
+    # xacro (ElementTree; the xacro:if/unless blocks and ${...} properties
+    # evaluated for plant / vertical_model, comments dropped) against the
+    # mirrors the offline loop and the fallback use. Since session 04b
+    # (2026-11-15) the identified plant is R-8 as applied: zDotW -14.5, roll /
+    # pitch added inertia as rigid inertia, the physical CoG (+0.1376).
+    import ast as _ast10
+    from blueboat_sss_sim.sea.plant import (IDENTIFIED, IDENTIFIED_PRE_R8,  # noqa: E402
+                                            LEGACY, PLANTS, parse_urdf,
+                                            plant_from_xacro, presets_file_for)
+    from blueboat_sss_sim.sea.motion import damping_from_ratios  # noqa: E402
+    _ctrl = PKG_ROOT.parents[1] / "BlueBoat-Control"
+    if (_ctrl / "blueboat_description" / "urdf" / "hydrodynamics_identified.xacro").is_file():
+        _xl = plant_from_xacro(_ctrl, "bluerov2_legacy")
+        _xi = plant_from_xacro(_ctrl, "identified")
+        _same = lambda a, b: all(np.allclose(getattr(a, f), getattr(b, f), rtol=0, atol=2e-4)  # noqa: E731
+                                 for f in ("mass_kg", "inertia_link", "cog_z_m", "added", "linear", "quadratic"))
+        _r8 = _same(_xi, IDENTIFIED)
+        _pre = _same(_xi, IDENTIFIED_PRE_R8)
+        check("plants re-derived from Control's xacro: legacy = mirror; identified = the R-8 "
+              "values, or the pre-R-8 commit (the node then sizes the complement at run time)",
+              _same(_xl, LEGACY) and (_r8 or _pre),
+              f"legacy {_xl.inertia_link} {_xl.added} {_xl.linear}; identified yaw "
+              f"{_xi.inertia_link[2]} vertical {'R-8 applied' if _r8 else 'pre-R-8 (BlueROV2 terms)'}")
+    else:
+        print(f"  SKIP: plants vs Control's xacro ({_ctrl} not checked out)")
+    _urdf = ('<robot name="b"><link name="blueboat/base_link"><inertial><mass value="16.01"/>'
+             '<origin xyz="0 0 -0.12913" rpy="1.5707963267948966 0 0"/>'
+             '<inertia ixx="2.42369" ixy="0" ixz="0" iyy="7.5" iyz="0" izz="5.6403125"/></inertial></link>'
+             '<link name="blueboat/prop_right"><inertial><mass value="0.07"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial></link>'
+             '<link name="blueboat/prop_left"><inertial><mass value="0.07"/><inertia ixx="1" iyy="1" izz="1" ixy="0" ixz="0" iyz="0"/></inertial></link>'
+             '<gazebo><plugin name="h" filename="gz-sim-hydrodynamics-system"><zDotW>-16.15</zDotW>'
+             '<kDotP>-1.79</kDotP><mDotQ>-0.93</mDotQ><zW>0</zW><kP>0</kP><mQ>0</mQ><zWabsW>0</zWabsW>'
+             '<kPabsP>0</kPabsP><mQabsQ>0</mQabsQ></plugin></gazebo></robot>')
+    _pu = parse_urdf(_urdf)
+    check("robot description parsed: base link in the link frame (pitch = izz, yaw = iyy under "
+          "the pi/2 roll), propellers added, plant told apart by its yaw inertia",
+          _pu.name == "identified" and abs(_pu.mass_kg - 16.15) < 1e-9
+          and np.allclose(_pu.inertia_link, (2.42369, 5.6403125, 7.5), atol=1e-6)
+          and _pu.added == (-16.15, -1.79, -0.93)
+          and presets_file_for("bluerov2_legacy", PKG_ROOT / "config").name == "sea_states_legacy.yaml"
+          and presets_file_for("identified", PKG_ROOT / "config").name == "sea_states.yaml",
+          f"{_pu.inertia_link}, {_pu.mass_kg:.2f} kg, {_pu.name}")
+    # Legacy bit identity: today's code on the frozen legacy presets publishes
+    # HEAD's wrench sample for sample (fixture made by the HEAD code itself,
+    # git archive 238a60e, 03_sea_state/../make_legacy_fixture.py).
+    _pl10 = load_presets(PKG_ROOT / "config" / "sea_states_legacy.yaml")
+    _fx10 = np.load(FIXTURES / "sea_legacy_wrench_head_238a60e.npz")
+    _ok10, _md10 = True, 0.0
+    for _nm, _cu, _wv in (("calm", "none", "calm"), ("chop", "weak", "harbour_chop"),
+                          ("slight", "moderate", "slight")):
+        _m10 = SeaModel(_pl10, SeaSchedule.constant(resolve_state(_pl10, _cu, 30.0, _wv, 200.0)),
+                        depth_m=5.0, seed=7)
+        _rows = []
+        for _k in range(400):
+            _t = 0.01 * _k
+            _pose = Pose3D(1.0 + 0.3 * _t, -2.0, -0.111 + 0.01 * np.sin(3 * _t),
+                           roll=0.02 * np.sin(5 * _t), pitch=0.015 * np.cos(4 * _t), yaw=0.7)
+            _s = _m10.update(_t, _pose, (np.array([0.3, 0.0, 0.01 * np.cos(3 * _t)]),
+                                         np.array([0.1 * np.cos(5 * _t), -0.06 * np.sin(4 * _t), 0.0])))
+            _rows.append(np.r_[_s.force, _s.torque, _s.water_velocity, _s.eta_m])
+        _ok10 &= np.array_equal(np.array(_rows), _fx10[_nm])
+        _md10 = max(_md10, float(np.abs(np.array(_rows) - _fx10[_nm]).max()))
+    check("legacy plant: the frozen sea_states_legacy.yaml publishes HEAD's (238a60e) wrench "
+          "bit for bit (calm, harbour chop, slight; 400 ticks each)",
+          _ok10 and _m10.damping.heave_ns_per_m == 245.0,
+          f"max |difference| {_md10:.1e}")
+    # The CAD hull (R-8): draft, waterplane, stiffness against the CAD
+    # derivation as session 04b applied it (03_sea_state/r8/r8_derivation_04b.json:
+    # the physical CoG 0.1376 m above the link origin lowers K44 / K55 by
+    # m g dz from 275 / 182), damping as the complement of the plugin's on
+    # both identified states.
+    _gzc, _hc10 = HullBoxes.from_config(presets.hull)
+    _rc10 = _hc10.restoring_summary(inertia=IDENTIFIED.inertia_link, cog_z=IDENTIFIED.cog_z_m,
+                                    added_mass=IDENTIFIED.added_mass_positive)
+    _ratios = {"heave": 0.3, "roll": 0.2, "pitch": 0.2}
+    _dr8, _ = damping_from_ratios(_ratios, _hc10, IDENTIFIED)
+    _dpre, _ = damping_from_ratios(_ratios, _hc10, IDENTIFIED_PRE_R8)
+    check("CAD hull: draft 0.212 m, waterplane 0.224 m^2, K33 2199 N/m, K44 233 and K55 140 "
+          "N.m/rad at the physical CoG (CAD derivation, within 2 %); pressure read at 0.072 m",
+          abs(_hc10.draft_at_trim() - 0.212) < 0.002
+          and abs(_hc10.waterplane_area_m2 / 0.2242 - 1) < 0.01
+          and abs(_rc10["c33_up_n_per_m"] / 2198.5 - 1) < 0.02
+          and abs(_rc10["c44_nm_per_rad"] / 232.8 - 1) < 0.02
+          and abs(_rc10["c55_nm_per_rad"] / 140.2 - 1) < 0.02
+          and abs(_hc10.pressure_depth_at_trim() - 0.072) < 0.002,
+          f"draft {_hc10.draft_at_trim():.4f} m, A_wp {_hc10.waterplane_area_m2:.4f}, "
+          f"K {_rc10['c33_up_n_per_m']:.0f} / {_rc10['c44_nm_per_rad']:.1f} / {_rc10['c55_nm_per_rad']:.1f}")
+    check("hull damping from ratios is the complement of the plugin's: all of it on the R-8 "
+          "plant as applied (156 N.s/m, 12.5 / 12.1 N.m.s), none where the BlueROV2 terms already exceed it",
+          abs(_dr8.heave_ns_per_m - 155.8) < 1.0 and abs(_dr8.roll_nms_per_rad - 12.53) < 0.2
+          and abs(_dr8.pitch_nms_per_rad - 12.14) < 0.2 and _dpre.roll_nms_per_rad == 0.0
+          and _dpre.pitch_nms_per_rad == 0.0 and 0.0 < _dpre.heave_ns_per_m < _dr8.heave_ns_per_m,
+          f"R-8 {_dr8}; pre-R-8 {_dpre}")
+    _gzL, _hL = HullBoxes.from_config(_pl10.hull)
+    _zL = _gzL.equilibrium_z()
+    _mL = _hL.submerged_wrench(Pose3D(0, 0, _zL, pitch=0.01), flat)[1][1]
+    _wL = np.cross(rotation_zyx(0.0, 0.01, 0.0) @ np.array([0.0, 0.0, -0.12913]),
+                   np.array([0.0, 0.0, -_hL.mass_kg * 9.80665]))[1]
+    check("restoring_summary: the weight's moment restores in pitch too (was added with the "
+          "wrong sign; 484, not 443 N.m/rad on the box hull)",
+          abs(_hL.restoring_summary()["c55_nm_per_rad"] - (-(_mL + _wL) / 0.01)) < 0.5,
+          f"summary {_hL.restoring_summary()['c55_nm_per_rad']:.1f}, r x W {-(_mL + _wL) / 0.01:.1f}")
+    # The stand-in, ported: the same moment as on branch experiment, sample
+    # for sample (fixture computed by the experiment code, a51a44c).
+    from blueboat_sss_sim.sea.yaw_moment import YawMomentField  # noqa: E402
+    _yf = np.load(FIXTURES / "yaw_moment_experiment_a51a44c.npz")
+    _ymd = 0.0
+    for _sd in (301, 7):
+        _f = YawMomentField(_sd)
+        for _tau in (1.0, 0.5, 2.0):
+            _ymd = max(_ymd, float(np.abs(np.array([_f.moment(x, 0.5, _tau) for x in _yf["t"]])
+                                          - _yf[f"m_s{_sd}_tau{_tau}"]).max()))
+        _ymd = max(_ymd, float(np.abs(np.array([_f.moment(x, 0.5, 1.0, 2.0, 0.3) for x in _yf["t"]])
+                                      - _yf[f"m_s{_sd}_xfade"]).max()))
+    check("yaw-moment stand-in = branch experiment's, sample for sample (2 seeds, 3 time "
+          "constants, a crossfade; 2401 samples each)", _ymd == 0.0, f"max |difference| {_ymd:.1e}")
+    # Wind (sea/wind.py): off is a strict no-op; directions; magnitude;
+    # gusts a pure function of (seed, t); a ramp never steps.
+    from blueboat_sss_sim.sea.wind import WindField, WindSpec, Windage  # noqa: E402
+    _wg = Windage.from_config(presets.hull)
+    _wf = WindField(5)
+    _q = 0.5 * 1.225 * 4.0 ** 2
+    _fh, _th, _ = _wf.wrench(0.0, WindSpec(4.0, 0.0), _wg, np.radians(90.0))      # heading N, wind from N
+    _fp, _tp, _ = _wf.wrench(0.0, WindSpec(4.0, 270.0), _wg, np.radians(90.0))    # wind from W = port
+    _f45, _t45, _i45 = _wf.wrench(0.0, WindSpec(4.0, 315.0), _wg, np.radians(90.0))
+    check("wind: a head wind pushes aft by q A_F c_x, a wind from port pushes to starboard by "
+          "q A_L c_y, a bow-quarter wind yaws by q A_L L c_n sin 2 gamma",
+          abs(_fh[1] + _q * _wg.frontal_area_m2 * _wg.cx) < 1e-9 and abs(_fh[0]) < 1e-9
+          and abs(_fp[0] - _q * _wg.lateral_area_m2 * _wg.cy) < 1e-9
+          and abs(_t45[2] - _q * _wg.lateral_area_m2 * _wg.length_m * _wg.cn) < 1e-9,
+          f"head {_fh[:2]}, port {_fp[:2]}, N(45 deg) {_t45[2]:.3f} N.m (gamma {_i45['gamma_deg']:.0f})")
+    _gs = WindSpec(4.0, 30.0, 0.25, 2.0, 5.0)
+    _ta = np.arange(0.0, 600.0, 0.05)
+    _ua = np.array([_wf.speed_dir(x, _gs)[0] for x in _ta])
+    _ub = np.array([WindField(5).speed_dir(x, _gs)[0] for x in _ta[::7]])
+    check("wind gusts: std = intensity x mean within 15 %, a pure function of (seed, t) "
+          "(another sampling gives the same values), another seed differs",
+          abs(_ua.std() / (0.25 * 4.0) - 1.0) < 0.15 and np.array_equal(_ua[::7], _ub)
+          and not np.allclose(_ua[:200], [WindField(6).speed_dir(x, _gs)[0] for x in _ta[:200]]),
+          f"std {_ua.std():.3f} m/s for 0.25 x 4 m/s")
+    _sw = SeaSchedule.from_dict(presets, {"interpolation": "hold", "keyframes": [
+        {"t_s": 0.0, "waves": {"preset": "calm"}},
+        {"t_s": 10.0, "ramp_s": 20.0, "wind": {"speed_mps": 4.0, "from": "NNE", "gust_intensity": 0.2}}]})
+    _mw = SeaModel(presets, _sw, seed=4)
+    _mz = []
+    for _k in range(int(45.0 / 0.01)):
+        _smp = _mw.update(0.01 * _k, Pose3D(0.0, 0.0, z_eq, yaw=0.9))
+        _mz.append(_smp.torque[2])
+    _mz = np.array(_mz)
+    _m0 = SeaModel(presets, SeaSchedule.constant(resolve_state(presets)), seed=4)
+    _mw0 = SeaModel(presets, SeaSchedule.from_dict(presets, {"keyframes": [
+        {"t_s": 0.0, "waves": {"preset": "calm"}, "wind": {"speed_mps": 0.0}}]}), seed=4)
+    _a0 = _m0.update(1.0, Pose3D(0.0, 0.0, z_eq, roll=0.01))
+    _b0 = _mw0.update(1.0, Pose3D(0.0, 0.0, z_eq, roll=0.01))
+    check("wind ramps in (no step: largest tick-to-tick yaw-moment change < 2 % of its range) "
+          "and a zero wind block is bit-identical to no wind",
+          np.abs(np.diff(_mz)).max() < 0.02 * np.ptp(_mz) and np.ptp(_mz[:900]) == 0.0
+          and np.array_equal(_a0.force, _b0.force) and np.array_equal(_a0.torque, _b0.torque),
+          f"max step {np.abs(np.diff(_mz)).max():.4f} of range {np.ptp(_mz):.3f} N.m")
+    # kappa bracket: the horizontal sea forces scale 0.493 / kappa, the vertical never.
+    _sk = SeaSchedule.constant(dataclasses.replace(resolve_state(presets, "none", 0.0, "slight", 30.0),
+                                                   wind=WindSpec(4.0, 30.0)))
+    _k1 = SeaModel(presets, _sk, seed=2).update(3.0, Pose3D(0.0, 0.0, z_eq, yaw=0.4))
+    _k2 = SeaModel(presets, _sk, seed=2, kappa=0.85).update(3.0, Pose3D(0.0, 0.0, z_eq, yaw=0.4))
+    check("kappa bracket: surge / sway / yaw sea forces x 0.493 / kappa, heave / roll / pitch unchanged",
+          np.allclose(_k2.force[:2], _k1.force[:2] * 0.493 / 0.85, rtol=1e-12)
+          and abs(_k2.torque[2] - _k1.torque[2] * 0.493 / 0.85) < 1e-9 * max(1.0, abs(_k1.torque[2]))
+          and _k2.force[2] == _k1.force[2] and np.array_equal(_k2.torque[:2], _k1.torque[:2]),
+          f"fx {_k1.force[0]:.2f} -> {_k2.force[0]:.2f} N")
+    # Situations (R3): every shipped file loads against its presets file.
+    _sit = {}
+    for _f in sorted((PKG_ROOT / "config" / "sea_situations").glob("*.yaml")):
+        _pp = (load_presets(PKG_ROOT / "config" / "sea_states_legacy_20261021.yaml")
+               if _f.stem == "legacy_standin" else presets)
+        _sit[_f.stem] = SeaSchedule.from_yaml(_pp, _f).state_at(0.0)
+    check("sea situations load (R3 presets; legacy_standin on the 2026-10-21 presets: Hs 0.20 m, "
+          "Tp 3.0 s, 0.5 N.m / 1 s stand-in)",
+          {"calm", "harbour_chop", "legacy_standin"} <= set(_sit)
+          and _sit["legacy_standin"].yaw_moment.std_nm == 0.5
+          and _sit["legacy_standin"].waves.tp_s == 3.0 and _sit["calm"].is_null,
+          ", ".join(sorted(_sit)))
+    # R-6 / R-7: the launch's mirror of Control's SIM_CONFIGS, and the odometry rule.
+    from full_mission_launch import SIM_CONFIGS, resolve_sim_config  # noqa: E402
+    _simf = _ctrl / "blueboat_control" / "launch" / "Sim_launch.py"
+    if _simf.is_file():
+        _tree = _ast10.parse(_simf.read_text())
+        _ref = None
+        for _n in _ast10.walk(_tree):
+            if isinstance(_n, _ast10.Assign) and any(getattr(t, "id", "") == "SIM_CONFIGS" for t in _n.targets):
+                _ref = {_ast10.literal_eval(k): {kw.arg: _ast10.literal_eval(kw.value) for kw in v.keywords}
+                        for k, v in zip(_n.value.keys, _n.value.values)}
+        check("full_mission_launch SIM_CONFIGS = Control's Sim_launch.py (R-6)", _ref == SIM_CONFIGS,
+              f"{_ref}")
+    else:
+        print(f"  SKIP: SIM_CONFIGS vs Control ({_simf} not checked out)")
+    _fe = resolve_sim_config("field_equivalent")
+    _lg = resolve_sim_config("legacy", gain_profile="field")
+    _nc = resolve_sim_config("field_equivalent", with_control=False, thrust_gain="[0.39, 0.59]")
+    check("R-7 odometry rule: field-equivalent with control -> sonar and sea fall back on "
+          "/blueboat/odom_gz; legacy and no-control runs bridge /blueboat/odom directly; the "
+          "shim always reads /blueboat/odom; overrides forwarded",
+          _fe["true_odom_topic"] == "/blueboat/odom_gz" and _fe["odom_raw"]
+          and _lg["true_odom_topic"] == "" and not _lg["odom_raw"]
+          and _lg["master_control"]["gain_profile"] == "field"
+          and _lg["simulation_interface"]["thrust_rate_hz"] == 10.0
+          and not _nc["odom_raw"] and _nc["simulation_interface"]["thrust_gain"] == [0.39, 0.59]
+          and all(c["odom_topic"] == "/blueboat/odom" for c in (_fe, _lg, _nc)),
+          f"fe {_fe['description']}, legacy {_lg['description']}, no control {_nc['description']}")
+    from blueboat_sss_sim.core.run_context import decode as _dec, encode as _enc  # noqa: E402
+    _ctx = {"sim_config": "legacy", "n": 3, "nested": {"a": [1, 2]}}
+    check("run context survives the launch's string parameter (b64 JSON round trip)",
+          _dec(_enc(_ctx)) == _ctx and _dec("") == {} and _dec('{"a": 1}') == {"a": 1})
 
     # ------------------------------------------------------------------
     print("[11] builder schema help: every form row explains itself")
@@ -7276,6 +7576,17 @@ def main() -> None:
               and none13 is None
               and odom13 is not None and node13._pose_source == "odom"
               and abs(odom13[0].x - 5.0) < 1e-9)
+        # R-7 (2026-11-15): Gazebo's own odometry (odom_gz) comes before the
+        # field-rate /blueboat/odom while it is fresh, and only then.
+        node13._true_pose, node13._true_pose_t = _P13(7.0, 8.0, -0.2, 0.0, 0.0, 0.0), 1.45
+        node13._true_twist = (np.zeros(3), np.zeros(3))
+        gz13 = _Node13._ping_pose(node13, 1.5)
+        src13gz = node13._pose_source
+        stale13 = _Node13._ping_pose(node13, 3.0)
+        check("R-7: the sonar falls back on /blueboat/odom_gz (true pose) before the field-rate "
+              "/blueboat/odom, and on /blueboat/odom once odom_gz is stale",
+              gz13 is not None and src13gz == "odom_gz" and abs(gz13[0].x - 7.0) < 1e-9
+              and stale13 is not None and node13._pose_source == "odom" and abs(stale13[0].x - 5.0) < 1e-9)
 
     _section_object_physics()
     _section_consistency()

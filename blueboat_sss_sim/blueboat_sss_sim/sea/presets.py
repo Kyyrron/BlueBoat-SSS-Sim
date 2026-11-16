@@ -38,9 +38,13 @@ import yaml
 import numpy as np
 
 from .events import EventSpec
+from .wind import WindSpec
+from .yaw_moment import YawMomentSpec
 
 PRESETS_FORMAT = "blueboat_sea_state_presets/1"
 SCHEDULE_FORMAT = "blueboat_sea_schedule/1"
+#: The blocks a keyframe or a state command may carry (wind / yaw_moment since 2026-11-15).
+KEYFRAME_BLOCKS = frozenset({"current", "waves", "wind", "yaw_moment"})
 
 _COMPASS_16 = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
                "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
@@ -173,14 +177,24 @@ def _events_from(raw: Any, where: str) -> EventSpec:
 class SeaState:
     current: CurrentSpec = field(default_factory=CurrentSpec)
     waves: WaveSpec = field(default_factory=WaveSpec)
+    #: Wind on the windage (sea/wind.py, 2026-11-15) and the isotropic yaw-moment surrogate (sea/yaw_moment.py,
+    #: the 2026-10-21 stand-in): both inactive by default, so every older state, schedule and command reads, compares
+    #: and serialises exactly as before.
+    wind: WindSpec = field(default_factory=WindSpec)
+    yaw_moment: YawMomentSpec = field(default_factory=YawMomentSpec)
 
     @property
     def is_null(self) -> bool:
         return (self.current.speed_mps <= 0.0 and self.current.sigma_speed_mps <= 0.0
-                and self.waves.hs_m <= 0.0)
+                and self.waves.hs_m <= 0.0 and not self.wind.active and not self.yaw_moment.active)
 
     def to_dict(self) -> dict:
-        return {"current": asdict(self.current), "waves": asdict(self.waves)}
+        d = {"current": asdict(self.current), "waves": asdict(self.waves)}
+        if self.wind.active:
+            d["wind"] = asdict(self.wind)
+        if self.yaw_moment.active:
+            d["yaw_moment"] = asdict(self.yaw_moment)
+        return d
 
     @property
     def current_active(self) -> bool:
@@ -218,7 +232,22 @@ class SeaState:
             wav["tp_s"] = b.waves.tp_s
         elif b.waves.hs_m <= 0.0 < a.waves.hs_m:
             wav["tp_s"] = a.waves.tp_s
-        return SeaState(CurrentSpec(**cur), WaveSpec(**wav))
+        win = {}
+        for f in fields(WindSpec):
+            va, vb = getattr(a.wind, f.name), getattr(b.wind, f.name)
+            if f.name == "from_deg":
+                # a calm side has no direction: keep the other's (a pure speed ramp)
+                win[f.name] = (vb if not a.wind.active else va if not b.wind.active
+                               else _lerp_angle(va, vb, w))
+            elif f.name == "gust_tau_s":
+                win[f.name] = vb if w >= 0.5 else va          # time constants crossfade in the model
+            elif isinstance(va, (int, float)) and not isinstance(va, bool):
+                win[f.name] = (1.0 - w) * va + w * vb
+            else:
+                win[f.name] = vb if w >= 0.5 else va
+        ym = YawMomentSpec((1.0 - w) * a.yaw_moment.std_nm + w * b.yaw_moment.std_nm,
+                           b.yaw_moment.tau_s if w >= 0.5 else a.yaw_moment.tau_s)
+        return SeaState(CurrentSpec(**cur), WaveSpec(**wav), WindSpec(**win), ym)
 
 
 # --------------------------------------------------------------- presets
@@ -443,9 +472,31 @@ def _spec_from_entry(presets: SeaPresets, entry: Mapping[str, Any] | None,
     return apply_wave_options(presets, spec, explicit, tp_auto)
 
 
+def _plain_block(cls, entry: Mapping[str, Any] | None, which: str):
+    """A ``wind:`` / ``yaw_moment:`` block: explicit fields only (no preset table); unknown keys raise."""
+    if entry is None:
+        return cls()
+    entry = dict(entry)
+    if "from" in entry:
+        entry["from_deg"] = parse_direction(entry.pop("from"))
+    elif "from_deg" in entry:
+        entry["from_deg"] = parse_direction(entry["from_deg"])
+    known = {f.name for f in fields(cls)}
+    unknown = set(entry) - known
+    if unknown:
+        raise KeyError(f"unknown {which} keys {sorted(unknown)}")
+    kw = {k: (v if k in ("preset", "label") else float(v)) for k, v in entry.items()}
+    if cls is WindSpec and "preset" not in kw and kw.get("speed_mps", 0.0) > 0.0:
+        kw["preset"] = "custom"
+        kw.setdefault("label", "Custom wind")
+    return cls(**kw)
+
+
 def state_from_dict(presets: SeaPresets, d: Mapping[str, Any]) -> SeaState:
     return SeaState(_spec_from_entry(presets, d.get("current"), "current"),
-                    _spec_from_entry(presets, d.get("waves"), "waves"))
+                    _spec_from_entry(presets, d.get("waves"), "waves"),
+                    _plain_block(WindSpec, d.get("wind"), "wind"),
+                    _plain_block(YawMomentSpec, d.get("yaw_moment"), "yaw_moment"))
 
 
 # -------------------------------------------------------------- schedule
@@ -529,7 +580,7 @@ class SeaSchedule:
             t = float(k.pop("t_s", k.pop("t", 0.0)))
             if "ramp_s" in k:
                 ramps[t] = max(float(k.pop("ramp_s")), 0.0)
-            extra = set(k) - {"current", "waves"}
+            extra = set(k) - KEYFRAME_BLOCKS
             if extra:
                 raise KeyError(f"keyframe {i}: unknown keys {sorted(extra)}")
             kfs.append((t, state_from_dict(presets, k)))
@@ -565,7 +616,7 @@ def parse_command(presets: SeaPresets, payload: str | Mapping[str, Any]
         sched = SeaSchedule.from_dict(presets, d["schedule"])
         t0 = d.get("t0", "now")
         return "schedule", sched, 0.0 if t0 == "now" else float(t0)
-    extra = set(d) - {"current", "waves", "ramp_s"}
+    extra = set(d) - KEYFRAME_BLOCKS - {"ramp_s"}
     if extra:
         raise KeyError(f"unknown command keys {sorted(extra)}")
     return "state", state_from_dict(presets, d), float(d.get("ramp_s", -1.0))

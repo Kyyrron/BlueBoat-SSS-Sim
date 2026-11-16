@@ -48,8 +48,18 @@ Sub  <pose_topic>                geometry_msgs/TransformStamped (default
                                  /sim/sea_state/boat_pose: the 100 Hz Gazebo
                                  model pose, stamped, bridged by
                                  sea_state_launch.py): the pose the wrench uses
+Sub  <true_odom_topic>           nav_msgs/Odometry (default /blueboat/odom_gz,
+                                 2026-11-15, R-7): Gazebo's own odometry, the
+                                 preferred fallback pose while it is fresh
 Sub  <odom_topic>                nav_msgs/Odometry (default /blueboat/odom):
-                                 20 Hz fallback + the boat-motion readback
+                                 the last fallback (field-rate and delayed in a
+                                 field-equivalent run; the only one in a run
+                                 without odom_gz) + the boat-motion readback
+Sub  <robot_description_topic>   std_msgs/String, latched (default
+                                 /blueboat/robot_description): the plant Gazebo
+                                 integrates -- its vertical added mass, damping
+                                 and inertia size the hull damping (R-8), and
+                                 the legacy plant floats sea_states_legacy.yaml
 Sub  /sim/sea_state/command      std_msgs/String (JSON): a state
                                  ``{"current": {"preset": "strong",
                                  "from": "E"}, "waves": {...},
@@ -57,9 +67,10 @@ Sub  /sim/sea_state/command      std_msgs/String (JSON): a state
                                  ``{"schedule": {...}, "t0": "now"}``
 
 The Gazebo GUI indicator (arrow + text markers over the world origin) is
-sent through ``gz service -s /marker_array`` from a daemon thread, since
-this workspace has no python gz bindings; it is disabled silently when
-the GUI (and hence the marker service) is absent.
+sent through ``gz service -s /marker_array`` from a daemon thread (the
+gz CLI; the start hold uses the gz-transport bindings when importable);
+it is disabled silently when the GUI (and hence the marker service) is
+absent.
 
 Parameters
 ----------
@@ -76,9 +87,19 @@ world_dir        world folder: mean depth for the dispersion relation and
 depth_m          fallback mean water depth
 target_entity / target_entity_type   gz entity of the hull (model
                  "blueboat" -> its canonical link, base_link)
-presets_file     alternative presets YAML
+presets_file     alternative presets YAML ("" = by plant: sea_states.yaml for the
+                 identified plant, sea_states_legacy.yaml for the legacy one)
+plant            "" = from the robot description; or identified | bluerov2_legacy
+description_timeout_s   wait for the description before arming [s] (default 15)
+kappa            R4 bracket: commanded->applied thrust factor to emulate; the
+                 horizontal sea forces are scaled 0.493 / kappa (0 = off)
+run_context      JSON string the launch fills (sim_config, plant, tuning file
+                 and schedule hashes...); republished in the status as "run"
+release_world_on_arm   (2026-11-16) the launch started Gazebo PAUSED: unpause it once
+                 the hull is armed (core/sim_hold.StartHold), or on any bootstrap
+                 failure, or after release_deadline_s [s] of wall clock (default 60)
 enable_waves, enable_gz_markers, marker_arrow_axis, ramp_s, odom_topic,
-pose_topic (100 Hz stamped pose; "" = odometry only)
+true_odom_topic, pose_topic (100 Hz stamped pose; "" = odometry only)
 """
 
 from __future__ import annotations
@@ -105,12 +126,16 @@ from ros_gz_interfaces.msg import Entity, EntityWrench
 from std_msgs.msg import String
 from visualization_msgs.msg import Marker, MarkerArray
 
+from ..core import run_context
+from ..core.sim_hold import GzWorldControl, StartHold
 from ..core.geometry import quat_to_rpy
 from ..core.types import Pose3D
 from ..sea import (HighRatePose, SeaModel, SeaSchedule, load_presets,
                    predict_pose,
                    resolve_state)
 from ..sea.hull import rotation_zyx
+from ..sea.plant import PLANTS, parse_urdf, presets_file_for
+from ..sea.presets import find_default_presets_yaml
 from ..sea.markers import (gz_delete_all_request, gz_marker_request,
                            rviz_markers)
 
@@ -143,6 +168,19 @@ def read_mean_depth(world_dir: Path, default: float = 5.0) -> float:
         return float(max(-np.nanmean(h), 0.3))
     except Exception:
         return default
+
+
+class _GzCliWorldControl:
+    """World pause / resume through the gz CLI (when the gz-transport python bindings are absent)."""
+
+    def __init__(self, world: str) -> None:
+        self.world = world
+
+    def set_paused(self, paused: bool) -> bool:
+        code, out = _run_gz(["service", "-s", f"/world/{self.world}/control", "--reqtype", "gz.msgs.WorldControl",
+                             "--reptype", "gz.msgs.Boolean", "--timeout", "3000",
+                             "--req", f"pause: {'true' if paused else 'false'}"], timeout=6.0)
+        return code == 0 and "data: true" in out
 
 
 def _run_gz(args: list[str], timeout: float = 8.0) -> tuple[int, str]:
@@ -199,11 +237,18 @@ class SeaStateNode(Node):
         dp("marker_arrow_axis", "z")
         dp("ramp_s", 20.0)
         dp("odom_topic", "/blueboat/odom")
+        dp("true_odom_topic", "/blueboat/odom_gz")
         dp("pose_topic", "/sim/sea_state/boat_pose")
+        dp("robot_description_topic", "/blueboat/robot_description")
+        dp("description_timeout_s", 15.0)
+        dp("plant", "")
+        dp("kappa", 0.0)
+        dp("run_context", "")
+        dp("release_world_on_arm", False)
+        dp("release_deadline_s", 60.0)
         p = lambda k: self.get_parameter(k).value  # noqa: E731
 
         # ---- Model --------------------------------------------------------
-        self._presets = load_presets(p("presets_file") or None)
         world_dir = Path(str(p("world_dir"))) if p("world_dir") else None
         depth = float(p("depth_m"))
         self._max_step = float(p("max_step_size"))
@@ -211,16 +256,18 @@ class SeaStateNode(Node):
             depth = read_mean_depth(world_dir, depth)
             self._max_step = read_max_step_size(world_dir / "world.sdf",
                                                 self._max_step)
-        sched_file = str(p("schedule_file"))
-        if sched_file:
-            schedule = SeaSchedule.from_yaml(self._presets, sched_file)
-        else:
-            schedule = SeaSchedule.constant(resolve_state(
-                self._presets, str(p("current")), float(p("current_from_deg")),
-                str(p("waves")), float(p("waves_from_deg"))))
-        seed = int(p("seed")) or int(schedule.seed) or 1
-        self._model = SeaModel(self._presets, schedule, depth_m=depth,
-                               seed=seed, ramp_s=float(p("ramp_s")))
+        self._depth = depth
+        self._run_context = run_context.decode(str(p("run_context")))
+        # The plant: an explicit parameter wins; else the robot description
+        # decides (rebuilt in _on_description); until then the identified one.
+        self._plant_param = str(p("plant"))
+        if self._plant_param and self._plant_param not in PLANTS:
+            raise ValueError(f"plant:={self._plant_param}: expected one of {sorted(PLANTS)}")
+        self._plant = PLANTS[self._plant_param or "identified"]
+        self._plant_ready = threading.Event()
+        self._build_model(self._plant)
+        schedule = self._model.schedule
+        seed = self._model.seed
         self._entity_name = (str(p("target_entity"))
                              or str(self._presets.hull.get("target_entity", "blueboat")))
         self._entity_type = int(p("target_entity_type"))
@@ -243,7 +290,23 @@ class SeaStateNode(Node):
         # What the sea does to the boat, for the readback: the last
         # MOTION_WINDOW_S of odometry (t, z, roll, pitch).
         self._motion = collections.deque()
+        # R-7 (2026-11-15): Gazebo's own odometry (odom_gz) is preferred while
+        # fresh; /blueboat/odom -- field-rate and delayed in a field-equivalent
+        # run -- is the last fallback (the only pose of a bag replay).
+        self._true_pose = None
+        self._true_pose_t = -1e9
+        self._true_twist = (np.zeros(3), np.zeros(3))
         self.create_subscription(Odometry, str(p("odom_topic")), self._on_odom, 10)
+        if str(p("true_odom_topic")):
+            self.create_subscription(Odometry, str(p("true_odom_topic")),
+                                     self._on_true_odom, 10)
+        if self._plant_param:
+            self._plant_ready.set()
+        elif str(p("robot_description_topic")):
+            self.create_subscription(String, str(p("robot_description_topic")),
+                                     self._on_description, latched)
+        else:
+            self._plant_ready.set()
         # The 100 Hz Gazebo pose (2026-10-09): the catamaran's stiff
         # restoring must not act on the 20 Hz odometry (it rang the roll
         # mode at 3.2 Hz) -- sea/motion.py::HighRatePose.
@@ -258,6 +321,11 @@ class SeaStateNode(Node):
         self._lock = threading.Lock()
         self._world = str(p("world_name"))
         self._wrench_armed = threading.Event()
+        # The launch started Gazebo paused (2026-11-16): keep it so until the hull is armed (StartHold).
+        self._start_hold: Optional[StartHold] = (
+            StartHold(self._world_control, deadline_s=float(p("release_deadline_s")),
+                      log=lambda m: self.get_logger().info(f"sea state: start hold: {m}"))
+            if bool(p("release_world_on_arm")) else None)
         self._waves_reason = "starting: waiting for Gazebo"
         self._own_bridge: Optional[subprocess.Popen] = None
         self._gz_markers_ok = False
@@ -284,7 +352,64 @@ class SeaStateNode(Node):
             + f"; seed {seed}; depth {depth:.1f} m; physics step "
             f"{self._max_step * 1e3:.0f} ms")
 
+    # ------------------------------------------------------------- model
+    def _build_model(self, plant) -> None:
+        """(Re)build the sea model for ``plant``: its presets file (unless one is
+        given), the schedule, and the hull damping sized on it."""
+        p = lambda k: self.get_parameter(k).value  # noqa: E731
+        pf = str(p("presets_file"))
+        if not pf:
+            pf = str(presets_file_for(plant.name, find_default_presets_yaml().parent))
+        self._presets = load_presets(pf)
+        sched_file = str(p("schedule_file"))
+        if sched_file:
+            schedule = SeaSchedule.from_yaml(self._presets, sched_file)
+        else:
+            schedule = SeaSchedule.constant(resolve_state(
+                self._presets, str(p("current")), float(p("current_from_deg")),
+                str(p("waves")), float(p("waves_from_deg"))))
+        seed = int(p("seed")) or int(schedule.seed) or 1
+        old = getattr(self, "_model", None)
+        self._model = SeaModel(self._presets, schedule, depth_m=self._depth,
+                               seed=seed, ramp_s=float(p("ramp_s")), plant=plant,
+                               kappa=float(p("kappa")))
+        if old is not None:
+            self._model.waves_available = old.waves_available
+        self._plant = plant
+
+    def _on_description(self, msg: String) -> None:
+        if self._plant_ready.is_set():
+            return
+        try:
+            plant = parse_urdf(msg.data)
+        except Exception as exc:  # noqa: BLE001 -- keep the identified default
+            self.get_logger().warning(f"sea state: robot description not usable ({exc}); "
+                                      f"keeping plant {self._plant.name}")
+            self._plant_ready.set()
+            return
+        self._build_model(plant)
+        d = self._model.damping
+        self.get_logger().info(
+            f"sea state: plant {plant.name} from the robot description (link inertia "
+            f"{tuple(round(v, 3) for v in plant.inertia_link)}, plugin added mass "
+            f"{plant.added}, linear {plant.linear}); presets {Path(self._presets.path).name}; "
+            f"hull damping {d.heave_ns_per_m:.1f} N·s/m, {d.roll_nms_per_rad:.2f} / "
+            f"{d.pitch_nms_per_rad:.2f} N·m·s/rad")
+        self._plant_ready.set()
+
     # ------------------------------------------------------------ inputs
+    def _on_true_odom(self, msg: Odometry) -> None:
+        pp, q = msg.pose.pose.position, msg.pose.pose.orientation
+        roll, pitch, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)
+        self._true_pose = Pose3D(pp.x, pp.y, pp.z, roll, pitch, yaw)
+        lin, ang = msg.twist.twist.linear, msg.twist.twist.angular
+        self._true_twist = (np.array([lin.x, lin.y, lin.z]), np.array([ang.x, ang.y, ang.z]))
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._true_pose_t = stamp if stamp > 0.0 else self._now()
+        self._motion.append((self._true_pose_t, pp.z, roll, pitch))
+        while self._motion and self._motion[0][0] < self._true_pose_t - MOTION_WINDOW_S:
+            self._motion.popleft()
+
     def _on_odom(self, msg: Odometry) -> None:
         pp, q = msg.pose.pose.position, msg.pose.pose.orientation
         roll, pitch, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)
@@ -296,6 +421,8 @@ class SeaStateNode(Node):
         # The message's own (sim-time) stamp is what the prediction
         # measures against; an unstamped message counts from arrival.
         self._pose_t = stamp if stamp > 0.0 else self._now()
+        if self._now() - self._true_pose_t < 1.0:
+            return                          # the motion readback follows odom_gz
         self._motion.append((self._pose_t, pp.z, roll, pitch))
         while self._motion and self._motion[0][0] < self._pose_t - MOTION_WINDOW_S:
             self._motion.popleft()
@@ -359,15 +486,20 @@ class SeaStateNode(Node):
             sample = self._model.update(t, pose, (v_world, w_body))
             self._after_update(sample, dt)
             return
-        self._pose_source = "odom"
-        pose = self._pose if (t - self._pose_t) < 1.0 else None
+        if self._true_pose is not None and (t - self._true_pose_t) < 1.0:
+            self._pose_source = "odom_gz"
+            pose, pose_t, (v_body, w_body) = self._true_pose, self._true_pose_t, self._true_twist
+        else:
+            self._pose_source = "odom"
+            pose = self._pose if (t - self._pose_t) < 1.0 else None
+            pose_t = self._pose_t
+            v_body, w_body = self._twist_body
         twist = None
         if pose is not None:
             # Propagate the 20 Hz odometry to this tick with its own twist:
             # the restoring part of the wrench must see the boat where it
             # is now, not up to 50 ms ago (a delayed spring rings).
-            v_body, w_body = self._twist_body
-            age = t - self._pose_t
+            age = t - pose_t
             self._pose_age_ms = 1000.0 * age
             pose = predict_pose(pose, v_body, w_body, age)
             v_world = rotation_zyx(pose.roll, pose.pitch, pose.yaw) @ v_body
@@ -416,10 +548,14 @@ class SeaStateNode(Node):
         d["pose_age_ms"] = round(float(self._pose_age_ms), 1)   # additive
         d["pose_source"] = self._pose_source                    # additive
         d["boat"] = self._boat_motion()                         # additive
+        d["run"] = self._run_context                            # additive (2026-11-15, C3)
+        d["presets_file"] = Path(self._presets.path).name       # additive (2026-11-15)
+        if self._start_hold is not None:                         # additive (2026-11-16)
+            d["start_hold"] = {"released_by": self._start_hold.released_by, "ok": self._start_hold.ok}
         d["waves"]["status"] = self._waves_status(sample)
         self._status_pub.publish(String(data=json.dumps(d)))
         # RViz markers ride at the boat.
-        boat = self._pose
+        boat = (self._true_pose if self._now() - self._true_pose_t < 1.0 else self._pose)
         xy = (boat.x, boat.y) if boat is not None else (0.0, 0.0)
         arr = MarkerArray()
         stamp = self.get_clock().now().to_msg()
@@ -472,11 +608,13 @@ class SeaStateNode(Node):
                 log.error(f"several Gazebo worlds running {names}; set the "
                           "world_name parameter")
                 self._waves_reason = "ambiguous world name"
+                self._release_start("bootstrap failed: ambiguous world name")
                 return
             time.sleep(1.0)
         if not self._world or f"/world/{self._world}/stats" not in topics:
             self._waves_reason = "Gazebo not found (no /world/<name>/stats topic)"
             log.warning(f"sea state: {self._waves_reason}; current only")
+            self._release_start("bootstrap failed: Gazebo not found")
             return
         w = self._world
         self._gz_markers_ok = self._probe_marker_service()
@@ -485,9 +623,17 @@ class SeaStateNode(Node):
             log.info(f"world '{w}' has no ApplyLinkWrench system -- injecting it "
                      f"at runtime (/world/{w}/entity/system/add)")
             if not self._inject_wrench_plugin(w):
+                self._release_start("bootstrap failed: ApplyLinkWrench injection")
                 return
         if self.get_parameter("world_name").value == "":
             self._start_own_bridge(w)
+        # The plant must be known before the hull wrench acts (its damping is
+        # sized on it): wait for the robot description, bounded.
+        tmo = float(self.get_parameter("description_timeout_s").value)
+        if not self._plant_ready.wait(timeout=max(tmo, 0.0)):
+            log.warning(f"sea state: no robot description within {tmo:.0f} s; "
+                        f"arming on plant {self._plant.name} (mirror values)")
+            self._plant_ready.set()
         self._wrench_pub = self.create_publisher(EntityWrench, f"/world/{w}/wrench", 10)
         self._clear_pub = self.create_publisher(Entity, f"/world/{w}/wrench/clear", 10)
         time.sleep(0.5)                      # let the bridge match
@@ -497,6 +643,22 @@ class SeaStateNode(Node):
         log.info(f"sea state armed on world '{w}' (entity '{self._entity_name}', "
                  f"markers {'on' if self._gz_markers_ok else 'off'})")
         self._model.changed_flag = True
+        self._release_start("armed")
+
+    def _release_start(self, reason: str) -> None:
+        """Unpause the world the launch started paused (no-op without the hold)."""
+        if self._start_hold is not None:
+            self._start_hold.release(reason)
+
+    def _world_control(self):
+        """Pause / resume control of the running world: gz-transport bindings, or the gz CLI."""
+        w = self._world or str(self.get_parameter("world_name").value)
+        if not w:
+            raise RuntimeError("world name unknown")
+        try:
+            return GzWorldControl(w, timeout_ms=2000)
+        except ImportError:
+            return _GzCliWorldControl(w)
 
     def _entity_msg(self) -> Entity:
         e = Entity()

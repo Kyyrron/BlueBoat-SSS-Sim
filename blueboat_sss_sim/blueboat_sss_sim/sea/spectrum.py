@@ -78,9 +78,11 @@ def dispersion(omega: np.ndarray | float, depth_m: float) -> np.ndarray:
 #: 4-10 m/s over 0.3-2 km): JONSWAP, Hasselmann et al. 1973 (eps = 1.6e-7 X,
 #: f_m U/g = 3.5 X^-0.33) and Kahma & Calkoen 1992 eqs (2)-(3), (6)-(7)
 #: (stable eps = 9.25e-7 X^0.766, w_p U/g = 11.99 X^-0.242; unstable
-#: 5.38e-7 X^0.940, 14.19 X^-0.283). 3.6 is the value that reproduces the
-#: real BlueBoat's attitude spectrum at Shiraishi-jima (centroid ~1.1 Hz,
-#: config/corpus_attitude_targets.yaml); every wave preset follows it.
+#: 5.38e-7 X^0.940, 14.19 X^-0.283). On 2026-11-10 3.6 was also chosen as the
+#: value that reproduced the July Shiraishi-jima attitude (centroid ~1.1 Hz,
+#: config/corpus_attitude_targets.yaml); since 2026-11-15 that attitude is
+#: report-only. Every ladder level follows the rule; the site level
+#: harbour_chop has its own fetch-limited Hs and Tp (sea/fetch.py).
 TP_PER_SQRT_HS = 3.6
 
 

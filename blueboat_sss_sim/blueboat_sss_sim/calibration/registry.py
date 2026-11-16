@@ -283,7 +283,8 @@ def _yaml_value(file: str, key: str) -> Any:
     with open(_PKG_ROOT / file, "r", encoding="utf-8") as f:
         node = yaml.safe_load(f)
     for part in key.split("."):
-        node = node[part]
+        # a list is indexed by an integer part (2026-11-16: `keyframes.0.waves.hs_m` of a sea situation)
+        node = node[int(part)] if isinstance(node, list) and part.lstrip("-").isdigit() else node[part]
     return node
 
 

@@ -1,0 +1,17 @@
+# Sea situation `legacy_standin` (session 03, 2026-11-15): the 2026-10-21 stand-in of BlueBoat-Experiments E3
+# (condition arob_c2) -- waves Hs 0.20 m with the Tp its `auto` gave then (3.0 s), short-crested, no wakes; a steady
+# 0.03 m/s current from N; the isotropic Gauss-Markov yaw moment sigma 0.5 N·m, tau 1.0 s (sea/yaw_moment.py, the
+# same random stream as on branch experiment). To reproduce earlier results ONLY:
+#   sim_config:=legacy gain_profile:=field sea_presets_file:=<share>/config/sea_states_legacy_20261021.yaml
+#   sea_schedule:=<this file>
+# It was fitted on the BlueROV2 plant against field targets that included the (now HELD-OUT) lawnmower runs; it has
+# no physical meaning on the identified plant -- use field_matched there.
+format: blueboat_sea_schedule/1
+name: legacy_standin
+seed: 0
+interpolation: hold
+keyframes:
+- t_s: 0.0
+  current: {speed_mps: 0.03, from_deg: 0.0, variation: steady}
+  waves: {hs_m: 0.2, tp_s: 3.0, from_deg: 0.0, crest: short, wakes: none}
+  yaw_moment: {std_nm: 0.5, tau_s: 1.0}

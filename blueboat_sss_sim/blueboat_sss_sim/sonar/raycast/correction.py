@@ -97,7 +97,9 @@ _NOT_CORE_KEYS = ("beam.legacy_phase_sign", "paths.legacy_reflection_phase")
 #: the fingerprint AT THEIR DEFAULT (so every artifact keeps its own), kept
 #: in at any other value (a tapered aperture is not the core an artifact was
 #: fitted on, and ``check_core`` says so)
-_DEFAULTED_KEYS = {"beam.taper_pedestal": 1.0, "sampling.max_range_m": 0.0}
+_DEFAULTED_KEYS = {"beam.taper_pedestal": 1.0, "sampling.max_range_m": 0.0,
+                   # 2026-11-15 (CR-03-1): the opt-in sea-state surface roughness
+                   "paths.surface_rms_from_sea": False}
 #: tolerance on a recorded pulse length [us] (the corpus reports 0.1 us)
 PULSE_TOL_US = 0.5
 

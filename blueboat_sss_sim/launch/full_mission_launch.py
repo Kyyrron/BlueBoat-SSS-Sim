@@ -37,6 +37,11 @@ data_dir          root for that CSV and the controller .npy; empty resolves
                                                   (default '')
 use_stock_world   load blueboat_description's stock world.sdf via its
                   world_launch.py instead of the world's  (default false)
+hold_until_sea_armed  (2026-11-16) start the world's Gazebo PAUSED and let the
+                  sea node unpause it once the hull is armed (default true):
+                  with the physical CoG Gazebo's buoyancy box alone capsizes
+                  the boat in the first seconds. Not with use_stock_world
+                  (Control's world_launch.py starts it running)
 quiet             filter known-noisy startup lines      (default true)
 sim_origin_lat / sim_origin_lon
                   MAVROS-shim origin override; empty = the world's anchor
@@ -86,6 +91,43 @@ headless          ``true``: the Gazebo server only (``gz sim -s``), no GUI --
                   down (nothing runs without it; before, the stack froze
                   silently with no /clock).
 
+sim_config        ``field_equivalent`` (default) | ``legacy`` (R-6, 2026-11-15):
+                  Control's simulation configuration, forwarded exactly as
+                  ``blueboat_control/launch/Sim_launch.py`` does
+                  (``SIM_CONFIGS`` here mirrors it; smoke ``[10]`` reads
+                  Control's file and compares): field_equivalent = the
+                  identified BlueBoat plant, the raw Gazebo odometry on
+                  ``/blueboat/odom_gz`` relayed to ``/blueboat/odom`` at the
+                  field rate and delay, the real boat's gains, 20 Hz thrust;
+                  legacy = the BlueROV2 plant, the sim-tuned gains, 10 Hz
+                  thrust, Gazebo's clean odometry -- every run before
+                  2026-11-13. The default reproduces what this launch did
+                  since session 04 (every piece at its default).
+plant / odom_profile / odom_seed / tuning_file / gain_profile
+                  override single pieces of the configuration ('' = keep):
+                  as ``Sim_launch.py``; a tuning file (``config/field_runs/``)
+                  goes first in both nodes' parameter lists and brings its
+                  day's odometry profile. ``gain_profile`` also exists on the
+                  ``experiment`` branch's launch (the 2026-10-21 runs were
+                  ``sim_config:=legacy gain_profile:=field``)
+control_params_file   a parameters file applied AFTER the launch's values, to
+                  master_control only (the ``experiment`` branch's meaning)
+thrust_gain       ``[right, left]`` applied-thrust gains for simulation_interface
+                  (the R-9/R-10 asymmetry bracket: kappa(1 +- a)); '' = the
+                  description's
+odom_base_delay   constant odometry delay [s] (R-10 bracket 0-0.10); '' = Control's
+spawn_yaw         spawn heading [rad, ENU]; the spawn stays at (0, 0)
+with_sonar        false: no sonar node (the MAVROS shim still runs) -- motion
+                  runs (default true)
+sea_kappa / sea_presets_file   forwarded to sea_state_launch.py (R4 kappa
+                  bracket; presets file, '' = by the plant)
+
+The odometry topics follow the configuration (R-7): with the raw bridge
+(field-equivalent with the control stack) the sonar and the sea read Gazebo's
+true pose on ``/blueboat/odom_gz`` as their fallback, the MAVROS shim the
+field-like ``/blueboat/odom``; without control nothing relays odom_gz, so
+Gazebo publishes ``/blueboat/odom`` directly (``odom_raw:=false``).
+
 sea_current / sea_current_from_deg / sea_waves / sea_waves_from_deg /
 sea_schedule / sea_seed
                   the sea state (``sea_state_launch.py``): current and
@@ -134,6 +176,7 @@ line from robot_state_publisher, which is on the list by name.
 
 import logging
 import os
+from pathlib import Path
 
 # ROS is needed to *launch*, not to read the resolvers below. Importing
 # `simple_launch` pulls in `launch` -> `lark`, which the workspace venv does
@@ -216,6 +259,7 @@ _declare("controller_type", default_value="PID")
 _declare("note", default_value="sim")
 _declare("data_dir", default_value="")
 _declare("use_stock_world", default_value=False)
+_declare("hold_until_sea_armed", default_value=True)
 _declare("quiet", default_value=True)
 _declare("with_mavros_shim", default_value=True)
 _declare("sim_origin_lat", default_value="")
@@ -227,6 +271,79 @@ _declare("sonar_renderer", default_value="")
 _declare("sonar_fouling", default_value="-1")
 _declare("real_time_factor", default_value="1.0")
 _declare("sonar_hold_sim", default_value="auto")
+# R-6 (2026-11-15): Control's simulation configuration, as Sim_launch.py.
+_declare("sim_config", default_value="field_equivalent")
+_declare("plant", default_value="")
+_declare("odom_profile", default_value="")
+_declare("odom_seed", default_value="0")
+_declare("tuning_file", default_value="")
+_declare("gain_profile", default_value="")
+_declare("control_params_file", default_value="")
+_declare("thrust_gain", default_value="")
+_declare("odom_base_delay", default_value="")
+_declare("spawn_yaw", default_value="0.0")
+_declare("with_sonar", default_value=True)
+_declare("sea_kappa", default_value="")
+_declare("sea_presets_file", default_value="")
+
+#: Mirror of ``blueboat_control/launch/Sim_launch.py:SIM_CONFIGS`` (the
+#: reference; smoke [10] parses Control's file and compares key by key).
+SIM_CONFIGS = {
+    "field_equivalent": dict(plant="identified", odom_raw=True, gain_profile="field",
+                             thrust_rate_hz=20.0, odom_profile="field_13hz"),
+    "legacy": dict(plant="bluerov2_legacy", odom_raw=False, gain_profile="sim",
+                   thrust_rate_hz=10.0, odom_profile="passthrough"),
+}
+
+
+def _parse_gains(value) -> list | None:
+    s = str(value or "").strip().strip("[]")
+    if not s:
+        return None
+    g = [float(v) for v in s.replace(",", " ").split()]
+    if len(g) != 2:
+        raise ValueError(f"thrust_gain:={value}: expected [right, left]")
+    return g
+
+
+def resolve_sim_config(name, *, plant="", odom_profile="", odom_seed=0, tuning_file="",
+                       gain_profile="", thrust_gain="", odom_base_delay="",
+                       with_control=True) -> dict:
+    """What ``sim_config`` and its overrides forward, launch-free (smoke [10]).
+
+    Returns ``description`` (plant, odom_raw for upload_rov / world_launch),
+    ``simulation_interface`` and ``master_control`` parameter dicts (WITHOUT the
+    tuning file, which the launch puts first), the odometry topics the sonar,
+    the sea and the shim read, and the run-context fields."""
+    from pathlib import Path as _P
+    if str(name) not in SIM_CONFIGS:
+        raise RuntimeError(f"sim_config:={name}: expected {' | '.join(SIM_CONFIGS)}")
+    cfg = dict(SIM_CONFIGS[str(name)])
+    if str(plant):
+        cfg["plant"] = str(plant)
+    tf = str(tuning_file or "")
+    if tf and not _P(tf).expanduser().is_file():
+        raise RuntimeError(f"tuning_file:={tf}: no such file")
+    si = {"thrust_rate_hz": float(cfg["thrust_rate_hz"]), "odom_seed": int(str(odom_seed or 0))}
+    if str(odom_profile):
+        si["odom_profile"] = str(odom_profile)
+    elif not tf:
+        si["odom_profile"] = cfg["odom_profile"]      # a field-run file states its day's timing
+    gains = _parse_gains(thrust_gain)
+    if gains is not None:
+        si["thrust_gain"] = gains
+    if str(odom_base_delay or "").strip():
+        si["odom_base_delay"] = float(odom_base_delay)
+    gp = str(gain_profile) if str(gain_profile) else cfg["gain_profile"]
+    # R-7: without the control stack nothing relays odom_gz -> odom, so the
+    # bridge must write /blueboat/odom itself.
+    odom_raw = bool(cfg["odom_raw"]) and bool(with_control)
+    true_odom = "/blueboat/odom_gz" if odom_raw else ""
+    return {"name": str(name), "plant": cfg["plant"], "odom_raw": odom_raw,
+            "description": {"plant": cfg["plant"], "odom_raw": odom_raw},
+            "simulation_interface": si, "master_control": {"gain_profile": gp},
+            "odom_topic": "/blueboat/odom", "true_odom_topic": true_odom,
+            "tuning_file": tf}
 
 # The six run-dependent acquisition parameters, forwarded to sss_sim_launch.
 ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
@@ -275,12 +392,14 @@ def read_max_step_size(world_file: str, default: float = 0.01) -> float:
         return default
 
 
-def gz_args_for(headless, real_time_factor=1.0, max_step_size=0.01) -> str:
-    """Gazebo command-line flags: run immediately; server only when
+def gz_args_for(headless, real_time_factor=1.0, max_step_size=0.01, paused=False) -> str:
+    """Gazebo command-line flags: run immediately (``-r``) unless ``paused``
+    (2026-11-16: the sea node unpauses once armed); server only when
     ``headless``; below real time, ``-z`` = the update rate that gives
     ``real_time_factor`` at this physics step (launch-free, exercised by
-    the smoke test). At 1.0 the flags are exactly as before."""
-    args = "-r -s" if str(headless).strip().lower() in ("1", "true", "yes") else "-r"
+    the smoke test). At 1.0 and not paused the flags are exactly as before."""
+    server = str(headless).strip().lower() in ("1", "true", "yes")
+    args = " ".join(f for f in ("" if paused else "-r", "-s" if server else "") if f)
     rtf = parse_real_time_factor(real_time_factor)
     if abs(rtf - 1.0) > 1e-12:
         args += f" -z {rtf / float(max_step_size):g}"
@@ -448,6 +567,41 @@ def launch_setup():
         return [LogInfo(msg=msg), EmitEvent(event=Shutdown(reason="Gazebo exited"))]
     sl.add_action(RegisterEventHandler(OnProcessExit(on_exit=_on_exit)))
 
+    # R-6 / R-7 (2026-11-15): Control's simulation configuration and the
+    # odometry topics that follow from it.
+    with_control = bool(sl.arg("with_control"))
+    simcfg = resolve_sim_config(
+        sl.arg("sim_config"), plant=sl.arg("plant"), odom_profile=sl.arg("odom_profile"),
+        odom_seed=sl.arg("odom_seed"), tuning_file=sl.arg("tuning_file"),
+        gain_profile=sl.arg("gain_profile"), thrust_gain=sl.arg("thrust_gain"),
+        odom_base_delay=sl.arg("odom_base_delay"), with_control=with_control)
+    spawn_yaw = str(float(str(sl.arg("spawn_yaw") or 0.0)))
+    tuning_file = simcfg["tuning_file"]
+    cpf = str(sl.arg("control_params_file") or "")
+
+    def with_tuning(parameters):
+        # The day's file first, the launch's own values last (Sim_launch.py).
+        return ([str(Path(tuning_file).expanduser()), parameters] if tuning_file
+                else [parameters])
+
+    from blueboat_sss_sim.core.run_context import encode as _encode_ctx, file_sha256
+    sched = str(sl.arg("sea_schedule") or "")
+    run_ctx = _encode_ctx({
+        "schema": "blueboat_sim_run_context/1", "sim_config": simcfg["name"],
+        "plant": simcfg["plant"], "odom_raw": simcfg["odom_raw"],
+        "with_control": with_control, "controller_type": str(sl.arg("controller_type")),
+        "simulation_interface": simcfg["simulation_interface"],
+        "gain_profile": simcfg["master_control"]["gain_profile"],
+        "tuning_file": tuning_file, "tuning_file_sha256": file_sha256(tuning_file),
+        "control_params_file": cpf, "control_params_sha256": file_sha256(cpf),
+        "trajectory_file": str(sl.arg("trajectory_file") or ""),
+        "trajectory_sha256": file_sha256(sl.arg("trajectory_file")),
+        "spawn_yaw_rad": float(spawn_yaw), "with_sonar": str(sl.arg("with_sonar")),
+        "sea_schedule": sched, "sea_schedule_sha256": file_sha256(sched),
+        "sea_seed": str(sl.arg("sea_seed")), "sea_kappa": str(sl.arg("sea_kappa") or ""),
+        "real_time_factor": str(sl.arg("real_time_factor")),
+        "world_dir": str(world_dir)})
+
     rtf = parse_real_time_factor(sl.arg("real_time_factor"))
     if rtf != 1.0:
         logging.getLogger("full_mission_launch").warning(
@@ -461,7 +615,8 @@ def launch_setup():
             raise RuntimeError("real_time_factor != 1 needs the world's own "
                                "world.sdf (use_stock_world:=false)")
         sl.include("blueboat_description", "world_launch.py",
-                   launch_arguments={"sliders": False})
+                   launch_arguments={"sliders": False, "yaw": spawn_yaw,
+                                     **{k: str(v) for k, v in simcfg["description"].items()}})
     else:
         # The world.sdf references seabed.stl relatively; put the folder on
         # the resource path so the mesh resolves wherever Gazebo starts.
@@ -477,7 +632,8 @@ def launch_setup():
         headless = resolve_headless(sl.arg("headless"), renderer_kind)
         gui_mode = gazebo_gui_mode(sl.arg("headless"), renderer_kind)
         sl.gz_launch(world_file, gz_args_for(headless, rtf,
-                                             read_max_step_size(world_file)))
+                                             read_max_step_size(world_file),
+                                             paused=bool(sl.arg("hold_until_sea_armed"))))
         if gui_mode == "client":
             # 2026-11-10: the GUI in its own process. Named without
             # "gazebo", so its exit never trips the Gazebo-exit shutdown
@@ -494,7 +650,8 @@ def launch_setup():
             GazeboBridge("/ocean_current", "/current",
                          "geometry_msgs/Vector3", GazeboBridge.ros2gz)])
         sl.include("blueboat_description", "upload_rov_launch.py",
-                   launch_arguments={"sliders": False, "thr": "thrusters_ur"})
+                   launch_arguments={"sliders": False, "thr": "thrusters_ur", "yaw": spawn_yaw,
+                                     **{k: str(v) for k, v in simcfg["description"].items()}})
 
     # 2. Optional control stack, untouched -- including blueboat_control's
     #    OWN path_generation on its from_yaml branch (the real-boat
@@ -507,22 +664,29 @@ def launch_setup():
                 "with_control:=true needs trajectory_file:=<local-frame "
                 "trajectory YAML> (an MCS .deployed/<name>.yaml works as-is)")
         sl.node("blueboat_control", "simulation_interface.py",
-                parameters={"controller_type": sl.arg("controller_type"),
+                parameters=with_tuning({"controller_type": sl.arg("controller_type"),
                             "note": sl.arg("note"),
                             "data_dir": sl.arg("data_dir"),
                             # sim-time watchdog/republish (Control,
                             # 2026-11-07): one clock at any real-time factor
-                            "time_source": "ros"})
+                            "time_source": "ros",
+                            # R-6 (2026-11-15): thrust rate, odometry timing,
+                            # actuator overrides of the configuration
+                            **simcfg["simulation_interface"]}))
         sl.node("blueboat_control", "path_generation.py", output="screen",
                 parameters={"trajectory": f"from_yaml:{trajectory_file}"})
         sl.node("blueboat_control", "path_publisher.py", output="screen",
                 parameters={"total_time":
                             trajectory_total_time(trajectory_file)})
+        mc = with_tuning({"controller_type": sl.arg("controller_type"),
+                          "simulation": True,
+                          "data_dir": sl.arg("data_dir"),
+                          "time_source": "ros",
+                          **simcfg["master_control"]})
+        if cpf:
+            mc.append(str(Path(cpf).expanduser()))    # after the launch's values
         sl.node("blueboat_control", "master_control.py", output="screen",
-                parameters={"controller_type": sl.arg("controller_type"),
-                            "simulation": True,
-                            "data_dir": sl.arg("data_dir"),
-                            "time_source": "ros"})
+                parameters=mc)
 
     # The world's own name: the sea-state wrench bridges and the sonar's
     # hold (/world/<name>/control) address it.
@@ -543,6 +707,12 @@ def launch_setup():
                                  "sonar_hold_sim": sl.arg("sonar_hold_sim"),
                                  "gz_world_name": world_name,
                                  "real_time_factor": str(rtf),
+                                 # additive (2026-11-15): R-7 topics, no sonar
+                                 # for motion runs, run metadata (C3)
+                                 "with_sonar": str(sl.arg("with_sonar")),
+                                 "odom_topic": simcfg["odom_topic"],
+                                 "true_odom_topic": simcfg["true_odom_topic"],
+                                 "run_context": run_ctx,
                                  **{a: sl.arg(a) for a in ACQUISITION_ARGS}})
 
     # 4. Sea state: current + waves on the hull (docs/sea_state_model.md).
@@ -553,6 +723,13 @@ def launch_setup():
                launch_arguments={"world_name": world_name,
                                  "world_dir": world_dir,
                                  "quiet": quiet,
+                                 "sea_kappa": str(sl.arg("sea_kappa") or ""),
+                                 "sea_presets_file": str(sl.arg("sea_presets_file") or ""),
+                                 "odom_topic": simcfg["odom_topic"],
+                                 "true_odom_topic": simcfg["true_odom_topic"],
+                                 "run_context": run_ctx,
+                                 "release_world_on_arm": str(bool(sl.arg("hold_until_sea_armed"))
+                                                             and not sl.arg("use_stock_world")).lower(),
                                  **{a: sl.arg(a) for a in SEA_ARGS}})
 
     return sl.launch_description()

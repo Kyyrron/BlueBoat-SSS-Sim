@@ -49,7 +49,11 @@ renderer is swappable without touching Gazebo. Module map and data flow:
 `docs/architecture.md`.
 
 **Sea state:** the ROS-free `sea/` package drives `ros/sea_state_node.py`
-(current + a wave wrench into Gazebo); its model notes are in
+(current + a wave wrench into Gazebo; since 2026-11-15 also wind on the windage, the
+ported yaw-moment stand-in and a kappa bracket, the CAD hull for the identified plant
+with damping sized on the plant read from the robot description, and the frozen
+`sea_states_legacy.yaml` for the legacy plant -- R-8, `docs/sea_state_model.md`
+§5.9-5.11); its model notes are in
 `blueboat_sss_sim/blueboat_sss_sim/sea/CLAUDE.md` (loaded when working there),
 the physics and DOIs in `docs/sea_state_model.md`.
 
@@ -179,7 +183,10 @@ build (`~/ground_truth/run_info`). Before reading a live result:
 `cd ~/ros2_ws && rm -rf build/blueboat_sss_sim install/blueboat_sss_sim && colcon build
 --packages-select blueboat_sss_sim` (a plain rebuild leaves deleted modules installed).
 
-Sim-only params: `scene_dir` (**required**; world folder or legacy bundle),
+Sim-only params: `true_odom_topic` (2026-11-15, R-7: `/blueboat/odom_gz`, the preferred
+fallback pose while fresh; `odom_topic` stays `/blueboat/odom`, the only pose of a bag replay),
+`run_context` (the launch's b64 JSON, recorded as `run_info.simulation_context`, C3),
+`scene_dir` (**required**; world folder or legacy bundle),
 `run_info_dir` (2026-11-11; where the run record is also written, "" = nowhere),
 `sonar_config`, `odom_topic`, `publish_ground_truth`, `seed` (0 = a fresh
 entropy seed that is logged and published as `noise_seed`; launch arg
@@ -296,6 +303,13 @@ digest, `sand` as the only reference sediment).
 ### 3.5 Launch files
 
 `full_mission_launch.py`, `sss_sim_launch.py`, `sim_world_launch.py`, `sea_state_launch.py`.
+Since 2026-11-15 `full_mission_launch.py` forwards Control's `sim_config` (`field_equivalent` |
+`legacy`) and its overrides exactly as `Sim_launch.py` (R-6), derives the odometry topics from it
+(R-7) and takes `spawn_yaw`, `with_sonar`, `thrust_gain`, `odom_base_delay`, `sea_kappa`,
+`sea_presets_file`; sea situations are `sea_schedule:=<share>/config/sea_situations/<name>.yaml`. Since 2026-11-16 a generated world
+starts **paused** (`hold_until_sea_armed:=true`) and the sea node unpauses it once the hull is armed: with the
+physical CoG Gazebo's box alone capsized the boat in the first seconds. `field_matched` / `field_matched_x2` (the
+2026-09-07 FIT sea) need the plant's asymmetry `thrust_gain:=[0.3805,0.6055]` beside them.
 What each does, the `ApplyLinkWrench` detection rule and the **optional ROS imports the
 offline smoke gate depends on**: `blueboat_sss_sim/launch/CLAUDE.md` (loads when working
 there; read it before editing any launch module).

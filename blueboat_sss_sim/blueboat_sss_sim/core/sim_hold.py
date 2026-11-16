@@ -204,3 +204,64 @@ class RenderHold:
                 self.last_held = self._paused
                 self.holds += int(self._paused)
                 self._resume_locked()
+
+
+class StartHold:
+    """Keep a world paused from its start until the sea-state node has armed the hull (2026-11-16, session 03).
+
+    Why: the identified plant's description carries the physical CoG (+0.1376 m above the link origin, session 04b),
+    on which Gazebo's own buoyancy box is unstable (roll GM -0.025 m). Until the sea node arms the CAD catamaran's
+    hydrostatics (~4 s of sim time after the start: world discovery, ApplyLinkWrench, the robot description) the boat
+    tipped over -- roll through +-180 deg, pitch to -86 deg -- and righted itself. ``full_mission_launch.py`` now
+    starts Gazebo paused (no ``-r``); the node releases the world here once armed. No physics changes: the same
+    steps run, only from an upright, armed start.
+
+    ``release`` is idempotent and is also called on every bootstrap failure path; a wall-clock ``deadline_s``
+    releases the world anyway (logged as an error), so a run can never stay paused because the node failed.
+    ``control_factory`` builds the world control lazily (``GzWorldControl``; a fake in tests)."""
+
+    def __init__(self, control_factory: Callable[[], object], deadline_s: float = 60.0,
+                 log: Optional[Callable[[str], None]] = None, timer_factory=threading.Timer,
+                 attempts: int = 10, retry_s: float = 0.5, sleep: Optional[Callable[[float], None]] = None) -> None:
+        import time as _time
+        self._factory = control_factory
+        self._log = log or (lambda _m: None)
+        self._attempts = max(int(attempts), 1)
+        self._retry_s = max(float(retry_s), 0.0)
+        self._sleep = sleep or _time.sleep
+        self._lock = threading.Lock()
+        #: why the world was released ("" while held)
+        self.released_by = ""
+        self.ok = False
+        self._timer = timer_factory(max(float(deadline_s), 0.0), lambda: self.release("deadline"))
+        self._timer.daemon = True
+        self._timer.start()
+
+    @property
+    def held(self) -> bool:
+        return not self.released_by
+
+    def release(self, reason: str) -> bool:
+        """Unpause the world (once). True when Gazebo confirmed it."""
+        with self._lock:
+            if self.released_by:
+                return self.ok
+            self.released_by = str(reason) or "released"
+            self._timer.cancel()
+            err = ""
+            for attempt in range(self._attempts):
+                try:
+                    if self._factory().set_paused(False):
+                        self.ok = True
+                        break
+                except Exception as e:  # noqa: BLE001
+                    err = f"{type(e).__name__}: {e}"
+                if attempt + 1 < self._attempts:
+                    self._sleep(self._retry_s)
+            if self.ok:
+                self._log(f"world released ({self.released_by})" + (
+                    ": the sea node did not arm in time -- this start was NOT held" if reason == "deadline" else ""))
+            else:
+                self._log(f"could not release the world ({self.released_by}" + (f"; {err}" if err else "") +
+                          "): it may still be paused (unpause it from Gazebo, or stop the launch)")
+            return self.ok

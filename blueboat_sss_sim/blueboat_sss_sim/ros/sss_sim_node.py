@@ -26,9 +26,16 @@ Pub  ~/ground_truth/run_info  std_msgs/String (JSON)   [simulation extra,
                             every enable and stop (with counters). Also
                             written to ``run_info_dir`` (2026-11-11)
 Sub  ~/ping/enable          std_msgs/Bool   true=start, false=stop
+Sub  <true_odom_topic>      nav_msgs/Odometry (default /blueboat/odom_gz,
+                            2026-11-15, R-7): Gazebo's own odometry, the
+                            preferred fallback pose while it is fresh
 Sub  <odom_topic>           nav_msgs/Odometry (default /blueboat/odom); the
-                            fallback pose -- optional while the 100 Hz
-                            <pose_topic> is flowing
+                            last fallback (field-rate and delayed in a
+                            field-equivalent run; the only pose of a bag
+                            replay) -- optional while <pose_topic> flows
+Sub  /sim/sea_state         std_msgs/String (JSON, latched): the sea's Hs, for
+                            a ray-cast profile with
+                            ``raycast.paths.surface_rms_from_sea`` (CR-03-1)
 
 Run-dependent parameters (identical names/semantics to the real node)
 ----------------------------------------------------------------------
@@ -52,7 +59,9 @@ since the ``gain_index`` field is ``uint16`` and cannot carry ``-1``.
 Simulation-only parameters
 --------------------------
 scene_dir (required), sonar_config (YAML with the ``model:`` section),
-odom_topic, publish_ground_truth, seed, predict_pose, pose_topic,
+odom_topic, true_odom_topic, run_context (JSON the launch fills: sim_config,
+plant, tuning file and schedule hashes -- recorded in run_info as
+``simulation_context``), publish_ground_truth, seed, predict_pose, pose_topic,
 base_link_rest_z_m, renderer, raycast_backend, hold_sim_while_rendering,
 gz_world_name, real_time_factor, fouling (ray-cast: the fouled fraction of
 object and wall surfaces for this run, ``raycast.objects.fouling``; -1 = the
@@ -143,7 +152,7 @@ from std_msgs.msg import Bool, String, UInt8MultiArray
 
 from blueboat_interfaces.msg import OmniscanProfile
 
-from ..core import provenance
+from ..core import provenance, run_context
 from ..core.geometry import quat_to_rpy
 from ..core.sim_hold import GzWorldControl, RenderHold, resolve_hold_mode
 from ..sea.motion import (GAZEBO_BASE_REST_Z_M, HighRatePose, predict_pose,
@@ -197,6 +206,8 @@ class SideScanSonarSimNode(Node):
         self.declare_parameter("scene_dir", "")
         self.declare_parameter("sonar_config", "")
         self.declare_parameter("odom_topic", "/blueboat/odom")
+        self.declare_parameter("true_odom_topic", "/blueboat/odom_gz")
+        self.declare_parameter("run_context", "")
         self.declare_parameter("publish_ground_truth", True)
         self.declare_parameter("seed", 0)
         self.declare_parameter("predict_pose", True)
@@ -307,6 +318,20 @@ class SideScanSonarSimNode(Node):
         self.create_subscription(
             Odometry, self.get_parameter("odom_topic").value,
             self._on_odom, 10)
+        # R-7 (2026-11-15): Gazebo's own odometry, preferred over the
+        # field-rate /blueboat/odom while it is fresh.
+        self._true_pose: Optional[Pose3D] = None
+        self._true_pose_t = -1e9
+        self._true_twist = (np.zeros(3), np.zeros(3))
+        if str(self.get_parameter("true_odom_topic").value):
+            self.create_subscription(Odometry, str(self.get_parameter("true_odom_topic").value),
+                                     self._on_true_odom, 10)
+        # CR-03-1 (2026-11-15): the sea's Hs for a profile whose sea surface
+        # follows the sea state (acted on only when the profile says so).
+        self._sea_hs_m: Optional[float] = None
+        self._surface_rms_applied: Optional[float] = None
+        self.create_subscription(String, "/sim/sea_state", self._on_sea_state,
+                                 QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.create_subscription(Bool, "~/ping/enable", self._on_ping_enable, 10)
 
         # ---- Ping engine state ------------------------------------------------
@@ -359,6 +384,38 @@ class SideScanSonarSimNode(Node):
                             np.array([ang.x, ang.y, ang.z]))
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._pose_t = stamp if stamp > 0.0 else self._now()
+
+    def _on_true_odom(self, msg: Odometry) -> None:
+        p, q = msg.pose.pose.position, msg.pose.pose.orientation
+        roll, pitch, yaw = quat_to_rpy(q.x, q.y, q.z, q.w)
+        self._true_pose = Pose3D(p.x, p.y, p.z, roll, pitch, yaw)
+        lin, ang = msg.twist.twist.linear, msg.twist.twist.angular
+        self._true_twist = (np.array([lin.x, lin.y, lin.z]), np.array([ang.x, ang.y, ang.z]))
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._true_pose_t = stamp if stamp > 0.0 else self._now()
+
+    def _on_sea_state(self, msg: String) -> None:
+        try:
+            self._sea_hs_m = float(json.loads(msg.data)["waves"]["hs_m"])
+        except (ValueError, KeyError, TypeError):
+            return
+        self._apply_sea_surface()
+
+    def _apply_sea_surface(self) -> None:
+        """CR-03-1: with ``raycast.paths.surface_rms_from_sea`` the surface RMS
+        is max(surface_rms_m, Hs / 4); calm water keeps surface_rms_m exactly."""
+        rc, rend = self._rc, self._renderer
+        if rc is None or rend is None or not getattr(rc.paths, "surface_rms_from_sea", False):
+            return
+        mp = getattr(rend, "multipath", None)
+        if mp is None or self._sea_hs_m is None:
+            return
+        rms = max(float(rc.paths.surface_rms_m), 0.25 * float(self._sea_hs_m))
+        if self._surface_rms_applied is None or abs(rms - self._surface_rms_applied) > 1e-6:
+            mp.surface.rms = rms
+            self._surface_rms_applied = rms
+            self.get_logger().info(f"sea surface RMS {1000 * rms:.1f} mm (Hs {self._sea_hs_m:.3f} m; "
+                                   f"floor {1000 * rc.paths.surface_rms_m:.1f} mm)")
 
     def _on_ping_enable(self, msg: Bool) -> None:
         if msg.data:
@@ -417,6 +474,8 @@ class SideScanSonarSimNode(Node):
             self._stage_cfg = self._model_cfg
             self._floor_addition, self._rc = "power", None
         self._renderer_kind = kind
+        self._surface_rms_applied = None
+        self._apply_sea_surface()            # CR-03-1, a no-op unless the profile asks
         for ch in self._channels.values():
             # One encoder per side for the node's whole life: the real
             # device numbers pings from power-up and a re-enable never
@@ -662,6 +721,14 @@ class SideScanSonarSimNode(Node):
             if not self._predict:
                 return pose, age
             return predict_pose(pose, v_body, w_body, age), age
+        tp = getattr(self, "_true_pose", None)          # R-7 (2026-11-15); absent on older callers
+        if tp is not None and t_now - getattr(self, "_true_pose_t", -1e9) < 1.0:
+            self._pose_source = "odom_gz"
+            age = t_now - self._true_pose_t
+            if not self._predict:
+                return tp, age
+            v_body, w_body = self._true_twist
+            return predict_pose(tp, v_body, w_body, age), age
         if self._pose is None:
             return None
         self._pose_source = "odom"
@@ -932,6 +999,9 @@ class SideScanSonarSimNode(Node):
             log.warning(f"run provenance incomplete ({type(e).__name__}: {e})")
         return out
 
+    def _simulation_context(self) -> dict:
+        return run_context.decode(str(self.get_parameter("run_context").value or ""))
+
     def _run_info(self, event: str) -> dict:
         """The run record (``~/ground_truth/run_info``, JSON,
         ``blueboat_sss_sim_run/1``): what produced the pings of this run."""
@@ -955,6 +1025,10 @@ class SideScanSonarSimNode(Node):
             "hold_mode": getattr(self._hold, "mode", "off") if self._hold is not None else "off",
             "real_time_factor": float(self.get_parameter("real_time_factor").value),
             "gz_world_name": str(self.get_parameter("gz_world_name").value or ""),
+            # additive (2026-11-15, C3): what the launch says about the run
+            "simulation_context": self._simulation_context(),
+            "pose_source": self._pose_source,
+            "surface_rms_m": self._surface_rms_applied,
         }
         try:
             doc["profile"]["variant"] = (self._profile_doc().get("variant") or {}).get("label")

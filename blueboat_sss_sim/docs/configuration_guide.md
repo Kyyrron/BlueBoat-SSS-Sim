@@ -689,8 +689,10 @@ error 101). Keep `range_length_mm` ≤ 30000 for the ray-cast; 20000 is the surv
 `config/sea_states.yaml` (`format: blueboat_sea_state_presets/1`) is the
 single source of truth for the presets (`current: none | weak | moderate |
 strong | very_strong`, `waves: calm | rippled | harbour_chop | smooth | slight | rough`
--- since 2026-11-10 every level has Tp = 3.6 √Hs, the fetch-limited young sea,
-and `harbour_chop` (0.07 m) is the site's inverse estimate --
+-- since 2026-11-10 every ladder level has Tp = 3.6 √Hs, the fetch-limited young sea;
+since 2026-11-15 `harbour_chop` (0.030 m, 0.59 s) is the July harbour's physical
+fetch-limited wind sea with its own Tp (`sea/fetch.py`; it replaced the 0.07 m inverse
+estimate fitted to the July attitude) --
 each with `label`, `description`, `reference`, and for waves `gamma`,
 `spread_s` and an `events: {rate_per_hour, hs_m, tp_s, duration_s,
 from_spread_deg}` block of random wake / swell groups — `docs/sea_state_model.md`
@@ -711,6 +713,16 @@ hold`, `seed`) passed as `sea_schedule:=` or sent live on
 `docs/sea_state_model.md`. The MCS reads the presets file from the
 installed share directory and writes timelines under
 `~/.config/blueboat_mcs/sea_states/`.
+
+**Since 2026-11-15 (session 03).** A keyframe or command may also carry `wind: {speed_mps, from | from_deg,
+gust_intensity, gust_tau_s, gust_dir_deg}` (sea/wind.py; speeds at the windage height, not 10 m) and
+`yaw_moment: {std_nm, tau_s}` (the 2026-10-21 stand-in); both default off. The `hull:` block of the presets file
+accepts `catamaran.fin: {length, width, height, separation}` (the CAD keel fin), `windage: {frontal_area_m2,
+lateral_area_m2, length_m, centroid_height_m, cx, cy, cn, air_density}` and `damping_ratio: {heave, roll, pitch}`
+(exclusive with `damping`). Three presets files ship: `sea_states.yaml` (the identified plant's CAD hull),
+`sea_states_legacy.yaml` (238a60e's verbatim, floated automatically by the legacy plant) and
+`sea_states_legacy_20261021.yaml` (branch `experiment`'s, for `legacy_standin` only). Whole sea situations ship in
+`config/sea_situations/` (`calm`, `harbour_chop`, `legacy_standin`, `field_matched`, `field_matched_x2`).
 
 ## 3. World-folder file formats
 

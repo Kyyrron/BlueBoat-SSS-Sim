@@ -29,10 +29,18 @@ from ..core.types import Pose3D
 from .current import CurrentField
 from .events import WaveEventProcess
 from .hull import HullBoxes, WaveExcitation
-from .motion import DampingSpec, damping_wrench, hull_damping_from_config
+from .motion import (DampingSpec, damping_wrench, default_plant_for,
+                     hull_damping_from_config)
+from .plant import PlantVertical
 from .presets import (SeaPresets, SeaSchedule, SeaState, compass_name,
                       parse_command)
 from .wavefield import WaveField
+from .wind import WindField, Windage
+from .yaw_moment import YawMomentField
+
+#: kappa of the identified plant (commanded -> applied newton, PARAMETER_REGISTER.md §2): the reference of the
+#: ``kappa`` bracket below.
+KAPPA_IDENTIFIED = 0.493
 
 
 @dataclass
@@ -101,8 +109,12 @@ class SeaModel:
                  excitation: WaveExcitation | None = None, depth_m: float = 5.0,
                  seed: int = 0, ramp_s: float = 20.0,
                  resample_s: float = 2.0, n_freq: int = 16, n_dir: int = 12,
-                 damping: DampingSpec | None = None) -> None:
+                 damping: DampingSpec | None = None,
+                 plant: PlantVertical | None = None, kappa: float = 0.0) -> None:
         self.presets = presets
+        #: The plant Gazebo integrates (sea/plant.py): sizes a ratio-based hull
+        #: damping as the complement of the plugin's (R-8, 2026-11-15).
+        self.plant = plant if plant is not None else default_plant_for(presets.hull)
         if excitation is None:
             gz_box, hull = HullBoxes.from_config(presets.hull)
             excitation = WaveExcitation(
@@ -117,14 +129,28 @@ class SeaModel:
         #: Extra hull damping (heave / roll / pitch) added to the wrench
         #: whenever ``update`` is given the boat's twist (sea/motion.py).
         self.damping = (damping if damping is not None
-                        else hull_damping_from_config(presets.hull))
+                        else hull_damping_from_config(presets.hull, self.plant,
+                                                      getattr(excitation, "hull", None)))
+        #: The boat's windage (hull.windage; None = no wind on this hull) and
+        #: the run's wind and yaw-moment processes, pure functions of
+        #: (seed, t) like the current (sea/wind.py, sea/yaw_moment.py).
+        self.windage = Windage.from_config(presets.hull)
+        #: kappa bracket (R4, 2026-11-15): the identified plant is in commanded
+        #: newtons, so a PHYSICAL external force enters it divided by kappa.
+        #: Varying kappa with the drag (the response to commands unchanged) is
+        #: therefore exactly a scale kappa_identified / kappa on the horizontal
+        #: sea forces (wind, waves' surge / sway / yaw); 0 = off (scale 1).
+        self.kappa = float(kappa)
+        self.horizontal_scale = (KAPPA_IDENTIFIED / self.kappa if self.kappa > 0.0 else 1.0)
         #: How the field is built and read (``hull.wave_response``,
         #: 2026-11-10): the hybrid discretisation resolves the slope
         #: spectrum to ``f_max_hz``; with ``draft_decay`` the hull feels the
         #: pressure at its draft (each component x cosh(k(h-d))/cosh(kh)).
         self.wave_response = wave_response_from_config(presets.hull)
         _hull = getattr(excitation, "hull", None)
-        self.decay_depth_m = (_hull.draft_at_trim()
+        self.decay_depth_m = ((_hull.pressure_depth_at_trim()
+                               if hasattr(_hull, "pressure_depth_at_trim")
+                               else _hull.draft_at_trim())
                               if self.wave_response["draft_decay"]
                               and hasattr(_hull, "draft_at_trim") else 0.0)
         self.depth_m = float(depth_m)
@@ -135,6 +161,10 @@ class SeaModel:
         #: The run's current: mean + variation in time and space, a pure
         #: function of (seed, t, x, y) and the state it is given.
         self.current = CurrentField(self.seed)
+        self.wind = WindField(self.seed)
+        self.yaw_field = YawMomentField(self.seed)
+        self._last_wind: dict = {"active": False}
+        self._last_yaw_nm = 0.0
         self._schedule = schedule
         self._schedule_t0 = 0.0
         self._t_last: float | None = None
@@ -261,7 +291,8 @@ class SeaModel:
         active = ((fa.active or fb.active or ev.active) and self.waves_available)
         hull_always = self.hydrostatics == "catamaran" and self.waves_available
         zeros = np.zeros(3)
-        if boat is None or not (active or hull_always):
+        dist = self._disturbance(t_sim, boat, twist, w)
+        if boat is None or not (active or hull_always or dist is not None):
             return SeaSample(t_sim, cur.copy(), zeros, zeros.copy(), 0.0, state,
                              cur, False, w, self._next_change(ts),
                              ev.current_event(t_sim), parts, False)
@@ -269,12 +300,16 @@ class SeaModel:
             # Calm water, catamaran hydrostatics: the hull swap on the flat
             # plane (no wave field evaluated) plus the hull damping -- the
             # same hull as every wave run, so calm-vs-waves isolates the sea.
-            force, torque = self.excitation(boat, _flat)
-            if twist is not None and self.damping.active:
+            if hull_always:
+                force, torque = self.excitation(boat, _flat)
+            else:
+                force, torque = zeros.copy(), zeros.copy()
+            if twist is not None and self.damping.active and hull_always:
                 fd, td = damping_wrench(twist[0], twist[1], cur, self.damping,
                                         boat.yaw)
                 force = force + fd
                 torque = torque + td
+            force, torque = self._with_disturbance(force, torque, dist)
             return SeaSample(t_sim, cur.copy(), force, torque, 0.0, state, cur,
                              False, w, self._next_change(ts),
                              ev.current_event(t_sim), parts, True)
@@ -326,14 +361,59 @@ class SeaModel:
                + w * fb.orbital_velocity(xb, yb, t_sim)[0])
         if ev.active:
             orb = orb + ev.orbital_velocity(xb, yb, t_sim)[0]
+        if self.horizontal_scale != 1.0:
+            force = force.copy(); torque = torque.copy()
+            force[:2] *= self.horizontal_scale
+            torque[2] *= self.horizontal_scale
         if twist is not None and self.damping.active:
             fd, td = damping_wrench(twist[0], twist[1], cur + orb,
                                     self.damping, boat.yaw)
             force = force + fd
             torque = torque + td
+        force, torque = self._with_disturbance(force, torque, dist)
         return SeaSample(t_sim, cur + orb, force, torque, eta, state, cur,
                          True, w, self._next_change(ts), ev.current_event(t_sim),
                          parts, True)
+
+    # ------------------------------------------------------- disturbance
+    def _disturbance(self, t_sim: float, boat: Pose3D | None, twist, w: float):
+        """Wind on the windage plus the isotropic yaw moment of the blended
+        state; None when neither is active (nothing evaluated: bit-identical
+        to a model without them)."""
+        a, b = self._from["state"], self._to["state"]
+        st = b if w >= 1.0 else SeaState.interpolate(a, b, w)
+        wind_on = st.wind.active and self.windage is not None
+        yaw_on = st.yaw_moment.active
+        if boat is None or not (wind_on or yaw_on):
+            self._last_wind, self._last_yaw_nm = {"active": False}, 0.0
+            return None
+        force, torque = np.zeros(3), np.zeros(3)
+        if wind_on:
+            spec = replace(st.wind, gust_tau_s=a.wind.gust_tau_s if a.wind.active else b.wind.gust_tau_s)
+            fw, tw, info = self.wind.wrench(t_sim, spec, self.windage, boat.yaw,
+                                            None if twist is None else twist[0],
+                                            tau_b=b.wind.gust_tau_s, w=w)
+            force, torque = force + fw, torque + tw
+            self._last_wind = info
+        else:
+            self._last_wind = {"active": False}
+        if yaw_on:
+            ta = a.yaw_moment.tau_s if a.yaw_moment.active else b.yaw_moment.tau_s
+            nz = self.yaw_field.moment(t_sim, st.yaw_moment.std_nm, ta, b.yaw_moment.tau_s, w)
+            torque = torque + np.array([0.0, 0.0, nz])
+            self._last_yaw_nm = nz
+        else:
+            self._last_yaw_nm = 0.0
+        s = self.horizontal_scale
+        force[:2] *= s
+        torque[2] *= s
+        return force, torque
+
+    @staticmethod
+    def _with_disturbance(force, torque, dist):
+        if dist is None:
+            return force, torque
+        return force + dist[0], torque + dist[1]
 
     def _next_change(self, ts: float):
         nxt = self._schedule.next_change(ts)
@@ -352,7 +432,15 @@ class SeaModel:
         wav = ("calm" if w.hs_m <= 0.0 else
                f"waves {w.preset} Hs {w.hs_m:.2f} m Tp {w.tp_s:.1f} s from "
                f"{compass_name(w.from_deg)} ({w.from_deg:.0f}°)")
-        return f"{cur}; {wav}"
+        extra = ""
+        if state.wind.active:
+            extra += (f"; wind {state.wind.speed_mps:.1f} m/s from {compass_name(state.wind.from_deg)} "
+                      f"({state.wind.from_deg:.0f}°), gusts {100 * state.wind.gust_intensity:.0f} % "
+                      f"tau {state.wind.gust_tau_s:.1f} s")
+        if state.yaw_moment.active:
+            extra += (f"; yaw moment {state.yaw_moment.std_nm:.2f} N·m tau "
+                      f"{state.yaw_moment.tau_s:.1f} s")
+        return f"{cur}; {wav}{extra}"
 
     def status_dict(self, sample: SeaSample, world: str = "", entity: str = "",
                     waves_reason: str = "") -> dict:
@@ -418,6 +506,23 @@ class SeaModel:
                        "fx": round(float(sample.force[0]), 2),
                        "fy": round(float(sample.force[1]), 2),
                        "mz": round(float(sample.torque[2]), 3)},
+            # additive (2026-11-15): the disturbance and the kappa bracket
+            "wind": {"speed_mps": round(float(sample.state.wind.speed_mps), 3),
+                     "from_deg": round(float(sample.state.wind.from_deg), 1),
+                     "gust_intensity": round(float(sample.state.wind.gust_intensity), 3),
+                     "gust_tau_s": round(float(sample.state.wind.gust_tau_s), 2),
+                     "gust_dir_deg": round(float(sample.state.wind.gust_dir_deg), 1),
+                     "windage": self.windage is not None,
+                     "instant": {k: (round(float(v), 3) if isinstance(v, float) else v)
+                                 for k, v in self._last_wind.items()}},
+            "yaw_moment": {"std_nm": round(float(sample.state.yaw_moment.std_nm), 3),
+                           "tau_s": round(float(sample.state.yaw_moment.tau_s), 2),
+                           "nm": round(float(self._last_yaw_nm), 4)},
+            "plant": {"name": self.plant.name, "source": self.plant.source},
+            "kappa": {"value": self.kappa, "horizontal_scale": round(self.horizontal_scale, 4)},
+            "damping": {"heave_ns_per_m": round(float(self.damping.heave_ns_per_m), 2),
+                        "roll_nms_per_rad": round(float(self.damping.roll_nms_per_rad), 3),
+                        "pitch_nms_per_rad": round(float(self.damping.pitch_nms_per_rad), 3)},
             "blend": round(float(sample.blend_w), 3),
             "schedule": {
                 "name": self._schedule.name,

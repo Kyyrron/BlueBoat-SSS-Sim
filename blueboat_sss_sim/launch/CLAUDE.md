@@ -29,3 +29,27 @@ does not) (`try: from
 simple_launch import … except ImportError`): module-scope `simple_launch` →
 `launch` → `lark` (absent from the workspace venv, the Stop hook's usual
 `python3`) would kill the offline gate. Keep it so.
+
+**2026-11-15 (session 03, R-6 / R-7).** `full_mission_launch.py` forwards Control's simulation
+configuration exactly as `Sim_launch.py` does: `sim_config` (`field_equivalent` default |
+`legacy`) and the overrides `plant`, `odom_profile`, `odom_seed`, `tuning_file` (first in both
+nodes' parameter lists; then the launch drops `odom_profile`), `gain_profile`, plus
+`control_params_file` (after the launch values, master_control only: the `experiment` branch's
+meaning), `thrust_gain`, `odom_base_delay`, `spawn_yaw`, `with_sonar`, `sea_kappa`,
+`sea_presets_file`. `SIM_CONFIGS` here mirrors Control's; smoke `[10]` parses Control's file
+with `ast` and compares. The resolver `resolve_sim_config` is module-scope and launch-free (the
+smoke test calls it); it also sets the odometry topics (R-7) and the run context (C3, passed
+`b64:`-encoded because launch_ros reads a string parameter as YAML). `sss_sim_launch.py` gained
+`with_sonar`, `odom_topic` (default stays `/blueboat/odom` for bag replays), `true_odom_topic`,
+`run_context`; `sea_state_launch.py` `sea_presets_file`, `sea_plant`, `sea_kappa`, the two odometry
+topics and `run_context`. The six `SEA_ARGS` are unchanged.
+
+**Start hold (2026-11-16, session 03).** `full_mission_launch.py` starts a generated world's Gazebo **paused**
+(`hold_until_sea_armed:=true`, the default: `gz_args_for(..., paused=True)` drops only `-r`) and passes
+`release_world_on_arm:=true` to `sea_state_launch.py`; the sea node unpauses the world once it has armed the hull
+(`core/sim_hold.StartHold`), on any bootstrap failure, or after `release_deadline_s` (60 s wall) -- a run can never
+stay paused because the node failed. Why: since session 04b the identified plant carries the physical CoG (+0.1376),
+on which Gazebo's buoyancy box alone capsizes the boat in the ~4 s before the sea node arms (it flipped and righted
+itself in every run until then). No physics change; the 20 s start cut of the motion statistics stays (A-07). Not with
+`use_stock_world` (Control's `world_launch.py` starts Gazebo running): that path still has the capsize. Never start a
+world paused without a sea node in the launch -- nothing would unpause it.

@@ -41,8 +41,9 @@ old `smooth` (Tp 2.8 s) matched the *std* but rocked at **~0.65 Hz** -- the
 regular, slow wave pattern seen in the 2026-11-10 harbour sonar runs. Three
 causes, three fixes: (1) every wave level now follows the fetch-limited
 young-sea relation **Tp = 3.6 √Hs** (§4.1; owner's decision), with a new
-site level `harbour_chop` (0.07 m, 0.95 s) that reproduces the corpus
-spectrum; (2) the field is discretised to resolve the wave-**slope**
+site level `harbour_chop` (0.07 m, 0.95 s) that reproduced the corpus
+spectrum (replaced on 2026-11-15 by a physical fetch-limited estimate, §4.3; the
+corpus is report-only since); (2) the field is discretised to resolve the wave-**slope**
 spectrum up to 3 Hz (`hybrid`, §4.2) -- equal-energy bins had lumped the
 whole short-wave tail into one component; (3) the hull reads the
 Froude-Krylov pressure at its 4.5 cm **draft** (§5, retiring S4's "no
@@ -50,6 +51,31 @@ depth decay"). The offline mirror's pitch inertia was also wrong (§5:
 5.64 kg·m², not 3.92). The gates now compare motion **spectra** with the
 corpus (§9). Wave-run recordings before this date are not comparable bit
 for bit.
+
+**2026-11-15 revision (session 03 of the completion round), in one paragraph.**
+Control identified the BlueBoat's surge / sway / yaw plant (session 04) and asked
+this module to own the vertical plane (R-8 of `BlueBoat-Control/docs/REQUESTS.md`).
+The hull is now the **vendor CAD's** (§5.9): a 0.212 m draft on a narrow keel fin
+under a flared body, waterplane centroids 0.666 m apart (the old box catamaran had
+4.5 cm and an unsourced 0.76 m), so heave / roll / pitch stiffness fall to 2199 N/m,
+233 and 140 N·m/rad (at the physical CoG session 04b applied, 0.1376 m above the link
+origin; 275 / 182 at the old box-construction CoG); with Control's inertia and BlueBoat
+added masses as 04b carries them the roll natural frequency is **1.18 Hz** (no
+parameter chosen for it; the July harbour attitude's
+output-only 1.15–1.30 Hz is reported beside it, never used: those recordings are SEEN /
+HELD-OUT, owner's ruling 2026-11-15). The damping is now **ratios** (ζ 0.3 / 0.2 / 0.2, MSS Otter values) sized on the
+plant Gazebo integrates, read from the robot description, as the complement of the
+plugin's own -- one owner per term (§5.9). The legacy (BlueROV2) plant floats the frozen
+`sea_states_legacy.yaml`, bit for bit. **`harbour_chop` is now physical** (§4.3): the
+fetch-limited wind sea of the July harbour (Kahma & Calkoen [26] at the JMA Kasaoka wind
+[32] of the survey hours over the harbour world's fetch; Hs 0.030 m, Tp 0.59 s), replacing
+the inverse estimates fitted to the July attitude (0.07 m, then 0.052 m); that attitude is
+report-only in every gate (§9). Two new forcings (§5.10): **wind** on the windage (mean + gusts,
+Fossen's area-based coefficients, CAD areas) and the ported 2026-10-21 **yaw-moment
+stand-in** (legacy reproduction only); a **kappa** bracket scales the horizontal sea
+forces for R4. The pose fallbacks prefer Gazebo's own `/blueboat/odom_gz` (§5.11, R-7).
+Sea **situations** (calm, field_matched, field_matched_x2, harbour_chop, legacy_standin)
+ship as schedule files (§4.3).
 
 ## 1. Scope and boundary
 
@@ -207,9 +233,11 @@ harbour (U10 4–10 m/s over 0.3–2 km): JONSWAP [3] (ε̃ = 1.6·10⁻⁷ X̃,
 f_m U/g = 3.5 X̃^−0.33) and Kahma & Calkoen [26] eqs (2)–(3) stable
 (ε̃ = 9.25·10⁻⁷ X̃^0.766, ω̃p = 11.99 X̃^−0.242) and (6)–(7) unstable
 (5.38·10⁻⁷ X̃^0.940, 14.19 X̃^−0.283), with X̃ = gF/U10², ε̃ = g²ε/U10⁴,
-ω̃p = ωp U10/g; 3.6 is also DNV-RP-C205 [5] §3.5.10's lower bound and the
-value that reproduces the corpus motion (§9). Levels: rippled 0.80 s,
-harbour_chop 0.95 s, smooth 1.39 s, slight 2.13 s, rough 2.79 s. Until
+ω̃p = ωp U10/g; 3.6 is also DNV-RP-C205 [5] §3.5.10's lower bound (on
+2026-11-10 it was also the value that reproduced the July attitude, §9 --
+report-only since 2026-11-15). Levels: rippled 0.80 s, smooth 1.39 s,
+slight 2.13 s, rough 2.79 s; `harbour_chop` (0.59 s) is outside the rule
+since 2026-11-15, its period from its own derivation (§4.3). Until
 2026-11-10 the presets sat *above* the band (2.0–4.5 s, "swell and wake
 energy on top"); the corpus shows almost no roll power below 0.5 Hz
 (2–3 %), and the long-period energy that does exist (wakes, swell trains)
@@ -300,18 +328,33 @@ are unchanged (they are launch arguments), the labels are plain:
 |---|---|---|---|---|---|---|
 | calm | Calm (flat water) | 0 | — | — | none | 0 |
 | rippled | Ripples (0.05 m) | 0.05 | 0.80 | 1.5 / 3 | 4, 0.08 m, 5 s, 25 s | 1 |
-| harbour_chop | Harbour chop (site, 0.07 m) | 0.07 | 0.95 | 1.5 / 3 | 5, 0.10 m, 5 s, 25 s | 1 |
+| harbour_chop | Harbour chop (site, 0.03 m) | 0.030 (0.07 legacy) | 0.59 (0.95) | 1.5 / 3 | 5, 0.10 m, 5 s, 25 s | 1 |
 | smooth | Light chop (0.15 m) | 0.15 | 1.39 | 1.5 / 3 | 6, 0.12 m, 5.5 s, 25 s | 2 |
 | slight | Choppy (0.35 m) | 0.35 | 2.13 | 1.5 / 3 | 8, 0.25 m, 6 s, 25 s | 2 |
 | rough | Rough (0.6 m) — stress test | 0.60 | 2.79 | 1.5 / 3 | 15, 0.35 m, 7 s, 30 s | 3 |
 
 Periods since 2026-11-10 (Tp = 3.6 √Hs, §4.1; were 2.0 / 2.8 / 3.6 / 4.5 s).
-`harbour_chop` is an **inverse estimate**: the height whose offline motion
-(`simulate_3dof`) matches the corpus roll std and spectrum (roll 0.84–1.17°
-at 1.06–1.12 Hz vs real 0.91–1.21° at 1.11–1.17 Hz; pitch 1.03–1.18° vs real
-0.60–0.87° -- the model's pitch response is ~1.4× the real one, a hull
-limitation recorded in `TODO.md`, not tuned away), not a wave measurement.
-Measured offline per level (one seed, 90 s): rippled roll 0.6° / pitch 0.7°,
+**`harbour_chop` is a physical estimate (2026-11-15, the owner's ruling on condition D):** the
+fetch-limited wind sea of the July 2026 Shiraishi-jima harbour (`sea/fetch.py`, `HARBOUR_CHOP`;
+smoke `[10]` checks the preset equals the formula's output). Inputs and sources:
+
+| Input | Value | Source |
+|---|---|---|
+| Wind U10 | **3.68 m/s** (3.3–4.0), from 195° (S–SSW) | JMA AMeDAS Kasaoka [32] (66481, 10.7 km N, coastal, anemometer 6.4 m): hourly 10-min means around the survey recordings -- 2026-07-21 16–17 h, 07-22 11–12 h, 07-23 11–12 h JST. The 6.4 m wind is used as U10 with no height correction (the CEM [33] advises against the 1/7 rule as a general method); the 10 m wind is a few per cent higher. Tadotsu (25 km SE, across the sea): 2.0–3.2 m/s from W, not used |
+| Fetch | **130 m** (89–165 m, p10–p90 over S and SSW) | the harbour world `Shiraishijima_real_toOptimize/harbour_wl1p50` (walls on the satellite map): upwind distance from every surveyed path point to the south breakwater or the west quay; floating pontoons excluded |
+| Growth law | stable, eqs (2)–(3) | Kahma & Calkoen [26] [full]: ε̃ = 9.25·10⁻⁷ X̃^0.766, ω̃p = 11.99 X̃^−0.242 (X̃ ≈ 94, at the short end of their data); air 33–34 °C over a cooler July sea [sea temperature not looked up]; unstable (6)–(7) gives 0.034 m / 0.60 s |
+| **Hs, Tp** | **0.030 m, 0.59 s** | bracket from the wind range: 0.027–0.034 m, 0.56–0.62 s (wind and fetch together 0.023–0.037 m, 0.51–0.65 s) |
+
+It is a short local chop (wavelength ≈ 0.55 m, under half the 1.2 m hull, about 1.7 Hz): the
+boat mostly rides over it. **As a report, not a fit:** `harbour_chop` (offline roll 0.22°) and
+`field_matched` (about 2° of straight-leg roll at Hs 0.068 m, Batch 1a) bracket the July harbour band (about 1°, seen
+in development, disclosed in amendment A-06). The long-period energy of a harbour (wakes, swell through the
+entrance) is not part of this estimate; it is the `events:` groups'. **Replaced:** the inverse
+estimates fitted to the July attitude -- 0.07 m / 0.95 s (2026-11-10, box hull) and 0.052 m /
+0.82 s (2026-11-15, CAD hull) -- which used SEEN and HELD-OUT recordings
+(`config/corpus_attitude_targets.yaml`); the legacy file keeps 0.07 m for reproduction only.
+The label reads "0.03 m".
+Measured offline per level on the box hull (one seed, 90 s): rippled roll 0.6° / pitch 0.7°,
 smooth 2.3° / 2.2° (heave 2.8 cm), slight 4.5° / 3.4° (7.9 cm), rough
 4.3° / 4.0° (11.9 cm) -- the label texts quote these.
 
@@ -339,6 +382,20 @@ stored. `rippled`'s peak wavelength (Tp 2.0 s: 6.2 m at 5 m depth, 5.8 m
 at 1.5 m — `spectrum.dispersion`) is about five hull lengths, so the boat
 contours it (§5) at its few centimetres of height: a legitimate "barely
 anything" level.
+
+**Sea situations (R3, 2026-11-15)** -- whole seas, shipped as one-keyframe schedule files
+in `config/sea_situations/` (installed to `share/blueboat_sss_sim/config/sea_situations/`) and
+passed with `sea_schedule:=<file>`, so the wave ladder and the six sea launch arguments stay as
+they are: `calm` (no forcing), `harbour_chop` (the July harbour: the level above, waves from
+the measured wind direction 195°, with a 0.1 m/s current), `field_matched` (the 2026-09-07 FIT sea, 2026-11-16: mean wind 4.48 m/s
+from 30°, waves Hs 0.068 m from 30°, the isotropic yaw moment σ 0.99 N·m, τ 0.43 s -- launched with the plant's
+asymmetry `thrust_gain:=[0.3805,0.6055]`; provisional until Batch 2 part B, the controller-spread MISS in
+`03_sea_state/handoff_03.md` §17) and `field_matched_x2` (σ × √2), `field_matched` and `field_matched_x2` (the sea of 2026-09-07 and twice its
+disturbance variance, written by session 03 after its fit), and `legacy_standin` (the
+2026-10-21 stand-in, with `sim_config:=legacy gain_profile:=field
+sea_presets_file:=…/sea_states_legacy_20261021.yaml`, to reproduce earlier results only).
+A keyframe may carry `wind:` and `yaw_moment:` blocks (§5.10) besides `current:` and
+`waves:`; MCS does not write them (it builds its own schedule).
 
 ## 5. Wave → hull coupling (Froude–Krylov, hydrostatic)
 
@@ -522,7 +579,7 @@ boat's twist, `F_z = −b33 (v_z − w_orbital)`, `M_x = −b44 p`,
 These are judgement values (a decay test on the real boat would anchor
 them; `TODO.md`). Measured closed-loop at 'smooth' with the 20 Hz pose
 hold: heave dominant period 2.7 s (≈ Tp), no power above 1 Hz, roll std
-1.5°, pitch 1.3° — inside the corpus band (§9).
+1.5°, pitch 1.3° — inside the corpus band (§9; a report since 2026-11-15).
 
 ### 5.8 Excess-buoyancy clip (2026-09-05)
 
@@ -533,6 +590,133 @@ buoyancy `H_hull,z − m g` above `wave_force_clip.knee_g` weights (2.5)
 with a C1 tanh knee of `width_g` weights (1.0). A hull that rides its
 wave never reaches the knee (a +0.1 m crest is 2.2 weights, checked
 exact in `[10]`); it only removes the slam.
+
+### 5.9 The identified plant's vertical model (2026-11-15, R-8)
+
+**One owner per term.** Restoring (hydrostatics) and all heave / roll / pitch damping:
+this module's hull wrench. Added mass: Control's Hydrodynamics plugin (it applies an
+acceleration-proportional force at the physics rate; a ROS node cannot do so stably).
+R-8 asks Control for `zW = kP = mQ = zWabsW = kPabsP = mQabsQ = 0` and BlueBoat added
+masses (`03_sea_state/R8_request_for_control.md`); until that is committed the node keeps
+today's split automatically (below).
+
+**Geometry** (vendor CAD `BLUEBOAT_HULL_SET_BR-101652`, hull -001 in the BR-101447
+assembly frame, rasterised lower envelope on a 4 mm grid; `03_sea_state/tools/cad_waterplane.py`):
+
+| At 16.15 kg, 1000 kg/m³ | Box catamaran (legacy) | CAD hull |
+|---|---|---|
+| Draft | 0.045 m | 0.212 m (0.210–0.228 over 16–20 kg, 1000–1025 kg/m³) |
+| Waterplane, both hulls | 0.360 m² | 0.224 m² |
+| Waterplane centroid spacing | 0.76 m (no source) | 0.666 m (keels 0.583 m, bounding-box centres 0.726 m) |
+| K33 / K44 / K55 | 3530 N/m / 577 / 484 N·m/rad | 2199 N/m / 233 / 140 N·m/rad at the physical CoG +0.1376 m (275 / 182 at the box-construction CoG −0.129 m) |
+
+In the model each demihull is a **body box** (0.917 × 0.122 m at ±0.333 m, reaching 0.047 m
+below the water) carrying the waterplane, over a **keel fin box** (1.12 × 0.015 × 0.165 m on
+the keel line), matched to displacement, draft, waterplane, both second moments and the
+centre of buoyancy (`hull.catamaran.fin`). Each column's buoyancy acts at its *wetted*
+centroid (`HullBoxes.wetted_lever`, +3 % roll stiffness otherwise); the wave pressure is
+read at the bottom-area-weighted depth, 0.072 m. A buried CAD hull holds 2.28 weights of
+reserve, below the 2.5-weight clip knee. The pitch line of `restoring_summary` added the
+weight's moment with the wrong sign until 2026-11-15 (a reporting error, 484 not 443 N·m/rad
+on the box hull; Gazebo applies gravity itself).
+
+**Added mass** (`R8_request_for_control.md` §2.3): A33 = 1.0 m = 16.15 kg (MSS `otter_legacy.m`,
+`Zwdot = -1.0*m`); A44 = A33·y² = 1.79 kg·m² (a catamaran rolls by heaving its hulls in
+opposition); A55 = Σ a33(x)(x − x_f)² with a33 ∝ b(x)² over the CAD stations = 0.93 kg·m².
+
+**Damping** (`hull.damping_ratio`): ζ heave 0.3, roll 0.2, pitch 0.2 (MSS `otter_legacy.m`
+and `otter.m`; brackets 0.1–0.4, 0.1–0.25, 0.1–0.4). `sea/motion.py:damping_from_ratios`
+sizes b = 2ζ√(K (I + A)) with K from the hull and I + A from the plant **as Gazebo
+integrates it** -- `sea_state_node` reads `/blueboat/robot_description` (latched) with
+`sea/plant.py:parse_urdf` -- and subtracts the plugin's linear damping: after R-8 the
+sim carries 156 N·s/m, 12.5 and 12.1 N·m·s/rad (R-8 as 04b applied it; 160 / 13.6 / 13.8 at
+R-8's request); with the pre-R-8 BlueROV2 terms it carries
+138 N·s/m in heave and nothing in roll and pitch, where the plugin already exceeds the
+target. The legacy plant (yaw inertia 3.92) floats `sea_states_legacy.yaml` (today's
+file of 238a60e verbatim: smoke `[10]` compares its wrench with HEAD's, bit for bit).
+
+**Reported beside the field, neither a fit nor a gate** (natural frequencies, f = (1/2π)√(K/(I + A))):
+
+| | Legacy hull | CAD hull | July harbour attitude, output-only (REPORT ONLY: SEEN / HELD-OUT recordings) |
+|---|---|---|---|
+| Heave | 1.7 Hz | 1.35 Hz (1.31 at R-8's A33 16.15; 04b capped it at 14.5) | -- |
+| Roll | 2.4 Hz | **1.18 Hz** (1.29 at R-8's request) | 1.15–1.30 Hz, ζ 0.10–0.25 |
+| Pitch | 1.46 Hz | 0.74 Hz (0.84) | 1.05–1.20 Hz, ζ 0.10–0.20 |
+
+The CAD-hull column is R-8 **as session 04b applied it** (2026-11-15): the plugin's explicit
+added mass diverges for A ≥ m at the link origin, so heave's is capped at 14.5 kg and the roll /
+pitch added inertias are rigid inertia (I + A 4.21 / 6.57 kg·m², their Coriolis terms lost);
+the CoG is the physical one from a mass budget, +0.1376 m above the link origin (0.239 m above
+the keel, bracket +0.097..+0.178: roll 1.17–1.20 Hz, pitch 0.72–0.75 Hz), which lowers K44 /
+K55 by m g Δz. The derivation as applied: `03_sea_state/r8/r8_derivation_04b.json`. Pitch sits
+low against the report-only July band; the pitch inertia stays as it is (owner, 2026-11-15).
+
+**Start hold (2026-11-16).** With the physical CoG of the identified plant (+0.1376 m, session 04b) Gazebo's own
+buoyancy box is unstable (roll GM -0.025 m): in the ~4 s before the sea node armed the CAD hull the boat flipped
+(roll through ±180°, pitch to -86°) and righted itself, in every world run. `full_mission_launch.py` now starts
+the world paused and the sea node unpauses it once armed (`core/sim_hold.StartHold`; failure paths and a 60 s
+deadline release it too). Proxy (2026-11-16, both `sim_config`, calm and Hs 0.068): roll ≤ 0.02° in calm from
+t = 0; in the first seconds the identified plant pitches up to 2° while it accelerates from rest (surge overshoot to
+0.74 m/s), the under-way turns reach 1.2°. No physics changed.
+
+### 5.10 Wind and the yaw disturbance (2026-11-15)
+
+**Wind** (`sea/wind.py`, a `wind:` block of a keyframe): the area-based coefficients of
+Fossen 2021 §10.1 for a symmetric craft, X = q A_F (−c_x cos γ), Y = q A_L (−c_y sin γ),
+N = q A_L L_oa c_n sin 2γ, q = ½ρ_a V_r², on the speed and direction of the air relative to
+the boat (γ: where the relative wind comes from, from the bow, positive to port). Windage
+from the full-vessel CAD above the 0.212 m waterline (`hull.windage`): A_F 0.118 m²,
+A_L 0.239 m², lateral centroid 0.207 m above the water, L_oa 1.195 m; c_x 0.7, c_y 0.8,
+c_n 0.1 (Fossen's ranges 0.50–0.90, 0.70–0.95, 0.05–0.20; the sign of c_n is not documented
+for this boat and is bracketed). The side force also heels the boat through the centroid
+height. Gusts: speed U(1 + I_u ξ_u(t)) and direction β + σ_β ξ_β(t), ξ unit Gauss–Markov
+processes with time constant `gust_tau_s` (the current's, streams 14 and 15; a pure
+function of (seed, t)). Speeds are at the windage height: a weather station's 10 m wind is
+converted by the caller (session 03's plausibility check). Off unless the state carries a
+wind block and the hull has windage; a zero block is bit-identical to none (smoke `[10]`).
+
+**Yaw-moment stand-in** (`sea/yaw_moment.py`, a `yaw_moment:` block): the 2026-10-21
+Gauss–Markov yaw moment of branch `experiment` (σ 0.5 N·m, τ 1.0 s, fitted on the BlueROV2
+plant; BlueBoat-Experiments E3), ported sample for sample (smoke `[10]` compares it with
+values the `experiment` code computed). It has no physical meaning by itself; it serves
+`config/sea_situations/legacy_standin.yaml` and the isotropic wave-group alternative.
+
+**kappa bracket** (R4): the identified plant is in commanded newtons, so a physical external
+force enters it divided by κ (commanded → applied thrust, 0.493; bracket 0.45–0.85). Varying κ
+jointly with the drag (the response to commands unchanged, R-9) is therefore exactly a scale
+0.493/κ on the horizontal sea forces -- wind, the waves' surge / sway / yaw -- while the
+current (drag in the plugin, κ-scaled) and the vertical plane are unchanged: `kappa` parameter
+of `sea_state_node`, launch argument `sea_kappa`.
+
+**The 2026-09-07 fit, `field_matched` (session 03, 2026-11-16; FIT runs only; evidence
+`~/ros2_ws/sim_runs/sim_acceptance/03_sea_state/handoff_03.md` §16-22).** Means (Batch 1a): mean wind
+**4.48 m/s from 30°** at the windage -- the speed at which the crab angle (4.58) and the extra thrust
+(4.37) are both matched; the yaw-moment-only fit left U unidentified (1.17 ± 1.53) and put the field's
+constant right-turning bias into an asymmetry outside Control's R-10 bracket -- with a plant asymmetry
+**a = -0.228** (`thrust_gain:=[0.3805,0.6055]`, a launch argument: the plant's, not the sea's) and waves
+**Hs 0.068 m** (roll). Fluctuation (Batch 1b, 216 runs): the field's straight-leg yaw is not clearly
+heading-dependent, so both forms were gridded; the **isotropic yaw moment σ_N 0.99 N·m [0.88, 1.07],
+τ 0.43 s [0.37, 0.50]** was chosen by the pre-written rule as the closer form after a **MISS**: no single
+sea puts the three controllers within ±25 % (yaw-rate RMS PID +47 %, LoS -11 %, MPC -30 %), because in
+simulation the controllers answer one sea alike while the field spreads them 1 : 1.65 : 3.0. Session 04c
+traced that to the closed loop (the real boat turns more per newton than the identified plant, by controller:
+≈ 1.0 / 1.45 / 1.25 for PID / LoS / MPC; a ~5 s lateral oscillation of the real boat; 0.5-1.6 Hz gyro
+content -- not roll / pitch leakage, coherence 0.20 -- absent in simulation): a **limitation**, the fit is
+closed for this round and revisited when more field data exist. FIT development table at field_matched:
+25 / 42 of B5's statistics within tolerance (turns 26-31 % long; pitch on the sine weaves 37-50 % low).
+The wind-gust form needed a gust intensity of 1.08 (beyond 0.8) and was not chosen; it stays available.
+The legacy stand-in still reproduces E3's yaw level within 4 % (sim against sim).
+
+### 5.11 Odometry sources (2026-11-15, R-7)
+
+In a field-equivalent run `/blueboat/odom` is what the boat's software sees: field-rate
+(4 Hz stretches, 25 Hz bursts) and delayed (Control's `simulation_interface` relays Gazebo's
+`/blueboat/odom_gz`). The sea and the sonar must act on the TRUE pose: both still use the
+100 Hz model pose first; their fallback is now `/blueboat/odom_gz` while it is fresh, then
+`/blueboat/odom` (the only pose of a bag replay). The MAVROS shim stays on `/blueboat/odom`,
+so processing and georeferencing see the field-like delayed pose -- the realistic split.
+`full_mission_launch.py` follows `sim_config`: without the control stack nothing relays,
+so Gazebo publishes `/blueboat/odom` directly (`odom_raw:=false`).
 
 ## 6. Delivery into Gazebo
 
@@ -638,8 +822,10 @@ roughness of the sea surface in the optional surface mirror (S8).
   in `BlueBoat-Control`, would replace them.
 * **S6 — the boat's hydrodynamic coefficients are the BlueROV2's** (§2).
   The response amplitudes in waves inherit that.
-* **S7 — no wind on the hull.** gz-sim's `WindEffects` system exists and
-  is a roadmap item; the presets describe the sea, not the air.
+* **S7 — wind (since 2026-11-15).** Wind acts on the windage through Fossen's
+  area-based coefficients (§5.10), not through gz-sim's `WindEffects`; it is quasi-static
+  (no aerodynamic damping beyond the relative wind, no gust-front structure) and drives
+  surge, sway, yaw and a small heel only. Until 2026-11-15 there was none.
 * **S8 — sea state does not touch the acoustic scene.** Surface roughness
   is not fed into the `surface_reflectivity` of the optional surface
   mirror (`sonar_model.md` §10); the seabed and objects are static.
@@ -691,7 +877,12 @@ centroid 0.91–1.17 Hz; yaw rate 1.7–2.8 °/s with 31–72 % of its power abo
 `harbour_chop` offline (roll centroid within 0.15 Hz of the band, ≥ 75 % in
 0.8–2 Hz, roll/pitch std 0.6–1.6°); `test/gazebo_sea_test.py` (default
 `--waves harbour_chop`) gates the same spectrum live plus wave-rate yaw
-jitter (≥ 5 % above 1.2 Hz). The contouring checks (heave std = Hs/4 at Tp)
+jitter (≥ 5 % above 1.2 Hz). **Since 2026-11-15 all of this is REPORT ONLY**
+(the owner's ruling: the four files are SEEN / HELD-OUT): both gates print the
+simulated motion against these bands and pass or fail on none of them; smoke
+`[10]` checks instead that `harbour_chop` equals its fetch-limited formula, the
+Gazebo gate that the waves move the hull (roll and pitch above calm's) and stay
+bounded (< 10°). The contouring checks (heave std = Hs/4 at Tp)
 apply only to seas with a peak wavelength ≥ 4 hull lengths.
 **Earlier anchor (2026-09-05, std only):** roll std 0.9–1.3°, pitch std 0.8–1.5° about a
 +2° bow-up trim, dominant period 1.0–1.2 s (short wind chop), rates
@@ -708,7 +899,8 @@ null / impulse / motion tests below are now one scripted, recorded run of
 four scenarios on the validation world — calm (null: no wave forcing,
 the catamaran hydrostatics active, level, no back-scan), current, waves
 (impulse: mean hull height = calm's within 3 mm; the same hull: mean trim
-within 0.5° of calm's; motion: roll/pitch in the corpus band, heave std =
+within 0.5° of calm's; motion: roll/pitch above calm's and bounded -- the corpus
+band is a report since 2026-11-15, heave std =
 Hs/4 with its peak near Tp, no 1.6 Hz line, ≤ 60 ms pose age) and both —
 plus the sonar consequences. The earlier written limit "heave peak-to-peak <
 0.15 m at 'smooth'" contradicted its own preset (Hs 0.15 m: a Gaussian
@@ -873,7 +1065,8 @@ the *Change sea state…* dialog that publishes on `/sim/sea_state/command`.
 26. K. K. Kahma and C. J. Calkoen, "Reconciling discrepancies in the observed
     growth of wind-generated waves", *J. Phys. Oceanogr.* 22(12), 1389–1405,
     1992 -- eqs (2)–(3), (6)–(7): fetch-limited energy and peak frequency,
-    stable / unstable stratification (read first-hand, 2026-11-10). doi:
+    stable / unstable stratification (read first-hand, 2026-11-10; re-read
+    2026-11-15 [full], p. 1400–1401, for `harbour_chop`). doi:
     [10.1175/1520-0485(1992)022<1389:RDITOG>2.0.CO;2](https://doi.org/10.1175/1520-0485(1992)022<1389:RDITOG>2.0.CO;2)
 27. T. I. Fossen, *Lecture Notes TTK4190 Guidance, Navigation and Control of
     Vehicles*, ch. 10 "Environmental Forces and Moments" (slides; the book's
@@ -896,6 +1089,18 @@ the *Change sea state…* dialog that publishes on `/sim/sea_state/command`.
     *IEEE J. Oceanic Eng.* 41(1), 2016 -- roll modulates trace amplitude
     through the rotated beam function (our banding mechanism, §7). doi:
     [10.1109/JOE.2015.2390732](https://doi.org/10.1109/JOE.2015.2390732)
+
+32. Japan Meteorological Agency, historical weather data (過去の気象データ), hourly
+    values of AMeDAS Kasaoka 笠岡 (Okayama, station 66481, etrn block 0919),
+    2026-07-21/22/23, read 2026-11-15
+    (`https://www.data.jma.go.jp/stats/etrn/view/hourly_a1.php?prec_no=66&block_no=0919&year=2026&month=7&day=22&view=`);
+    station master `ame_master_20260324.csv` (anemometer 6.4 m). Raw pages:
+    `~/ros2_ws/sim_runs/sim_acceptance/03_sea_state/harbour_chop/jma/`.
+33. U.S. Army Corps of Engineers, *Coastal Engineering Manual*, EM 1110-2-1100,
+    Part II, ch. 2 "Meteorology and Wave Climate", Change 1, 31 July 2003,
+    p. II-2-12/13 (Fig. II-2-6 and its text: the "1/7" rule "should not be used
+    as a general method"; read on the coastalengineeringmanual.tpub.com mirror
+    [full for those two pages]; no DOI, a standard).
 
 Every DOI above was resolved at doi.org and its title checked against
 Crossref on 2026-10-08; refs 1-25 re-checked and 26-31 added on 2026-11-10.
@@ -927,7 +1132,7 @@ realistically hard, reproducibly.
 | Newman [2]; Fossen [1] §8.2 | Froude–Krylov force; long-wave RAO limit "the body follows the surface" | Hydrostatic FK on the catamaran hull + first-order horizontal FK | No radiation/diffraction beyond the plugin's added mass and the hull damping | L/λ small; validated in Gazebo: heave std = Hs/4 at the wave period (§12) |
 | VRX, Bingham et al. [11]; Paravisi et al. [25] | USV simulators with PM waves, buoyancy, wind, current | Confirmation that environmental forcing visibly degrades USV tracks | Not adopted as code (GPL C++, replaces the boat's own plugins = a change to BlueBoat-Control) | CM-3 / NC #8 |
 | Robotics simulators (2026-11-10 survey): VRX (3 Gerstner components, buoyancy at 2 points per hull), gz-waves / asv_wave_sim and Stonefish (FFT seas, hydrostatic pressure per hull-mesh triangle), MARUS (Crest + per-triangle forces), USVSim (osgOcean FFT, per-link buoyancy); HoloOcean and DAVE: no physical waves | Hydrostatic / Froude–Krylov pressure on a hull representation under a synthesized sea, radiation mostly ignored | That this family is the established robotics practice (ours is the same, seeded and validated) | A JONSWAP spectrum resolved to 3 Hz instead of 3 components or a visual FFT grid; the draft decay most of them omit | Real-time cost vs fidelity; ship simulators (Fossen MSS) instead superpose RAOs from panel codes, which a 1.2 m catamaran without hydrodynamic coefficients cannot use |
-| Hasselmann et al. [3]; Kahma & Calkoen [26]; DNV [5] | Fetch-limited growth of Hs and Tp | Tp = 3.6 √Hs for every level (2026-11-10) | One rule for all levels; the wind/fetch is not an input | The corpus fixes the site's sea only through the boat's motion |
+| Hasselmann et al. [3]; Kahma & Calkoen [26]; DNV [5] | Fetch-limited growth of Hs and Tp | Tp = 3.6 √Hs for every ladder level (2026-11-10); `harbour_chop`'s Hs and Tp from K&C eqs (2)–(3) with a measured wind and fetch (2026-11-15) | One rule for the ladder; the site level takes wind and fetch as inputs | No wave measurement at the site; the boat's July attitude may not be fitted (SEEN / HELD-OUT) |
 | ITTC [28]; Mérigaud & Ringwood [29]; Fossen [27] | Spectrum discretisation and component counts | Resolve the response band; avoid wide tail bins | 24 × 12 components (cost-bound) instead of ≥ 100 frequencies | Checked by slope coverage, not by count |
 | Journée & Massie [30] | Pressure decay with depth; small-body limit | Draft decay at the mean draft | One depth per column, no diffraction | λ ≈ L at 1 Hz: the whole-body small-body limit fails, the column integration keeps the averaging |
 

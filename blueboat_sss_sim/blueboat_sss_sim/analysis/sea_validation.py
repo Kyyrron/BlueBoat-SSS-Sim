@@ -59,7 +59,10 @@ from .calibration import scale_to_db
 
 #: Topics a validation run records (test/gazebo_sea_test.py).
 BAG_TOPICS = (
-    "/blueboat/odom", "/current", "/sim/sea_state",
+    # /blueboat/odom_gz (2026-11-15, R-7): Gazebo's own 20 Hz odometry; in a
+    # field-equivalent run /blueboat/odom is field-rate and delayed, so the
+    # reader prefers odom_gz when the bag has it (older bags read unchanged).
+    "/blueboat/odom", "/blueboat/odom_gz", "/current", "/sim/sea_state",
     "/side_scan_sonar/ground_truth/sensor",
     "/side_scan_sonar/ground_truth/contacts",
     "/side_scan_sonar/port/profile", "/side_scan_sonar/starboard/profile",
@@ -161,6 +164,7 @@ def read_bag(bag_dir: str | Path, name: str = "") -> RunData:
     types = {t.name: t.type for t in reader.get_all_topics_and_types()}
     msg_cls = {n: get_message(t) for n, t in types.items()}
     odom: list = []
+    odom_gz: list = []
     cur_t, cur_v = [], []
     status, sensor = [], []
     prof: dict[str, list] = {s: [] for s in SIDES}
@@ -169,11 +173,12 @@ def read_bag(bag_dir: str | Path, name: str = "") -> RunData:
         if topic not in msg_cls:
             continue
         msg = deserialize_message(data, msg_cls[topic])
-        if topic == "/blueboat/odom":
+        if topic in ("/blueboat/odom", "/blueboat/odom_gz"):
             st = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
             p, q = msg.pose.pose.position, msg.pose.pose.orientation
             r, pi, ya = quat_to_rpy(q.x, q.y, q.z, q.w)
-            odom.append((st if st > 0 else t_ns * 1e-9, p.x, p.y, p.z, r, pi, ya))
+            (odom_gz if topic.endswith("_gz") else odom).append(
+                (st if st > 0 else t_ns * 1e-9, p.x, p.y, p.z, r, pi, ya))
         elif topic == "/current":
             cur_t.append(t_ns * 1e-9)
             cur_v.append((msg.x, msg.y, msg.z))
@@ -194,7 +199,8 @@ def read_bag(bag_dir: str | Path, name: str = "") -> RunData:
                              msg.min_pwr_db, msg.max_pwr_db)
             prof[side].append((st, int(msg.ping_number), db,
                                msg.start_mm / 1000.0, msg.length_mm / 1000.0))
-    run = RunData(name=name or Path(bag_dir).name, track=_track_from_rows(odom))
+    run = RunData(name=name or Path(bag_dir).name,
+                  track=_track_from_rows(odom_gz if len(odom_gz) > 10 else odom))
     if cur_t:
         run.current_t = np.asarray(cur_t)
         run.current_v = np.asarray(cur_v)

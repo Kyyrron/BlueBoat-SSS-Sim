@@ -77,6 +77,15 @@ class HullBoxes:
     water_density: float = 1000.0
     name: str = "hull"
     cells_per_m: float = 40.0
+    #: Depth at which the wave pressure acts (None = the draft); set by the
+    #: CAD catamaran (bottom-area-weighted, keel fin included).
+    pressure_depth_m: float | None = None
+    #: Apply each column's buoyancy at the centroid of its WETTED part (the
+    #: CAD hull, 2026-11-15) instead of the whole column's mid-point (the box
+    #: catamaran, kept bit for bit): a tall, mostly dry body box heeled by phi
+    #: otherwise puts its buoyancy (h_col - h_wet)/2 * phi too far over, +3 %
+    #: roll stiffness on the CAD hull.
+    wetted_lever: bool = False
     _fx: np.ndarray = field(init=False, repr=False)
     _fy: np.ndarray = field(init=False, repr=False)
     _ztop: np.ndarray = field(init=False, repr=False)
@@ -121,21 +130,54 @@ class HullBoxes:
                            demihull_beam: float = 0.15,
                            separation: float = 0.76, height: float = 0.376,
                            trim_z: float | None = None,
-                           density: float = 1000.0) -> "HullBoxes":
+                           density: float = 1000.0,
+                           fin: dict | None = None) -> "HullBoxes":
         """Two demihulls placed so that, with the link origin at the Gazebo
         trim ``trim_z`` (default: the Gazebo box's own equilibrium), the
-        submerged volume equals the displacement ``mass / ρ``."""
+        submerged volume equals the displacement ``mass / ρ``.
+
+        Without ``fin`` (the box catamaran of 2026-09, kept bit for bit for
+        the legacy plant): one box per demihull, wall-sided to the keel.
+        With ``fin`` = ``{length, width, height, separation}`` (the vendor-CAD
+        hull, R-8 of session 03, 2026-11-15): per demihull a **body** box
+        ``length × demihull_beam`` at ``±separation/2`` that carries the
+        waterplane, and under it a **keel fin** box ``fin.length × fin.width
+        × fin.height`` at ``±fin.separation/2``; the body's depth below the
+        waterline is what the displacement leaves after the fin, so the
+        draft is body depth + fin height. ``height`` is keel to deck."""
         if trim_z is None:
             trim_z = HullBoxes.gazebo_box().equilibrium_z()
-        area = 2.0 * length * demihull_beam
-        draft = mass / (density * area)
-        # World waterline z = 0 sits at link z = -trim_z; the bottoms are
-        # `draft` below it.
-        bottom = -trim_z - draft
-        cz = bottom + height / 2.0
-        boxes = [Box(length, demihull_beam, height, 0.0, +separation / 2.0, cz),
-                 Box(length, demihull_beam, height, 0.0, -separation / 2.0, cz)]
-        return HullBoxes(mass, boxes, density, name="blueboat_catamaran")
+        if fin is None:
+            area = 2.0 * length * demihull_beam
+            draft = mass / (density * area)
+            # World waterline z = 0 sits at link z = -trim_z; the bottoms are
+            # `draft` below it.
+            bottom = -trim_z - draft
+            cz = bottom + height / 2.0
+            boxes = [Box(length, demihull_beam, height, 0.0, +separation / 2.0, cz),
+                     Box(length, demihull_beam, height, 0.0, -separation / 2.0, cz)]
+            return HullBoxes(mass, boxes, density, name="blueboat_catamaran")
+        fl, fw, fh = float(fin["length"]), float(fin["width"]), float(fin["height"])
+        fs = float(fin["separation"])
+        v_total = mass / density
+        v_fin = 2.0 * fl * fw * fh
+        u = (v_total - v_fin) / (2.0 * length * demihull_beam)
+        if u <= 0.0:
+            raise ValueError(f"catamaran fin displaces {v_fin * 1e3:.2f} L of the {v_total * 1e3:.2f} L "
+                             "needed: the body would float clear of the water")
+        body_bottom = -trim_z - u
+        body_h = height - fh
+        boxes = []
+        for sgn in (+1.0, -1.0):
+            boxes.append(Box(length, demihull_beam, body_h, 0.0, sgn * separation / 2.0,
+                             body_bottom + body_h / 2.0))
+            boxes.append(Box(fl, fw, fh, 0.0, sgn * fs / 2.0, body_bottom - fh / 2.0))
+        hull = HullBoxes(mass, boxes, density, name="blueboat_catamaran_cad", wetted_lever=True)
+        # The Froude-Krylov pressure acts on the bottoms: the body's (less the
+        # fin's footprint) at depth u, the fin's at the full draft.
+        a_body, a_fin = length * demihull_beam, fl * fw
+        hull.pressure_depth_m = float(((a_body - a_fin) * u + a_fin * (u + fh)) / a_body)
+        return hull
 
     @staticmethod
     def from_config(cfg: dict) -> tuple["HullBoxes", "HullBoxes"]:
@@ -143,7 +185,10 @@ class HullBoxes:
         ``config/sea_states.yaml``; unknown keys raise by name."""
         known = {"mass_kg", "gazebo_box", "catamaran", "water_density",
                  "target_entity", "target_entity_type", "damping",
-                 "wave_force_clip", "hydrostatics", "wave_response"}
+                 "wave_force_clip", "hydrostatics", "wave_response",
+                 # 2026-11-15 (session 03): damping from ratios on the plant
+                 # Gazebo integrates; the boat's windage (sea/wind.py)
+                 "damping_ratio", "windage"}
         unknown = set(cfg) - known
         if unknown:
             raise KeyError(f"Unknown hull keys: {sorted(unknown)}")
@@ -155,10 +200,15 @@ class HullBoxes:
                            f"{sorted(set(gz) - gz_known)}")
         box = HullBoxes.gazebo_box(density=rho, **gz)
         cat = dict(cfg.get("catamaran") or {})
-        cat_known = {"length", "demihull_beam", "separation", "height"}
+        cat_known = {"length", "demihull_beam", "separation", "height", "fin"}
         if set(cat) - cat_known:
             raise KeyError(f"Unknown hull.catamaran keys: "
                            f"{sorted(set(cat) - cat_known)}")
+        if "fin" in cat:
+            fin_known = {"length", "width", "height", "separation"}
+            fin = dict(cat["fin"] or {})
+            if set(fin) != fin_known:
+                raise KeyError(f"hull.catamaran.fin needs exactly {sorted(fin_known)}, got {sorted(fin)}")
         hull = HullBoxes.blueboat_catamaran(
             mass=float(cfg.get("mass_kg", box.mass_kg)), density=rho,
             trim_z=box.equilibrium_z(), **cat)
@@ -171,7 +221,10 @@ class HullBoxes:
 
     @property
     def waterplane_area_m2(self) -> float:
-        return float(sum(b.lx * b.ly for b in self.boxes))
+        """Footprint of the boxes reaching the deck (a keel fin under a body box
+        is no waterplane)."""
+        top = max(b.cz + b.lz / 2.0 for b in self.boxes)
+        return float(sum(b.lx * b.ly for b in self.boxes if b.cz + b.lz / 2.0 >= top - 1e-9))
 
     # -------------------------------------------------------- integration
     def submerged_wrench(self, pose: Pose3D, surface: SurfaceFn,
@@ -201,8 +254,14 @@ class HullBoxes:
         h = np.clip(eta - bot_w[:, 2], 0.0, height)
         f = self.water_density * G * h * self._da
         force = np.array([0.0, 0.0, float(f.sum())])
-        lever_x = mid_xy[:, 0] - pos[0]
-        lever_y = mid_xy[:, 1] - pos[1]
+        if self.wetted_lever:
+            frac = (0.5 * h / height)[:, None]
+            app_xy = bot_w[:, :2] + frac * (top_w[:, :2] - bot_w[:, :2])
+            lever_x = app_xy[:, 0] - pos[0]
+            lever_y = app_xy[:, 1] - pos[1]
+        else:
+            lever_x = mid_xy[:, 0] - pos[0]
+            lever_y = mid_xy[:, 1] - pos[1]
         # tau = sum(lever x (0,0,f)) = sum([ly*f, -lx*f, 0])
         torque = np.array([float((lever_y * f).sum()),
                            float((-lever_x * f).sum()), 0.0])
@@ -221,8 +280,16 @@ class HullBoxes:
     # ----------------------------------------------------------- statics
     def draft_at_trim(self) -> float:
         """Depth of the deepest hull bottom below the still waterline at
-        the flat-water equilibrium [m] (the catamaran's 4.5 cm)."""
+        the flat-water equilibrium [m] (the box catamaran's 4.5 cm; the CAD
+        hull's 0.212 m)."""
         return float(-(self.equilibrium_z() + self._zbot.min()))
+
+    def pressure_depth_at_trim(self) -> float:
+        """Depth at which the wave pressure is read (``hull.wave_response.
+        draft_decay``): the bottom-area-weighted depth for a hull with a keel
+        fin, else the draft (bit-identical to before for the box catamaran)."""
+        pd = getattr(self, "pressure_depth_m", None)
+        return float(pd) if pd is not None else self.draft_at_trim()
 
     def equilibrium_z(self) -> float:
         """Link-origin height at which the flat-plane buoyancy equals the
@@ -266,8 +333,14 @@ class HullBoxes:
         mx = self.submerged_wrench(Pose3D(0, 0, z_eq, roll=ang), flat)[1][0]
         my = self.submerged_wrench(Pose3D(0, 0, z_eq, pitch=ang), flat)[1][1]
         w_arm = self.mass_kg * G * (-cog_z)        # CoG below origin
+        # The weight's moment about the origin restores in BOTH planes
+        # (-m g h sin angle). Until 2026-11-15 the pitch line ADDED it, so the
+        # summary under-stated pitch stiffness by 2 m g h (41 N·m/rad: 443
+        # instead of 484 on the box catamaran) -- a reporting error only,
+        # Gazebo applies gravity itself (session 03, checked against
+        # r x W with rotation_zyx).
         c44 = -(mx - w_arm * np.sin(ang)) / ang
-        c55 = -(my + w_arm * np.sin(ang)) / ang
+        c55 = -(my - w_arm * np.sin(ang)) / ang
         ixx, iyy, _ = inertia
         return {"name": self.name, "equilibrium_z_m": float(z_eq),
                 "waterplane_m2": self.waterplane_area_m2,

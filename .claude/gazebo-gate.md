@@ -37,6 +37,12 @@ burials, depth, seed and path unchanged (script and record:
 `sea_validation_v2_built.yaml`; the 2026-10-20 script no longer exists).
 `flat_1p5m` was deleted; `flat_5p0m` is kept only because the Belief
 follow-up of session 06 reads its `metadata.yaml` -- it no longer loads as a
-scene. **The gate has not been run on the v2 worlds** (no Gazebo launch
-without the owner's order): the next session allowed to launch Gazebo runs
-it once on each and records the result here.
+scene. **First run on the v2 worlds: 2026-11-16 (session 03)**, default `--waves harbour_chop` (the
+physical fetch-limited sea since 2026-11-15; its July-attitude comparisons are REPORTS since then, the
+motion check is "the waves move the hull, bounded"), the start hold on, geometric sonar:
+`flat_1p5m_v2` **26 / 26**; `flat_5p0m_v2` **24 / 26** -- the two failures are the fresh-pose check in
+*waves* and *both* (0.16 / 0.19 % of pings over 60 ms, worst 90 / 140 ms; rule <= 0.1 %), run while the
+other world's gate shared the CPU; the same intermittent check as on 2026-10-20. Evidence and reports:
+`~/ros2_ws/sim_runs/sim_acceptance/03_sea_state/gate/`. Run the gate from a shell WITHOUT `set -u`
+(`/opt/ros/jazzy/setup.bash` fails under it). At harbour_chop the hull moves 0.23-0.34° (roll) and the sonar
+consequences (back-scan, image correlation 0.4-0.6 against calm) still pass.

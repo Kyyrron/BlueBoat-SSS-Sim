@@ -26,14 +26,37 @@ format: blueboat_sea_state_presets/1
 #    here so its flat-plane term can be cancelled while waves are active.
 #    It has 3 % reserve buoyancy (1.01 scales each dimension) -- a URDF artefact the wave model must not
 #    inherit. The smoke test recomputes it from that formula.
-#  * catamaran -- the hydrostatic hull the wave force integrates: BlueBoat
-#    120 demihulls (1.2 m long, ~0.15 m wide, ~0.76 m apart, 0.376 m high),
-#    placed so their draft at the Gazebo trim reproduces the displacement.
+#  * catamaran -- the hydrostatic hull the wave force integrates. Since
+#    2026-11-15 (session 03, R-8) the BlueBoat demihulls of the vendor CAD
+#    (BLUEBOAT_HULL_SET_BR-101652, 2024-02-15; derivation
+#    ~/ros2_ws/sim_runs/sim_acceptance/03_sea_state/R8_request_for_control.md):
+#    per demihull a body box carrying the waterplane (0.917 x 0.122 m, centred
+#    0.333 m off the centre plane = the CAD waterplane centroid at the 0.212 m
+#    floating draft; matches A_wp 0.224 m², I_T 0.0251 m⁴, I_L 0.0157 m⁴) and a
+#    keel fin box under it (1.12 x 0.015 x 0.165 m on the keel line, 0.583 m
+#    keel to keel), so displacement, draft and the centre of buoyancy are the
+#    CAD's too. The earlier box catamaran (1.2 x 0.15 m, 0.76 m apart, 4.5 cm
+#    draft; no source for the 0.76 m) is in sea_states_legacy.yaml, floated
+#    by the legacy plant.
 hull:
   mass_kg: 16.15                   # 16.01 hull + 2 × 0.07 propellers
   water_density: 1000.0
   gazebo_box: {mass: 16.01, prop_mass: 0.07, x_size: 1.2, y_size: 0.91, z_size: 0.376, offset_z: 0.05}
-  catamaran: {length: 1.2, demihull_beam: 0.15, separation: 0.76, height: 0.376}
+  catamaran:
+    length: 0.917
+    demihull_beam: 0.1223
+    separation: 0.666
+    height: 0.376
+    fin: {length: 1.122, width: 0.0152, height: 0.165, separation: 0.583}
+  # The boat above the water (sea/wind.py; projected from the full-vessel CAD
+  # BR-101447 RevA above the 0.212 m waterline, antenna mast included,
+  # 03_sea_state/r8/cad_windage.json): frontal 0.118 m², lateral 0.239 m²,
+  # lateral centroid 0.207 m above the water, 1.195 m overall. Coefficients:
+  # Fossen 2021 §10.1 symmetric-craft form, experiments c_x 0.50-0.90,
+  # c_y 0.70-0.95, c_n 0.05-0.20 (mid values; c_n's sign is not documented for
+  # this boat: a bracket, docs/sea_state_model.md §5.10).
+  windage: {frontal_area_m2: 0.118, lateral_area_m2: 0.239, length_m: 1.195, centroid_height_m: 0.207,
+            cx: 0.7, cy: 0.8, cn: 0.1}
   target_entity: blueboat          # gz model name (canonical link = base_link)
   # Which hydrostatics carry the hull (2026-10-09). `catamaran`: the
   # catamaran replaces the Gazebo box in EVERY run, calm water included, so
@@ -45,15 +68,20 @@ hull:
   # in 1.2 m of water) -- docs/sea_state_model.md §5. `gazebo_box_when_calm`
   # restores the pre-2026-10-09 swap-only-with-waves behaviour.
   hydrostatics: catamaran
-  # Extra hull damping the wave wrench carries (sea/motion.py, 2026-09-05).
-  # The Hydrodynamics plugin's coefficients are the BlueROV2's (zW -18
-  # N·s/m: heave damping ratio 0.03 on this hull), so the boat rang at its
-  # 0.6 s heave mode. A catamaran's radiation + viscous damping is far
-  # higher; these give ζ ≈ 0.4 on the catamaran's own stiffness
-  # (b = 2ζ√(C(m+a)) − b_plugin: heave 2·0.4·√(3530·30.7) − 18, roll
-  # 2·0.4·√(577·2.54) − 10.9, pitch 2·0.4·√(443·4.04) − 20.8). Judgement
-  # values -- a decay test on the real boat would anchor them.
-  damping: {heave_ns_per_m: 245.0, roll_nms_per_rad: 20.0, pitch_nms_per_rad: 13.0}
+  # Hull damping (heave / roll / pitch) as DAMPING RATIOS (2026-11-15, R-8):
+  # the sea-state node sizes b = 2ζ√(K (I + A)) on the plant Gazebo
+  # integrates (read from /blueboat/robot_description: mass, link inertia,
+  # the plugin's added mass) and carries the complement of the plugin's own
+  # linear damping -- all of it once Control's vertical damping is 0 (R-8),
+  # today's split before. ζ: heave 0.3, roll 0.2 (MSS otter_legacy.m,
+  # Fossen & Perez), pitch 0.2 (between otter_legacy's 0.4 and the
+  # Capytaine-based otter.m's 0.1); brackets 0.1-0.4, 0.1-0.25, 0.1-0.4.
+  # The July corpus's output-only roll damping 0.10-0.25 is report-only
+  # (SEEN / HELD-OUT recordings, 2026-11-15). On the identified plant as
+  # session 04b applied R-8 (zDotW -14.5, roll / pitch added inertia as rigid
+  # inertia, physical CoG +0.1376 m) this gives b = 156 N·s/m, 12.5 and
+  # 12.1 N·m·s/rad; natural frequencies 1.35 / 1.18 / 0.74 Hz.
+  damping_ratio: {heave: 0.3, roll: 0.2, pitch: 0.2}
   # Soft clip of the catamaran's excess buoyancy, in weights: a C1 tanh
   # knee at knee_g, saturating knee_g + width_g above. Inert for a hull
   # that rides its wave (a +0.1 m crest is 2.2 g); it removes the slam a
@@ -180,9 +208,11 @@ waves:
   # "the upper DNV band plus swell/wake influence"): the fetch-limited young-sea
   # relation -- JONSWAP (Hasselmann 1973) and Kahma & Calkoen 1992 give
   # Tp/√Hs = 3.0-4.0 for a harbour (U10 4-10 m/s over 0.3-2 km), the lower DNV
-  # bound is 3.6 -- and the value that reproduces the real BlueBoat's attitude
-  # spectrum at Shiraishi-jima (config/corpus_attitude_targets.yaml: roll/pitch
-  # centred at ~1.1 Hz; the old 2.8 s 'smooth' rocked the boat at ~0.65 Hz).
+  # bound is 3.6 (on 2026-11-10 it was also chosen because it reproduced the July
+  # Shiraishi-jima attitude spectrum, config/corpus_attitude_targets.yaml; since
+  # 2026-11-15 that attitude is report-only and judges no level). The site level
+  # `harbour_chop` is the exception: its Hs AND Tp come from its own fetch-limited
+  # derivation (sea/fetch.py), not from the rule.
   # Long-period energy (wakes, swell trains) lives in the `events:` groups. And an
   # `events:` block: random wave groups -- passing-vessel wakes and swell
   # trains -- as a Poisson process (sea/events.py; Soomere 2007,
@@ -206,15 +236,30 @@ waves:
     description: "Light ripples: about half a degree of roll and pitch at ~1.3 Hz, a centimetre of heave; a faint jitter of the seabed line."
     reference: "Hasselmann et al. 1973 (JONSWAP); Kahma & Calkoen 1992 (fetch-limited Tp); DNV-RP-C205 §3.5.10; Soomere 2007 (wakes)"
   harbour_chop:
-    hs_m: 0.07
-    tp_s: 0.95
+    # 2026-11-15 (session 03; the owner's ruling on condition D): a PHYSICAL
+    # estimate -- the fetch-limited wind sea of the July Shiraishi-jima harbour,
+    # Kahma & Calkoen 1992 (stable, eqs 2-3), U10 3.68 m/s from 195 deg (JMA
+    # AMeDAS Kasaoka, the survey hours of 2026-07-21/22/23; range 3.3-4.0 m/s)
+    # over a 130 m fetch (the harbour world's basin upwind of the surveyed path;
+    # 89-165 m). Hs 0.030 m, Tp 0.59 s; wind bracket Hs 0.027-0.034 m, Tp
+    # 0.56-0.62 s; the unstable law gives 0.034 m / 0.60 s. Inputs and how they
+    # were measured: sea/fetch.py (HARBOUR_CHOP; smoke [10] checks this block
+    # equals its output). It REPLACES the inverse estimates fitted to the July
+    # attitude (2026-11-10: 0.07 m / 0.95 s; 2026-11-15 re-estimate on the CAD
+    # hull: 0.052 m / 0.82 s), which used SEEN / HELD-OUT recordings. No field
+    # attitude enters it; that attitude is report-only. A short local chop
+    # (wavelength ~0.55 m, under half the hull): it barely rocks the boat; the
+    # long-period energy of a harbour (wakes, swell through the entrance) is
+    # the `events:` groups' and is not part of this estimate.
+    hs_m: 0.030
+    tp_s: 0.59
     gamma: 1.5
     spread_s: 3.0
     douglas: 1
     events: {rate_per_hour: 5.0, hs_m: 0.10, tp_s: 5.0, duration_s: 25.0, from_spread_deg: 60.0}
-    label: "Harbour chop (site, 0.07 m)"
-    description: "The chop of the Shiraishi-jima harbour recordings: the boat rocks about once a second (~1.1 Hz), about a degree of roll and pitch, a centimetre of heave. Fine jitter of the seabed line and port/starboard banding at that rate."
-    reference: "Inverse estimate: reproduces the real BlueBoat attitude spectrum (config/corpus_attitude_targets.yaml) -- not a wave measurement; Tp = 3.6 sqrt(Hs) (Hasselmann 1973; Kahma & Calkoen 1992); Soomere 2007"
+    label: "Harbour chop (site, 0.03 m)"
+    description: "The local wind chop of the July Shiraishi-jima harbour: a 3.7 m/s south-south-west wind over the ~130 m basin raises 3 cm waves at about 1.7 Hz -- shorter than the boat, which mostly rides over them. Occasional longer wave groups (wakes) rock it."
+    reference: "Fetch-limited wind sea, Kahma & Calkoen 1992 (J. Phys. Oceanogr. 22:1389) eqs 2-3; wind JMA AMeDAS Kasaoka (July 2026 survey hours); fetch from the harbour world; Soomere 2007 (wakes)"
   smooth:
     hs_m: 0.15
     tp_s: 1.39

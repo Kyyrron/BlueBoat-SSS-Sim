@@ -35,8 +35,9 @@ across the east-west survey lines; waves from the north-east, oblique):
 * ``current`` -- the realised current matches its configured mean within
   the statistics of a run this short and never leaves its bound; the boat
   crabs and its track deviates more than in calm water;
-* ``waves``   -- the motion test (TODO, done 2026-10-08): roll/pitch std in the
-  corpus band, heave bounded, the hull's mean height unchanged (impulse
+* ``waves``   -- the motion test (TODO, done 2026-10-08): the waves move the
+  hull (roll/pitch above calm's, bounded; since 2026-11-15 the July attitude
+  band -- SEEN / HELD-OUT recordings -- is printed as a REPORT, never gated), heave bounded, the hull's mean height unchanged (impulse
   conservation), no 1.6 Hz ringing, a fresh pose under every ping -- and
   the SSS consequence: footprints that step back over seabed already
   imaged or skip ahead, uneven pings per target;
@@ -127,13 +128,24 @@ class Watcher:
             rclpy.init()
         self.node = rclpy.create_node("gazebo_sea_test_watch")
         self.reset()
-        self.node.create_subscription(Odometry, "/blueboat/odom", self._odom, 10)
+        # Gazebo's own odometry (2026-11-15, R-7): /blueboat/odom is field-rate
+        # and delayed in a field-equivalent run (4 Hz stretches); the stall
+        # detector reads both and counts whichever flows.
+        self.node.create_subscription(Odometry, "/blueboat/odom_gz", self._odom, 10)
+        self.node.create_subscription(Odometry, "/blueboat/odom", self._odom_field, 10)
+        self._gz_seen = False
 
     def reset(self) -> None:
         self.n, self.t, self.xy, self.dist = 0, 0.0, None, 0.0
         self.start, self.max_disp = None, 0.0
 
-    def _odom(self, msg) -> None:
+    def _odom_field(self, msg) -> None:
+        if not self._gz_seen:
+            self._odom(msg, gz=False)
+
+    def _odom(self, msg, gz: bool = True) -> None:
+        if gz:
+            self._gz_seen = True
         p = msg.pose.pose.position
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if self.n == 0 and t > 60.0:
@@ -249,7 +261,8 @@ def run_scenario(name: str, a: argparse.Namespace, out: Path,
            f"world_dir:={a.world_dir}", "with_control:=true",
            f"trajectory_file:={a.trajectory}", "headless:=true",
            f"sea_schedule:={d / 'scenario.yaml'}", f"sea_seed:={a.seed}",
-           f"note:=seaval_{name}", f"data_dir:={d / 'data'}"]
+           f"note:=seaval_{name}", f"data_dir:={d / 'data'}",
+           f"sim_config:={a.sim_config}"]
     if a.sonar_config:
         cmd.append(f"sonar_config:={a.sonar_config}")
     goal, need = mission_goal(traj_points, a.quick)
@@ -417,32 +430,28 @@ def evaluate(results: dict[str, dict], a: argparse.Namespace) -> Checks:
                f"{_g(r, 'track', 'xte_rms_m')} m (calm "
                f"{_g(calm, 'track', 'xte_rms_m') if calm else '-'})")
         if waves:
-            ck(name, f"roll and pitch std in the corpus band (0.5-2.5 deg) at "
-               f"'{a.waves}'",
-               0.5 <= att.get("roll_std_deg", 0) <= 2.5
-               and 0.5 <= att.get("pitch_std_deg", 0) <= 2.5,
-               f"roll {att.get('roll_std_deg')}, pitch {att.get('pitch_std_deg')} deg")
-            # 2026-11-10: the motion SPECTRUM against the real boat's
-            # (config/corpus_attitude_targets.yaml, the same estimator) --
-            # the gate passed 'smooth' at 0.65 Hz while the real boat rocks
-            # at ~1.1 Hz. Gated for the site level only.
+            # 2026-11-15 (the owner's ruling on condition D): the July
+            # attitude (config/corpus_attitude_targets.yaml: SEEN / HELD-OUT
+            # recordings) judges nothing any more. Gated: the waves move the
+            # hull, and the motion stays bounded. Reported: the std and the
+            # spectrum against the July band (was a 0.5-2.5 deg std gate and,
+            # at harbour_chop, a spectral gate).
+            c_r = _g(calm, "attitude", "roll_std_deg", default=None) if calm else None
+            c_p = _g(calm, "attitude", "pitch_std_deg", default=None) if calm else None
+            r_s, p_s = att.get("roll_std_deg", 0), att.get("pitch_std_deg", 0)
+            ck(name, f"the waves move the hull at '{a.waves}': roll and pitch std above "
+               f"calm's (or > 0.05 deg without a calm run) and below 10 deg",
+               r_s > (c_r if c_r is not None else 0.05) and p_s > (c_p if c_p is not None else 0.05)
+               and r_s < 10.0 and p_s < 10.0,
+               f"roll {r_s}, pitch {p_s} deg (calm {c_r} / {c_p})")
             sp = att.get("spectra") or {}
             tg = _targets().get("bands", {})
-            if a.waves == "harbour_chop" and sp.get("roll") and tg:
-                c0, c1 = tg["roll_centroid_hz"]
-                ck(name, "the motion spectrum is the real boat's: roll centroid "
-                   "within 0.15 Hz of the corpus band, >= 75 % of roll power in "
-                   "0.8-2 Hz, roll 0.6-1.6 deg, pitch 0.4-1.6 deg, wave-rate yaw "
-                   "jitter present (>= 5 % of yaw-rate power above 1.2 Hz)",
-                   c0 - 0.15 <= sp["roll"]["centroid_hz"] <= c1 + 0.15
-                   and sp["roll"]["frac_band"] >= 0.75
-                   and 0.6 <= sp["roll"]["std_deg"] <= 1.6
-                   and 0.4 <= sp["pitch"]["std_deg"] <= 1.6
-                   and sp["yaw_rate"]["frac_hf"] >= 0.05,
-                   f"roll {sp['roll']}, pitch {sp['pitch']}, yaw rate "
-                   f"{sp['yaw_rate']}; corpus roll centroid {tg['roll_centroid_hz']} Hz, "
-                   f"std {tg['roll_std_deg']} / {tg['pitch_std_deg']} deg, yaw hf "
-                   f"{tg['yaw_rate_frac_hf']}")
+            print(f"  REPORT [{name}] (not gated; July attitude, SEEN / HELD-OUT): roll std "
+                  f"{r_s}, pitch std {p_s} deg vs the old 0.5-2.5 deg band"
+                  + (f"; roll {sp['roll']}, pitch {sp['pitch']}, yaw rate {sp['yaw_rate']} vs July "
+                     f"roll centroid {tg.get('roll_centroid_hz')} Hz, std {tg.get('roll_std_deg')} / "
+                     f"{tg.get('pitch_std_deg')} deg, yaw hf {tg.get('yaw_rate_frac_hf')}; output-only "
+                     f"roll 1.15-1.30 Hz" if sp.get("roll") and tg else ""))
             # A contouring hull heaves with the surface (docs/sea_state_model.md
             # §5): heave std = sigma_eta = Hs/4 and its spectrum peaks at Tp.
             # (TODO [P1]'s "p2p < 0.15 m at 'smooth'" contradicted its own Hs
@@ -554,7 +563,8 @@ def main(argv=None) -> int:
     ap.add_argument("--current-from", type=float, default=0.0)
     ap.add_argument("--variation", default="natural")
     ap.add_argument("--waves", default="harbour_chop",
-                    help="wave level (default harbour_chop since 2026-11-10: the "
+                    help="wave level (default harbour_chop since 2026-11-10; since 2026-11-15 the "
+                         "site's physical fetch-limited wind sea, its July attitude reported only; was: the "
                          "site's chop, gated against the corpus motion spectrum)")
     ap.add_argument("--waves-from", type=float, default=45.0)
     ap.add_argument("--crest", default="short")
@@ -570,6 +580,8 @@ def main(argv=None) -> int:
     ap.add_argument("--sonar-config", default="",
                     help="sonar profile YAML for the simulated sonar "
                          "(default: the shipped one)")
+    ap.add_argument("--sim-config", default="field_equivalent", choices=("field_equivalent", "legacy"),
+                    help="Control's simulation configuration, passed explicitly (R-6, 2026-11-15)")
     a = ap.parse_args(argv)
     a.world_dir = a.world_dir.expanduser().resolve()
     a.trajectory = a.trajectory.expanduser().resolve()

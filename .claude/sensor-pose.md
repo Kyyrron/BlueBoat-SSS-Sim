@@ -57,3 +57,20 @@ yaw then keeps the physical footprint-overlap correlation (0.49 vs 0.74 level â‰
 `[10]`). The default stays `line` (render fixture unchanged); making `ground` the
 default is a deliberate rebaseline -- the owner's call after a look test.
 
+**Two odometries (2026-11-15, R-7 of Control's `REQUESTS.md`).** Since Control's session 04,
+`/blueboat/odom` in a field-equivalent run is what the real boat's software sees: field-rate
+(4 Hz stretches, 25 Hz bursts) and delayed, relayed by `simulation_interface` from Gazebo's
+own `/blueboat/odom_gz` (20 Hz, true). The sonar node and the sea-state node still render /
+push on the 100 Hz model pose first; their **fallback is `/blueboat/odom_gz`** while it is
+fresh (< 1 s, parameter `true_odom_topic`), then `/blueboat/odom` (`odom_topic`; the only
+pose of a bag replay, so `sss_sim_launch.py`'s own default stays `/blueboat/odom`). The MAVROS
+shim stays on `/blueboat/odom`: processing and georeferencing see the delayed, field-like pose,
+the sensor and the sea the true one -- the realistic split. `full_mission_launch.py` derives
+the topics from `sim_config` (`resolve_sim_config`, smoke `[10]`): with the raw bridge
+(field-equivalent with the control stack) the fallback is `odom_gz`; legacy runs and runs
+without the control stack bridge `/blueboat/odom` directly (`odom_raw:=false`; before
+2026-11-15 a `with_control:=false` run had no `/blueboat/odom` at all). The sonar's
+`run_info` records which source it used (`pose_source`) and the launch's run context
+(`simulation_context`: sim_config, plant, odometry profile, tuning-file and schedule SHA-256).
+Motion during a ping stays an explicit assumption: the ping is rendered at the pose
+propagated to its own time, one pose per ping.

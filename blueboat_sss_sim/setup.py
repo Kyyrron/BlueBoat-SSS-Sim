@@ -45,6 +45,8 @@ setup(
          ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
         ("share/" + package_name + "/config", glob("config/*.yaml")),
+        # sea situations (R3 presets, 2026-11-15): sea_schedule:=<share>/config/sea_situations/<name>.yaml
+        ("share/" + package_name + "/config/sea_situations", glob("config/sea_situations/*.yaml")),
         ("share/" + package_name + "/launch", glob("launch/*.py")),
         ("share/" + package_name + "/docs", glob("docs/*.md")),
         ("share/" + package_name + "/docs/engineering",

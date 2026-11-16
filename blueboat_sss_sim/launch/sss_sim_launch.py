@@ -111,6 +111,20 @@ if sl is not None:
                                "wall budget per ping)")
     sl.declare_arg("auto_ping", default_value=True)
     sl.declare_arg("quiet", default_value=True)
+    # Additive (2026-11-15, session 03).
+    sl.declare_arg("with_sonar", default_value=True,
+                   description="false: the MAVROS shim only, no sonar node and no "
+                               "auto ping (motion-only runs)")
+    sl.declare_arg("odom_topic", default_value="/blueboat/odom",
+                   description="the sonar's last-fallback pose; /blueboat/odom is the "
+                               "only pose of a bag replay (the GCS starts this launch "
+                               "standalone then), so it stays the default")
+    sl.declare_arg("true_odom_topic", default_value="/blueboat/odom_gz",
+                   description="Gazebo's own odometry, preferred while fresh (R-7); "
+                               "'' = none")
+    sl.declare_arg("run_context", default_value="",
+                   description="run metadata from full_mission_launch (b64:-encoded "
+                               "JSON), recorded in run_info")
     for _a in ACQUISITION_ARGS:
         sl.declare_arg(_a, default_value="",
                        description=f"{_a} override; empty = use the resolved "
@@ -207,11 +221,15 @@ def launch_setup():
                                       renderer)
     acquisition = resolve_acquisition(
         sonar_yaml, {a: sl.arg(a) for a in ACQUISITION_ARGS})
-    sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
+    with_sonar = str(sl.arg("with_sonar")).lower() not in ("false", "0", "no")
+    if with_sonar:
+        sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
             parameters={
                 "scene_dir": world_dir,
                 "sonar_config": sonar_yaml,
-                "odom_topic": "/blueboat/odom",
+                "odom_topic": str(sl.arg("odom_topic") or "/blueboat/odom"),
+                "true_odom_topic": str(sl.arg("true_odom_topic") or ""),
+                "run_context": str(sl.arg("run_context") or ""),
                 "publish_ground_truth": True,
                 "seed": int(str(sl.arg("sonar_seed") or 0)),
                 "renderer": renderer,
@@ -244,7 +262,7 @@ def launch_setup():
                 parameters={"sim_origin_lat": float(lat),
                             "sim_origin_lon": float(lon)})
 
-    if sl.arg("auto_ping"):
+    if sl.arg("auto_ping") and with_sonar:
         # One-shot ping enable a few seconds after the graph is up (same
         # command an operator issues on the real system). Its publisher
         # chatter ("beginning loop", "publishing #1: ...") goes to the log

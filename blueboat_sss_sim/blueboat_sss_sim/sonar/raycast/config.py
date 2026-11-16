@@ -206,6 +206,11 @@ class PathsConfig:
     #: angles); a calm pool is a site record (pass-4 overlay 3e-4 m). From the
     #: sea state when the node has one (Phase 6).
     surface_rms_m: float = 0.02
+    #: Follow the sea state (CR-03-1, session 03, 2026-11-15): the node sets the
+    #: surface RMS to max(surface_rms_m, Hs / 4) from /sim/sea_state (a wave field's
+    #: RMS elevation is Hs / 4), so calm water keeps surface_rms_m exactly. Off by
+    #: default: every profile renders as before.
+    surface_rms_from_sea: bool = False
     floor_bounces: bool = True
     #: Wall faces as bounce boundaries (ghosts via quays), at most
     #: ``max_wall_bounces`` per chain.
@@ -537,7 +542,10 @@ PERFORMANCE_KEYS: tuple[str, ...] = tuple(ENGINE_KNOBS) + (
 #: 0.02 to 0.10 dB between 1.0 and 0.819 at 5-10 m of altitude
 #: (``beam/taper_seabed.json``).
 #: ``sampling.max_range_m``: a guard; it changes no render below the limit.
-ACCEPTED_CORE_KEYS: tuple[str, ...] = ("paths.surface_rms_m", "beam.taper_pedestal",
+#: ``paths.surface_rms_from_sea`` (2026-11-15, CR-03-1): the surface RMS follows the sea,
+#: max(surface_rms_m, Hs/4) -- every value above 5 mm renders the same inside the thesis
+#: domain (session 01, 0.00 dB), and the floor is the profile's own 2 cm.
+ACCEPTED_CORE_KEYS: tuple[str, ...] = ("paths.surface_rms_m", "paths.surface_rms_from_sea", "beam.taper_pedestal",
                                        "sampling.max_range_m")
 
 
@@ -1093,6 +1101,18 @@ RAYCAST_VARIANTS: dict[str, dict] = {
         "raycast": _harbour(_FAST_ENGINE),
         "header": "BRACKET END (corner high, R5) = the harbour-fast production profile "
                   "(objects.corner_floor_coherence at its default, 1)",
+    },
+    # CR-03-1 (session 03, 2026-11-15): the production profile with the sea
+    # surface's roughness following the sea state (max(2 cm, Hs/4)). Not
+    # listed for MCS; the production profile is unchanged.
+    "raycast_harbour_fast_sea_surface_sonar.yaml": {
+        "label": "Ray-cast \u2014 harbour, fast, sea surface from the sea state",
+        "order": 46,
+        "description": "The production profile with the sea surface's RMS height taken from the "
+                       "running sea state (max(0.02 m, Hs / 4)) instead of a fixed 0.02 m.",
+        "raycast": _deep_merge(_harbour(_FAST_ENGINE), {"paths": {"surface_rms_from_sea": True}}),
+        "header": "harbour-fast production profile, sea surface from the sea state (CR-03-1)",
+        "listed": False,
     },
     # Frozen copies of the two harbour profiles as they rendered on 2026-11-12
     # (owner, 2026-11-13): regression only. ``listed: False`` = no ``variant``

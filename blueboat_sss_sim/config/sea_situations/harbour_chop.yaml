@@ -1,0 +1,14 @@
+# Sea situation `harbour_chop` (R3, session 03, 2026-11-15): the July Shiraishi-jima harbour -- the `harbour_chop`
+# wave level (Hs 0.030 m, Tp 0.59 s: the fetch-limited wind sea of a 3.7 m/s wind from 195 deg over the ~130 m
+# basin, Kahma & Calkoen 1992; sea/fetch.py), waves FROM the measured wind direction (JMA AMeDAS Kasaoka, S-SSW in
+# the survey hours), with a weak 0.1 m/s current (no current was measured; a per-run choice). No wind term: the
+# wind's force on the windage at 3.7 m/s is left out of this situation (it would need the boat's heading at the
+# site). No field attitude was used to make this file.
+format: blueboat_sea_schedule/1
+name: harbour_chop
+seed: 0
+interpolation: hold
+keyframes:
+- t_s: 0.0
+  current: {preset: weak, from_deg: 0.0}
+  waves: {preset: harbour_chop, from_deg: 195.0, wakes: none}

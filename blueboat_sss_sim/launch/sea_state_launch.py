@@ -32,6 +32,17 @@ with_current_bridge   also bridge ROS /current -> gz /ocean_current;
                   already do (two bridges would double-publish)
 rate_hz           publish rate = physics rate                (default 100)
 quiet             unused here; accepted for symmetry with the siblings
+sea_presets_file  presets YAML ("" = by the plant the robot description
+                  carries: sea_states.yaml, or sea_states_legacy.yaml for
+                  the BlueROV2 legacy plant; 2026-11-15)
+sea_plant         "" = from /blueboat/robot_description; or identified |
+                  bluerov2_legacy
+sea_kappa         R4 bracket: the commanded->applied thrust factor to emulate
+                  (horizontal sea forces x 0.493 / kappa); "" = off
+odom_topic / true_odom_topic   the node's fallback poses (default
+                  /blueboat/odom, /blueboat/odom_gz -- odom_gz preferred while
+                  fresh, R-7)
+run_context       run metadata (b64:-encoded JSON) from full_mission_launch
 
 ``/current`` (``geometry_msgs/Vector3``) is bridged by
 ``blueboat_description/launch/world_launch.py`` and by
@@ -56,6 +67,13 @@ if sl is not None:
     sl.declare_arg("sea_waves_from_deg", default_value=0.0)
     sl.declare_arg("sea_schedule", default_value="")
     sl.declare_arg("sea_seed", default_value=0)
+    sl.declare_arg("sea_presets_file", default_value="")
+    sl.declare_arg("sea_plant", default_value="")
+    sl.declare_arg("sea_kappa", default_value="")
+    sl.declare_arg("odom_topic", default_value="/blueboat/odom")
+    sl.declare_arg("true_odom_topic", default_value="/blueboat/odom_gz")
+    sl.declare_arg("run_context", default_value="")
+    sl.declare_arg("release_world_on_arm", default_value=False)
     sl.declare_arg("world_name", default_value="ocean")
     sl.declare_arg("world_dir", default_value="")
     sl.declare_arg("with_current_bridge", default_value=False)
@@ -126,6 +144,16 @@ def launch_setup():
                 "world_name": world_name,
                 "world_dir": str(sl.arg("world_dir")),
                 "rate_hz": float(sl.arg("rate_hz")),
+                # additive (2026-11-15, session 03)
+                "presets_file": str(sl.arg("sea_presets_file") or ""),
+                "plant": str(sl.arg("sea_plant") or ""),
+                "kappa": float(str(sl.arg("sea_kappa") or 0.0)),
+                "odom_topic": str(sl.arg("odom_topic") or "/blueboat/odom"),
+                "true_odom_topic": str(sl.arg("true_odom_topic") or ""),
+                "run_context": str(sl.arg("run_context") or ""),
+                # 2026-11-16: the world was started paused; unpause once armed
+                "release_world_on_arm": str(sl.arg("release_world_on_arm")).strip().lower()
+                                         in ("1", "true", "yes"),
             })
     return sl.launch_description()
 

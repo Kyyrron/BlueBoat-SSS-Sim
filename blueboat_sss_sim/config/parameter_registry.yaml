@@ -814,14 +814,14 @@ parameters:
     default: 245.0
     bounds: [0.0, 2000.0]
     tunable: true
-    meaning: Extra heave damping carried by the wave wrench (zeta ~0.4)
+    meaning: "LEGACY PLANT ONLY (sea_states_legacy.yaml, the BlueROV2 plant): extra heave damping carried by the wave wrench (zeta ~0.4). The identified plant uses sea.hull.damping_ratio.* (2026-11-15)"
     identified_by: judged
     metric: heave free-decay envelope
     uncertainty: unmeasured
     confounders: [sea.hull.mass_kg]
     experiment: heave free-decay test at the dock
     owner: sea/motion.py
-    source: {yaml: {file: config/sea_states.yaml, key: hull.damping.heave_ns_per_m}}
+    source: {yaml: {file: config/sea_states_legacy.yaml, key: hull.damping.heave_ns_per_m}}
   - name: sea.hull.damping.roll_nms_per_rad
     unit: N m s/rad
     class: vehicle_control
@@ -829,14 +829,14 @@ parameters:
     default: 20.0
     bounds: [0.0, 500.0]
     tunable: true
-    meaning: Extra roll damping (zeta ~0.4)
+    meaning: "LEGACY PLANT ONLY: extra roll damping (zeta ~0.4)"
     identified_by: judged
     metric: roll free-decay; field roll std 0.9-1.3 deg
     uncertainty: unmeasured
     confounders: []
     experiment: roll free-decay test
     owner: sea/motion.py
-    source: {yaml: {file: config/sea_states.yaml, key: hull.damping.roll_nms_per_rad}}
+    source: {yaml: {file: config/sea_states_legacy.yaml, key: hull.damping.roll_nms_per_rad}}
   - name: sea.hull.damping.pitch_nms_per_rad
     unit: N m s/rad
     class: vehicle_control
@@ -844,14 +844,256 @@ parameters:
     default: 13.0
     bounds: [0.0, 500.0]
     tunable: true
-    meaning: Extra pitch damping (zeta ~0.4)
+    meaning: "LEGACY PLANT ONLY: extra pitch damping (zeta ~0.4)"
     identified_by: judged
     metric: pitch free-decay; field pitch std 0.8-1.5 deg
     uncertainty: unmeasured
     confounders: []
     experiment: pitch free-decay test
     owner: sea/motion.py
-    source: {yaml: {file: config/sea_states.yaml, key: hull.damping.pitch_nms_per_rad}}
+    source: {yaml: {file: config/sea_states_legacy.yaml, key: hull.damping.pitch_nms_per_rad}}
+
+  # -- session 03 (2026-11-15): the identified plant's vertical model (R-8) and the disturbance
+  - name: sea.hull.damping_ratio.heave
+    unit: "1"
+    class: vehicle_control
+    status: judged
+    default: 0.3
+    bounds: [0.1, 0.4]
+    tunable: false
+    meaning: "Heave damping ratio of the identified plant's hull; the node sizes b = 2 zeta sqrt(K (m + A33)) on the plant it reads from the robot description and carries the complement of the plugin's linear damping (all of it after R-8)"
+    identified_by: "literature: MSS otter_legacy.m (Fossen & Perez, Marine Systems Simulator), Zw = -2*0.3*w3*M33 for a 2 m twin-hull USV; not fitted"
+    metric: "heave free decay (03_sea_state proxies)"
+    uncertainty: "regime: a 55 kg pontoon catamaran; the BlueBoat's fin-keel demihulls radiate differently"
+    confounders: [sea.hull.mass_kg]
+    experiment: "heave free decay at the dock"
+    owner: sea/motion.py (damping_from_ratios)
+    source: {yaml: {file: config/sea_states.yaml, key: hull.damping_ratio.heave}}
+    bracket: "0.1 .. 0.4 (otter.m's Capytaine-based potential damping is 'small' with a 0 increment; otter_legacy.m 0.3)"
+  - name: sea.hull.damping_ratio.roll
+    unit: "1"
+    class: vehicle_control
+    status: judged
+    default: 0.2
+    bounds: [0.1, 0.25]
+    tunable: false
+    meaning: "Roll damping ratio of the identified plant's hull (sized as heave's)"
+    identified_by: "literature: MSS otter_legacy.m 0.2 and otter.m (an increment of 0.2 on a small potential term); report-only since 2026-11-15 (the July harbour files are SEEN / HELD-OUT): the corpus's output-only roll damping 0.10-0.25 (docs/sea_state_model.md section 5)"
+    metric: "roll free decay; roll spectrum width"
+    uncertainty: "regime as heave"
+    confounders: []
+    experiment: "roll free decay"
+    owner: sea/motion.py (damping_from_ratios)
+    source: {yaml: {file: config/sea_states.yaml, key: hull.damping_ratio.roll}}
+  - name: sea.waves.harbour_chop.hs_m
+    unit: m
+    class: environment
+    status: derived
+    default: 0.030
+    bounds: [0.027, 0.034]
+    tunable: false
+    meaning: "Significant wave height of the site level harbour_chop: the fetch-limited wind sea of the July 2026 Shiraishi-jima harbour (sea/fetch.py HARBOUR_CHOP)"
+    identified_by: "Kahma & Calkoen 1992 (J. Phys. Oceanogr. 22:1389, doi:10.1175/1520-0485(1992)022<1389:RDITOG>2.0.CO;2, eqs 2-3 stable) at U10 3.68 m/s (JMA AMeDAS Kasaoka 66481, 6.4 m anemometer, the survey hours of 2026-07-21/22/23; 3.3-4.0 m/s, from S-SSW) and fetch 130 m (the harbour world's basin upwind of the surveyed path; 89-165 m). Bounds = the wind range; wind and fetch together 0.023-0.037 m; unstable law 0.034 m. Replaces the 2026-11-10 inverse estimate fitted to SEEN / HELD-OUT attitude (owner's ruling, 2026-11-15)"
+    metric: "none: no field wave measurement exists at the site; the boat's July attitude is report-only"
+    uncertainty: "6.4 m wind used as U10 (the 10 m wind is a few per cent higher; Hs ~ U^1.23); stratification assumed stable; local wind sea only (waves through the entrance and wakes are the events groups)"
+    confounders: []
+    experiment: "a wave staff or a pressure gauge in the harbour with a co-located anemometer"
+    owner: sea/fetch.py
+    source: {yaml: {file: config/sea_states.yaml, key: waves.harbour_chop.hs_m}}
+  - name: sea.waves.harbour_chop.tp_s
+    unit: s
+    class: environment
+    status: derived
+    default: 0.59
+    bounds: [0.56, 0.62]
+    tunable: false
+    meaning: "Peak period of the site level harbour_chop (from its own growth law, not the Tp = 3.6 sqrt(Hs) rule of the other levels)"
+    identified_by: "Kahma & Calkoen 1992 eq. 3 (stable) at the same U10 and fetch as sea.waves.harbour_chop.hs_m; bounds = the wind range; wind and fetch together 0.51-0.65 s; unstable law 0.60 s"
+    metric: "none (as hs_m)"
+    uncertainty: "as hs_m"
+    confounders: []
+    experiment: "as hs_m"
+    owner: sea/fetch.py
+    source: {yaml: {file: config/sea_states.yaml, key: waves.harbour_chop.tp_s}}
+  - name: sea.situations.field_matched.wind.speed_mps
+    unit: m/s
+    class: environment
+    status: estimated
+    default: 4.476
+    bounds: [4.37, 4.58]
+    tunable: false
+    meaning: "Mean wind at the windage, from 30 deg (JMA 2026-09-07 NNE-NE), of the FIT sea of 2026-09-07 (config/sea_situations/field_matched.yaml)"
+    identified_by: "Batch 1a (session 03, 2026-11-16), FIT expanding squares: the U at which the crab-angle signature (4.58) and the extra-thrust signature (4.37) are each matched, geometric mean (03_sea_state/tools/mean_joint.py; a deviation from the yaw-moment-only fit, which left U unidentified at 1.17 +- 1.53 with an asymmetry outside R-10). Bounds = the two signatures"
+    metric: "crab angle and extra thrust on the FIT straight legs; JMA 2.8-3.3 m/s (Yahata, inland) .. 6.1-6.5 m/s (Kitakyushu airport, coastal) at 10 m"
+    uncertainty: "a current would act on crab and thrust alike (none measured); c_n sign chosen by the smaller residual"
+    confounders: [sea.situations.field_matched.yaw_moment.std_nm]
+    experiment: "an anemometer on the boat or the beach during a run"
+    owner: tools/mean_joint.py (session 03 evidence); sea/wind.py
+    source: {yaml: {file: config/sea_situations/field_matched.yaml, key: keyframes.0.wind.speed_mps}}
+  - name: sea.situations.field_matched.waves.hs_m
+    unit: m
+    class: environment
+    status: estimated
+    default: 0.0679
+    bounds: [0.061, 0.080]
+    tunable: false
+    meaning: "Significant wave height (short-crested, from 30 deg, Tp = 3.6 sqrt(Hs)) of the FIT sea of 2026-09-07"
+    identified_by: "Batch 1a waves-only runs at Hs 0.055 / 0.073 / 0.095 m: the simulated roll RMS (wave band, 10 s high-pass) interpolated to the field's 2.05 deg (FIT, live samples); bounds = the FIT runs' own roll spread (1.68 .. 2.57 deg)"
+    metric: "roll RMS in the wave band, 3 Hz poslog instants"
+    uncertainty: "the roll model's own error (pitch on the weaves is 37-50 % low at this Hs, session 03 Batch 2)"
+    confounders: [sea.hull.damping_ratio.roll]
+    experiment: "a wave staff or pressure gauge at the beach"
+    owner: tools/mean_fit.py (session 03 evidence)
+    source: {yaml: {file: config/sea_situations/field_matched.yaml, key: keyframes.0.waves.hs_m}}
+  - name: sea.situations.field_matched.yaw_moment.std_nm
+    unit: N.m
+    class: environment
+    status: estimated
+    default: 0.9914
+    bounds: [0.88, 1.07]
+    tunable: false
+    meaning: "Std of the isotropic Gauss-Markov yaw moment (the 'wave-group yaw' form) of the FIT sea of 2026-09-07"
+    identified_by: "Batch 1b grid (session 03): isotropic form chosen by the pre-written rule as the closer form after a MISS (no single sea within +-25 % for every controller: PID +47 %, LoS -11 %, MPC -30 % yaw-rate RMS); quadratic surrogate on 12 cells, bootstrap 95 % [0.88, 1.07], correlation with tau -0.51. Closed for this round (owner, 2026-11-16): a closed-loop LIMITATION, session 04c"
+    metric: "straight-leg yaw-rate RMS, reversals, heading std (A-05 mask, A-07 cut); sine-weave residual yaw"
+    uncertainty: "the controllers' spread is not the sea's (04c: field yaw gain per newton 1.0 / 1.45 / 1.25 for PID / LoS / MPC)"
+    confounders: [sea.situations.field_matched.yaw_moment.tau_s]
+    experiment: "more FIT field runs per controller; an open-loop differential-thrust test at survey speed"
+    owner: tools/grid_fit.py (session 03 evidence); sea/yaw_moment.py
+    source: {yaml: {file: config/sea_situations/field_matched.yaml, key: keyframes.0.yaw_moment.std_nm}}
+  - name: sea.situations.field_matched.yaw_moment.tau_s
+    unit: s
+    class: environment
+    status: estimated
+    default: 0.434
+    bounds: [0.37, 0.50]
+    tunable: false
+    meaning: "Time constant of the isotropic yaw moment of the FIT sea of 2026-09-07 (just below the grid's 0.5 s)"
+    identified_by: "as sea.situations.field_matched.yaw_moment.std_nm (bootstrap 95 %)"
+    metric: "as std_nm"
+    uncertainty: "extrapolated 13 % below the grid's lowest cell"
+    confounders: [sea.situations.field_matched.yaw_moment.std_nm]
+    experiment: "as std_nm"
+    owner: tools/grid_fit.py (session 03 evidence); sea/yaw_moment.py
+    source: {yaml: {file: config/sea_situations/field_matched.yaml, key: keyframes.0.yaw_moment.tau_s}}
+  - name: sea.hull.damping_ratio.pitch
+    unit: "1"
+    class: vehicle_control
+    status: judged
+    default: 0.2
+    bounds: [0.1, 0.4]
+    tunable: false
+    meaning: "Pitch damping ratio of the identified plant's hull (sized as heave's)"
+    identified_by: "between MSS otter_legacy.m (0.4) and otter.m (0.1 + a small potential term); corpus output-only pitch damping 0.10-0.20"
+    metric: "pitch free decay"
+    uncertainty: "regime as heave"
+    confounders: []
+    experiment: "pitch free decay"
+    owner: sea/motion.py (damping_from_ratios)
+    source: {yaml: {file: config/sea_states.yaml, key: hull.damping_ratio.pitch}}
+  - name: sea.hull.catamaran.separation
+    unit: m
+    class: vehicle_control
+    status: derived
+    default: 0.666
+    bounds: [0.583, 0.726]
+    tunable: false
+    meaning: "Centre-to-centre spacing of the two waterplanes (body boxes) of the CAD hull; sets roll stiffness (~ spacing^2)"
+    identified_by: "vendor CAD BLUEBOAT_HULL_SET_BR-101652 (2024-02-15): waterplane centroids at the 0.212 m floating draft (03_sea_state/tools/cad_waterplane.py); 0.583 m = keel to keel, 0.726 m = hull bounding-box centres; 0.76 m (the old box hull) had no source"
+    metric: "roll natural frequency (1.18 Hz on the plant as session 04b applied R-8: I + A 4.21 kg.m2, physical CoG; the July corpus's 1.15-1.30 is report-only)"
+    uncertainty: "mesh +-10 mm; the waterplane centroid moves 0.661-0.676 m between 16 and 20 kg"
+    confounders: [sea.hull.mass_kg]
+    experiment: "roll free decay"
+    owner: sea/hull.py (HullBoxes.blueboat_catamaran, fin)
+    source: {yaml: {file: config/sea_states.yaml, key: hull.catamaran.separation}}
+  - name: sea.hull.catamaran.fin.height
+    unit: m
+    class: vehicle_control
+    status: derived
+    default: 0.165
+    tunable: false
+    meaning: "Height of the keel-fin box under each body box: with the body's 0.047 m below the water it gives the CAD draft 0.212 m and the CAD centre of buoyancy"
+    identified_by: "vendor CAD (displacement, waterplane, centre of buoyancy matched, derive_r8.py)"
+    metric: "draft at trim; pressure depth 0.072 m"
+    uncertainty: "the draft is 0.210-0.228 m over 16-20 kg and 1000-1025 kg/m3"
+    confounders: [sea.hull.mass_kg]
+    experiment: "weigh the boat; mark the waterline"
+    owner: sea/hull.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.catamaran.fin.height}}
+  - name: sea.hull.windage.lateral_area_m2
+    unit: m2
+    class: environment
+    status: derived
+    default: 0.239
+    bounds: [0.211, 0.30]
+    tunable: false
+    meaning: "Lateral projected area above the waterline (wind side force and yaw moment)"
+    identified_by: "vendor CAD BR-101447 RevA projected above the 0.212 m waterline, antenna mast included (0.211 without it); 03_sea_state/r8/cad_windage.json"
+    metric: "mean crab angle and differential thrust against the wind (Stage 2)"
+    uncertainty: "the survey boat's payload, cables and sonar mounts are not in the CAD"
+    confounders: [sea.hull.windage.cy]
+    experiment: "none planned (R-10)"
+    owner: sea/wind.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.windage.lateral_area_m2}}
+  - name: sea.hull.windage.frontal_area_m2
+    unit: m2
+    class: environment
+    status: derived
+    default: 0.118
+    bounds: [0.115, 0.15]
+    tunable: false
+    meaning: "Frontal projected area above the waterline (wind drag in surge)"
+    identified_by: "vendor CAD BR-101447 RevA above the waterline (0.115 without the mast)"
+    metric: "mean speed deficit against the wind"
+    uncertainty: "payload not in the CAD"
+    confounders: [sea.hull.windage.cx]
+    experiment: "none planned (R-10)"
+    owner: sea/wind.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.windage.frontal_area_m2}}
+  - name: sea.hull.windage.cx
+    unit: "1"
+    class: environment
+    status: literature
+    default: 0.7
+    bounds: [0.5, 0.9]
+    tunable: false
+    meaning: "Surge wind coefficient, C_X = -c_x cos(gamma)"
+    identified_by: "Fossen 2021 section 10.1 (TTK4190 notes ch. 10): experiments 0.50-0.90 for symmetric craft"
+    metric: "mean speed deficit"
+    uncertainty: "ship data, 'to be used with care'"
+    confounders: [sea.hull.windage.frontal_area_m2]
+    experiment: "none"
+    owner: sea/wind.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.windage.cx}}
+  - name: sea.hull.windage.cy
+    unit: "1"
+    class: environment
+    status: literature
+    default: 0.8
+    bounds: [0.7, 0.95]
+    tunable: false
+    meaning: "Sway wind coefficient, C_Y = -c_y sin(gamma)"
+    identified_by: "Fossen 2021 section 10.1: 0.70-0.95"
+    metric: "mean crab angle"
+    uncertainty: "ship data"
+    confounders: [sea.hull.windage.lateral_area_m2]
+    experiment: "none"
+    owner: sea/wind.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.windage.cy}}
+  - name: sea.hull.windage.cn
+    unit: "1"
+    class: environment
+    status: literature
+    default: 0.1
+    bounds: [-0.2, 0.2]
+    tunable: false
+    meaning: "Yaw wind coefficient, C_N = c_n sin(2 gamma); its SIGN (bow into or away from a forward wind) is not documented for the BlueBoat"
+    identified_by: "Fossen 2021 section 10.1: magnitude 0.05-0.20; sign bracketed (the CAD lateral-area centroid sits 2.5 cm aft of mid-length)"
+    metric: "mean differential thrust against the heading relative to the wind (Stage 2)"
+    uncertainty: "magnitude and sign"
+    confounders: [sea.hull.windage.lateral_area_m2]
+    experiment: "none"
+    owner: sea/wind.py
+    source: {yaml: {file: config/sea_states.yaml, key: hull.windage.cn}}
 
   # ------------------------------------------------------------- acquisition
   - name: acquisition.range_length_mm
