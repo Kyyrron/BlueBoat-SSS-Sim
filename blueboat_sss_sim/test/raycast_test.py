@@ -735,7 +735,8 @@ def correction_layer_checks() -> None:
               "'off:altitude', counted",
               np.array_equal(pa.power, p0.power) and np.array_equal(pa.texture, p0.texture)
               and pa.correction_status == corr.OFF_ALTITUDE
-              and corr._CACHE[fa].counts.get(corr.OFF_ALTITUDE, 0) >= 1,
+              and corr.for_config(RaycastConfig.from_dict({**base, **on(fa)}).correction)
+              .counts.get(corr.OFF_ALTITUDE, 0) >= 1,
               f"status {getattr(pa, 'correction_status', None)}, altitude {pa.altitude_m:.2f} m")
         other = {"label": "1200", "num_results": 1200, "range_mm": [18000, 52000], "pulse_us": [44.3, 86.5]}
         mine = {"label": "this", "num_results": int(acq.num_results),

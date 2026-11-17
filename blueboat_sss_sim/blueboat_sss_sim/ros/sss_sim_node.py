@@ -132,6 +132,7 @@ of the real interface never see them unless they subscribe.
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import hashlib
 import importlib.util
@@ -311,21 +312,31 @@ class SideScanSonarSimNode(Node):
         self._predict = bool(self.get_parameter("predict_pose").value)
         self._hr = HighRatePose()
         self._pose_source = "odom"
+        # CR-03-5 (2026-11-16, session 02b): rclpy's executor runs the ping
+        # timer before subscriptions and takes one message per subscription per
+        # wake, while /clock (depth 1) is always current; after any stall (a
+        # render, CPU load) the pose cache trailed the clock by up to 100 ms
+        # (0.4-0.7 % of pings). Each tick therefore first takes the pose
+        # messages already delivered (_drain_pose_queues), and a ping uses the
+        # newest sample at or before its own stamp (_ping_pose, histories).
+        self._pose_subs: list = []
+        self._hr_hist: collections.deque = collections.deque(maxlen=64)   # 0.64 s of 100 Hz states
+        self._true_hist: collections.deque = collections.deque(maxlen=16)  # 0.8 s of odom_gz
         if str(self.get_parameter("pose_topic").value):
-            self.create_subscription(TransformStamped,
-                                     str(self.get_parameter("pose_topic").value),
-                                     self._on_boat_pose, 50)
-        self.create_subscription(
+            self._pose_subs.append(self.create_subscription(
+                TransformStamped, str(self.get_parameter("pose_topic").value),
+                self._on_boat_pose, 50))
+        self._pose_subs.append(self.create_subscription(
             Odometry, self.get_parameter("odom_topic").value,
-            self._on_odom, 10)
+            self._on_odom, 10))
         # R-7 (2026-11-15): Gazebo's own odometry, preferred over the
         # field-rate /blueboat/odom while it is fresh.
         self._true_pose: Optional[Pose3D] = None
         self._true_pose_t = -1e9
         self._true_twist = (np.zeros(3), np.zeros(3))
         if str(self.get_parameter("true_odom_topic").value):
-            self.create_subscription(Odometry, str(self.get_parameter("true_odom_topic").value),
-                                     self._on_true_odom, 10)
+            self._pose_subs.append(self.create_subscription(
+                Odometry, str(self.get_parameter("true_odom_topic").value), self._on_true_odom, 10))
         # CR-03-1 (2026-11-15): the sea's Hs for a profile whose sea surface
         # follows the sea state (acted on only when the profile says so).
         self._sea_hs_m: Optional[float] = None
@@ -393,6 +404,7 @@ class SideScanSonarSimNode(Node):
         self._true_twist = (np.array([lin.x, lin.y, lin.z]), np.array([ang.x, ang.y, ang.z]))
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._true_pose_t = stamp if stamp > 0.0 else self._now()
+        self._true_hist.append((self._true_pose_t, self._true_pose, self._true_twist))
 
     def _on_sea_state(self, msg: String) -> None:
         try:
@@ -708,12 +720,35 @@ class SideScanSonarSimNode(Node):
         st = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self._hr.update(st if st > 0.0 else self._now(),
                         Pose3D(tr.x, tr.y, tr.z, roll, pitch, yaw))
+        st_hr = self._hr.state()
+        if st_hr is None:
+            self._hr_hist.clear()              # a gap: HighRatePose restarts, so does the history
+        elif not self._hr_hist or st_hr[3] > self._hr_hist[-1][3]:
+            self._hr_hist.append(st_hr)
+
+    def _drain_pose_queues(self, limit: int = 200) -> None:
+        """Run the pose callbacks on every message already delivered (CR-03-5),
+        taken exactly as rclpy's executor takes one (``_take_subscription``).
+        With empty queues -- the usual case -- nothing happens."""
+        for sub in self._pose_subs:
+            for _ in range(limit):
+                try:
+                    with sub.handle:
+                        info = sub.handle.take_message(sub.msg_type, sub.raw)
+                except Exception:  # noqa: BLE001 -- an invalid handle at teardown
+                    break
+                if info is None:
+                    break
+                sub.callback(info[0])
 
     def _ping_pose(self, t_now: float) -> Optional[tuple[Pose3D, float]]:
         """The vehicle pose at the ping time and the source's age [s]:
         the 100 Hz model pose when it is fresh, else the odometry; None
-        when neither exists (no ping that cycle)."""
+        when neither exists (no ping that cycle). A source newer than the
+        ping (CR-03-5) gives its newest sample at or before ``t_now``."""
         hr = self._hr.state()
+        if hr is not None and hr[3] > t_now:
+            hr = _at_or_before(getattr(self, "_hr_hist", ()), t_now, hr)
         if hr is not None and t_now - hr[3] < 0.1:
             pose, v_body, w_body, t_hr = hr
             age = t_now - t_hr
@@ -722,12 +757,16 @@ class SideScanSonarSimNode(Node):
                 return pose, age
             return predict_pose(pose, v_body, w_body, age), age
         tp = getattr(self, "_true_pose", None)          # R-7 (2026-11-15); absent on older callers
-        if tp is not None and t_now - getattr(self, "_true_pose_t", -1e9) < 1.0:
+        tp_t = getattr(self, "_true_pose_t", -1e9)
+        tw = getattr(self, "_true_twist", None)
+        if tp is not None and tp_t > t_now:
+            tp_t, tp, tw = _at_or_before(getattr(self, "_true_hist", ()), t_now, (tp_t, tp, tw))
+        if tp is not None and t_now - tp_t < 1.0:
             self._pose_source = "odom_gz"
-            age = t_now - self._true_pose_t
+            age = t_now - tp_t
             if not self._predict:
                 return tp, age
-            v_body, w_body = self._true_twist
+            v_body, w_body = tw
             return predict_pose(tp, v_body, w_body, age), age
         if self._pose is None:
             return None
@@ -744,6 +783,7 @@ class SideScanSonarSimNode(Node):
         now_time = self.get_clock().now()
         t_now = now_time.nanoseconds * 1e-9
         self._check_overrun(t_now)
+        self._drain_pose_queues()
         got = self._ping_pose(t_now)
         if got is None:
             return
@@ -1082,6 +1122,19 @@ class SideScanSonarSimNode(Node):
 
     def _int(self, name: str) -> int:
         return int(self.get_parameter(name).value)
+
+
+def _at_or_before(hist, t_now: float, newest):
+    """The newest entry of ``hist`` (oldest first; its time at index 3 for
+    HighRatePose states, index 0 for the odom_gz history) at or before
+    ``t_now``; ``newest`` itself when the history holds none (CR-03-5)."""
+    if not hist:
+        return newest
+    k = 3 if len(hist[-1]) == 4 else 0
+    for entry in reversed(hist):
+        if entry[k] <= t_now:
+            return entry
+    return newest
 
 
 def main(args=None) -> None:

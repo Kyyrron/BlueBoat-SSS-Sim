@@ -74,3 +74,15 @@ without the control stack bridge `/blueboat/odom` directly (`odom_raw:=false`; b
 (`simulation_context`: sim_config, plant, odometry profile, tuning-file and schedule SHA-256).
 Motion during a ping stays an explicit assumption: the ping is rendered at the pose
 propagated to its own time, one pose per ping.
+
+**The pose at the ping's own stamp (2026-11-16, session 02b, CR-03-5).** rclpy's executor runs
+the ping timer before subscriptions and takes one message per subscription per wake, while its
+`/clock` (depth 1) is always current: after any stall (a ray-cast render, a second Gazebo on the
+machine) the pose cache trailed the clock by up to 100 ms (session 03: 0.4-0.7 % of ray-cast
+pings; the gate's intermittent "fresh pose" failures since 2026-10-20, load-related). Each tick
+now first takes the pose messages already delivered (`_drain_pose_queues`, rclpy's own
+`take_message`), and a source newer than the ping gives its newest sample at or before the stamp
+(64 x 100 Hz / 16 x odom_gz history, `_at_or_before`). Single-threaded on purpose: a
+`MultiThreadedExecutor` let the poses run ahead of the clock and starved the ping timer (245 pings
+in 295 s). Fresh-pose pings are bit-identical (offline check, 20 000 queries). Evidence and
+before/after: `~/ros2_ws/sim_runs/sim_acceptance/02b_raycast_fix/handoff_02b.md` §4.

@@ -113,7 +113,29 @@ pairing the recording with a path anchored elsewhere — the message now
 names both places, but only a live pass says whether that is enough for
 the operator.
 
-### [P2] Gazebo gate: intermittent pose-delivery stalls fail "fresh pose" (2026-10-20)
+### [P2] Ray-cast `[M0]`: 4 orphan raised cells next to a v2 `debris` (2026-11-16, session 02b) — owner decision
+`raycast_test --quick` (first full run since the `[CL6]` crash was fixed): "every raised cell has
+a rough-object owner" fails on the synthetic all-classes scene with 4 / 7359 orphans, 1-4 cm high,
+0.73-0.74 m from a flat `debris` whose owner window `scene_mesh._solid_pad` is 0.70 m: the v2
+debris stamp reaches past its pad. Same at `238a60e`, none at `2ce4481` (old catalogue): came with
+object set v2. Effect: those cells mesh as seabed, not debris. A fix (pad or builder) is an engine
+change (digest, mesh tags of every world with debris); not made. `02b_raycast_fix/tools/m0_probe.py`.
+
+### [x] Gazebo gate: intermittent "fresh pose" failures — cause found and fixed 2026-11-16 (session 02b)
+**Cause:** not DDS delivery. A probe in its own process held the ping-stamp pose for every
+stale ping (0 ms old) while `sss_sim_node` used one 70-100 ms old: rclpy's single-threaded
+executor runs the ping timer before subscriptions, takes one message per subscription per
+wake, and its `/clock` (depth 1) is always current, so after a stall (render, CPU load) the
+pose queue trailed the clock. Load-related: the gate alone passed, under a second Gazebo it
+failed at 0.17 %. **Fix** (`ros/sss_sim_node.py`): drain the delivered pose messages at each
+tick and take the sample at or before the ping's stamp (`.claude/sensor-pose.md`, last
+paragraph). After: 0.00 % over 60 ms, worst 10 ms, alone and under load; both gates 26 / 26.
+**Open follow-up:** `sea_state_node` subscribes to the same pose the same way (depth 50,
+timer-driven) and was not changed (session 02b's rules: no sea-model change); its gate check
+samples its pose age only at 2 Hz, so a backlog there would hardly show.
+History of the item, as written before the cause was known:
+
+#### (2026-10-20) Gazebo gate: intermittent pose-delivery stalls fail "fresh pose"
 On 2026-10-20 the gate's inputs had been lost (see `docs/sea_state_validation.md` §2, the
 2026-10-20 note) and were rebuilt. Two full campaigns then each failed **one** check, both
 times in *waves*: "a fresh pose under every ping".
