@@ -5,6 +5,13 @@ Open items only. Settled facts live in `CLAUDE.md`.
 Priority marks: **[P0]** blocks use of the package · **[P1]** correctness or
 cross-module risk · **[P2]** realism / project value.
 
+> **Frozen 2026-11-18** (`sim-freeze-v1.0-2026-11-18`, code digest `cc29e08780aac4cd`). No item here is worked
+> on in simulator v1.0: each is a candidate for a future version, opened only by owner decision. Results
+> follow `../SIM_VALIDITY_CONDITIONS.md` (superproject root); known defects and their sizes are in
+> `~/ros2_ws/sim_runs/sim_acceptance/10_evidence/SIM_FREEZE_CARD.md` §3. Cross-repository open items:
+> superproject `docs/OPEN_ITEMS.md`. Object classes named below may be among the 22 deleted in object set
+> version 2 (2026-11-15); "in progress" and "next" below describe the state before the freeze.
+
 ---
 
 ## Ray-cast harbour sensor — open after the completion round, session 01 (2026-11-14)

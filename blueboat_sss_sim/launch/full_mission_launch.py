@@ -27,7 +27,18 @@ trajectory_file   local-frame trajectory YAML for path_generation's
                   ``.deployed/<name>.yaml`` works as-is). The file is
                   watched: it may appear after launch.
 controller_type   controller for master_control        (default 'PID')
-note              free-text tag put into the run's position-log file name,
+path_source       ``mission`` (default) | ``replanner`` (R-3, owner order
+                  2026-11-18), forwarded to master_control exactly as
+                  ``Sim_launch.py`` does, in the launch's own values (after a
+                  tuning file, before ``control_params_file``).
+                  ``replanner`` = a replanner-owned run: master_control
+                  holds at the spawn pose until the first accepted
+                  ``/blueboat/update_path`` (Control
+                  ``docs/PATH_UPDATE_INTERFACE.md``); ``trajectory_file`` is
+                  still required and loaded by path_generation, but not
+                  followed. master_control refuses any other value (FATAL at
+                  its start). Launch files are outside the code digest.
+note             free-text tag put into the run's position-log file name,
                   ``{date}-{note}-poslog.csv`` -- exactly the argument
                   ``Sim_launch.py`` and the real-robot
                   ``BlueBoat_launch.py`` carry, forwarded to
@@ -254,6 +265,11 @@ _declare("world_dir", default_value="")
 _declare("with_control", default_value=False)
 _declare("trajectory_file", default_value="")
 _declare("controller_type", default_value="PID")
+# R-3 (2026-11-18, owner order): who owns the run's path, as Sim_launch.py.
+# master_control validates the value (mission | replanner).
+_declare("path_source", default_value="mission",
+         description="mission (default: follow trajectory_file) | replanner "
+                     "(hold at the spawn pose until /blueboat/update_path)")
 # Run-log identity, same names and meaning as Sim_launch.py / BlueBoat_launch.py
 # (simulation_interface names {date}-{note}-poslog.csv from 'note').
 _declare("note", default_value="sim")
@@ -681,6 +697,9 @@ def launch_setup():
         mc = with_tuning({"controller_type": sl.arg("controller_type"),
                           "simulation": True,
                           "data_dir": sl.arg("data_dir"),
+                          # R-3 (2026-11-18): in the launch's own values, so
+                          # it wins over a tuning file (as Sim_launch.py)
+                          "path_source": sl.arg("path_source"),
                           "time_source": "ros",
                           **simcfg["master_control"]})
         if cpf:

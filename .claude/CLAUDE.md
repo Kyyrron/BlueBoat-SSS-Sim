@@ -18,710 +18,124 @@ server; its `from_yaml` branch reads MCS deployed trajectories directly).
 "Package source root" = `BlueBoat-SSS-Sim/blueboat_sss_sim/`, one level
 below the git root.
 
----
-
-## 1. What this module is for
-
-The thesis tests *aspect-aware adaptive replanning* for SSS survey from a
-surface vehicle; its headline result is a model-conditional **simulated**
-comparison against a seriously tuned two-pass orthogonal survey (the Replanner is
-built but has not yet run in Gazebo; Evaluation is planned, not built; superproject
-`.claude/CLAUDE.md` §1), so
-output must be defensible as evidence, not merely plausible imagery. A
-built-world run cannot yet host a replanner-owned run (Control
-`docs/REQUESTS.md` R-3). **Worlds in, SSS data
-out:** World Builder = MCS anchored path + operator intent → georeferenced
-Gazebo world with ground truth; sonar node = world + vehicle odom →
-profiles, raw frames, ground-truth contacts. Pictures are the visualization
-app's job, missions MCS/Control's, training data BlueBoat-Perception's dataset
-mode's (the in-package YOLO recorder was deleted in the 2026-09 rework; the
-dataset mode labels the seabed images from this node's
-`/side_scan_sonar/ground_truth/*` topics).
-
----
-
-## 2. Architecture in one page
-
-**The sonar is not a Gazebo plugin.** Gazebo owns hull dynamics and pose; a
-ROS 2 Python node owns acoustics, rendering against the same generated scene
-→ the acoustic scene is static during a run (fine for seabed litter); the
-renderer is swappable without touching Gazebo. Module map and data flow:
-`docs/architecture.md`.
-
-**Sea state:** the ROS-free `sea/` package drives `ros/sea_state_node.py`
-(current + a wave wrench into Gazebo; since 2026-11-15 also wind on the windage, the
-ported yaw-moment stand-in and a kappa bracket, the CAD hull for the identified plant
-with damping sized on the plant read from the robot description, and the frozen
-`sea_states_legacy.yaml` for the legacy plant -- R-8, `docs/sea_state_model.md`
-§5.9-5.11); its model notes are in
-`blueboat_sss_sim/blueboat_sss_sim/sea/CLAUDE.md` (loaded when working there),
-the physics and DOIs in `docs/sea_state_model.md`.
-
-**Single source of truth:** one `SceneModel` emits both `world.sdf` and
-`scene.npz`, so they cannot diverge; never generate one without the other.
-
-**GPS anchoring:** world ENU = the source path's design frame **translated so
-world (0, 0) = the spawn origin** (the path's first waypoint if inside the
-limits, else the rectangle centre; `BuilderState.spawn_origin`). The boat
-always spawns at (0, 0) (hard-coded by `upload_rov_launch.py` / MCS
-`Sim_launch.py`), so it starts inside the area; `geo_anchor` = that point's
-GPS. A path whose waypoints sit far from its designer origin still yields a
-world the boat spawns inside — every conversion goes through lat/lon.
-`core/geo.py` = the project-wide equirectangular pair (byte-for-byte
-MCS/GCS). `sss_sim_launch.py` feeds the MAVROS shim the world's anchor.
-
-**Layering:** `core/`, `worldgen/`, `sonar/`, `analysis/` import no ROS and
-no Qt (standalone-testable); `ros/` is a thin ROS shell; `builder/` is the
-only Qt code and imports no ROS (`builder/state.py`, `builder/paths.py` are
-Qt-free so the smoke test drives the whole build headless). Keep it so — the
-offline smoke test depends on it. `builder/layout.py` = the Qt screen-size
-contract every page obeys.
-
-**Field calibration and multipath:** `blueboat_sss_sim/calibration/` (ROS-free;
-`sss_calibration`): parameter registry (smoke `[16]`), session manifests, seabed engine
-(`score | fit | scan`). A calibration never edits `default_sonar.yaml`. `sonar/waveguide.py`
-adds the shallow-water image comb; each term is **off / neutral by default** (bit-identical),
-and the pool values live only in the generated site overlay
-`config/pool_environment_pass4_sonar.yaml`, never a field profile. Tooling map, pass
-history and the NC #6 constant history: `blueboat_sss_sim/blueboat_sss_sim/calibration/CLAUDE.md`
-(loads when working there; read it before any calibration or level-constant work).
-
-**Extension seams:** `SonarRenderer` (ABC, `sonar/renderer.py`; everything
-downstream is renderer-agnostic); `DEPTH_PRESETS`
-(`worldgen/depth/presets.py`), `CATALOG` (`worldgen/objects.py`),
-`register(LayerSpec(...))` (`worldgen/depth/layers/`) — one registry entry
-adds a bathymetry pattern / object class / seabed layer to the GUI with zero
-GUI edits (§8); sonar profiles `config/*_sonar.yaml` — one file per idea,
-each the whole model, so a frozen copy renders with its frozen constants.
-
-**Crash safety:** a world builds into a hidden `.<name>.partial` sibling,
-**renamed into place** at the end — a `~/worlds` directory is a whole world
-or absent; a dead build's partial is swept by the next build. The wizard
-autosaves every page turn (`~/.cache/blueboat_sss_sim/builder_autosave.yaml`).
-
----
-
-## 3. Interface (the contract — this is where bugs come from)
-
-Node name `side_scan_sonar`, so private topics resolve under
-`/side_scan_sonar/`.
-
-### 3.1 `sss_sim_node` — the drop-in sonar
-
-| Topic | Type | Dir | QoS | Other side |
-|---|---|---|---|---|
-| `/side_scan_sonar/port/profile` | `blueboat_interfaces/OmniscanProfile` | pub | BEST_EFFORT, KEEP_LAST, 10 | `sss_processor_node` |
-| `/side_scan_sonar/starboard/profile` | 〃 | pub | 〃 | 〃 |
-| `/side_scan_sonar/port/raw` | `std_msgs/UInt8MultiArray` | pub | 〃 | `sss_processor_node` (rebuilds `.svlog`) |
-| `/side_scan_sonar/starboard/raw` | 〃 | pub | 〃 | 〃 |
-| `/side_scan_sonar/ground_truth/contacts` | `std_msgs/String` (JSON) | pub | default 10 | offline analysis; only on a cycle with contacts; **simulation-only, additive** |
-| `/side_scan_sonar/ground_truth/sensor` | `std_msgs/String` (JSON) | pub | default 10 | every ping cycle: the boat pose at the ping time and each transducer's rendered pose; **simulation-only, additive** (2026-10-08), read by `analysis/sea_validation.py`. Since 2026-11-11 also `run_id` and `range_scale` (true slant range → imaged range: 1500 / c under the ray-cast, 1.0 geometric), which Perception's labels apply |
-| `/side_scan_sonar/ground_truth/run_info` | `std_msgs/String` (JSON) | pub | RELIABLE, TRANSIENT_LOCAL, 1 | **run provenance** (2026-11-11, `blueboat_sss_sim_run/1`): renderer, profile path + sha256, world digest, seeds, acquisition, build stamp, whether the installed code is the source tree; at start-up, every enable, and stop (counters). The GCS stores it as `metadata.json["simulation"]`; also written to `run_info_dir` |
-| `/side_scan_sonar/ping/enable` | `std_msgs/Bool` | sub | default 10 | operator / launch one-shot |
-| `/sim/sea_state/boat_pose` | `geometry_msgs/TransformStamped` | sub | default 50 | `sea_state_launch.py` bridge (param `pose_topic`); the primary pose |
-| `/blueboat/odom` | `nav_msgs/Odometry` | sub | default 10 | Gazebo bridge (param `odom_topic`); the fallback pose (optional while `boat_pose` flows) |
-
-Pinging is **off at startup**, like hardware; run-dependent parameters are
-re-read on every enable.
-
-Parameters — names, semantics **and defaults** = the real `sss_node.py`
-since 2026-09-28; `[4b]` asserts each and reads the real driver's source to
-assert the cross-module equality, skipping visibly without it:
-
-| Parameter | Default (sim = real) |
-|---|---|
-| `range_start_mm` | 0 |
-| `range_length_mm` | 20000 |
-| `msec_per_ping` | **50** (SonarView's command, 2026-10-27; 0 = free run) |
-| `gain_index` | -1 (device auto; the simulator resolves it to its calibrated 4) |
-| `num_results` | 1200 (the device maximum, 16.7 mm bins at 20 m) |
-| `pulse_len_percent` | 0.00125 |
-
-= the device's **best range resolution**: pulse =
-`max(44.3 µs, pulse_len_percent × 2R/c)` (**MEASURED**, every corpus
-recording, 13 settings, within 1 µs — `AcquisitionParams.pulse_duration_s`),
-so 0.00125 stays on the 44.3 µs floor up to ~27 m. The renderer's range
-envelope follows the acquisition (`pulse/Ts + filter_duration_percent × N +
-1` bins), as does the along-range lag-1 texture correlation (`[2g]`).
-Seabed level is bin-count invariant (0.1 dB, 600 vs 1200), so the
-calibration carries over; **smoke gates still measure at the calibration
-acquisition** (`_cal_config()`: 600 bins, 0.002, gain 4 — the anchors').
-
-**Ping timing = SonarView's (2026-10-27, owner: acquire exactly like
-SonarView, identically sim and real).** Period = `max(msec_per_ping, 2R/c +
-3 ms, 1/max_ping_rate_hz)`. The corpus law `max(50 ms, 2R/c + 3 ms)` is
-SonarView's 50 ms **command** (every corpus file is SonarView's), not a device
-cap: the real driver free-running pinged every 29.0 ms (34.5 Hz) at 20 m. So
-`msec_per_ping` defaults to 50 in every profile, the node and
-`AcquisitionParams`, and `model.max_ping_rate_hz` to **0** (off) — the period is
-unchanged at every range, renders and fixtures with it, and `msec_per_ping: 0`
-now free-runs as the device does. Smoke `[4b]` asserts the law and the
-real-driver equality.
-
-Launches pass all six from the resolved profile (explicit `sonar_config:=` >
-a legacy bundle's frozen `sonar.yaml` > `config/default_sonar.yaml`), each
-overridable per run, so acquisition always traces to a named file. Profiles
-are each the default with **one idea** changed -- except
-`field_candidate_v1_sonar.yaml` (2026-10-30), a calibration artifact composed
-into a self-contained profile (provisional, never the comparison profile;
-regenerate, never hand-edit); `default_sonar.yaml` is the
-sim-vs-real comparison profile (`shallow_beach_sonar.yaml` lightens the
-field box's shadow past the device's), `ground_anchored_sonar.yaml`
-(2026-11-10) anchors the geometric speckle to the ground under yaw/sway (opt-in,
-`.claude/sensor-pose.md`), and `fault_injection_sonar.yaml` is a
-**test** profile, never calibration or comparison.
-
-`gain_index: -1` = the device's command-only sentinel; the sim resolves it
-to the calibrated index 4 and reports 4. Modelled ladder **0–7** (4–7
-measured on the corpus); any other index raises in `AcquisitionParams`.
-
-**Stale installs (2026-11-11).** The package installs by COPY: a session can run code older than
-the source tree (the 2026-11-11 harbour session did). The node now warns at start-up, naming the
-files, when the install differs from the source it was built from, and every run records its
-build (`~/ground_truth/run_info`). Before reading a live result:
-`python3 -m blueboat_sss_sim.core.provenance --check` (exit 1 = stale); rebuild with
-`cd ~/ros2_ws && rm -rf build/blueboat_sss_sim install/blueboat_sss_sim && colcon build
---packages-select blueboat_sss_sim` (a plain rebuild leaves deleted modules installed).
-
-Sim-only params: `true_odom_topic` (2026-11-15, R-7: `/blueboat/odom_gz`, the preferred
-fallback pose while fresh; `odom_topic` stays `/blueboat/odom`, the only pose of a bag replay),
-`run_context` (the launch's b64 JSON, recorded as `run_info.simulation_context`, C3),
-`scene_dir` (**required**; world folder or legacy bundle),
-`run_info_dir` (2026-11-11; where the run record is also written, "" = nowhere),
-`sonar_config`, `odom_topic`, `publish_ground_truth`, `seed` (0 = a fresh
-entropy seed that is logged and published as `noise_seed`; launch arg
-`sonar_seed`), `predict_pose` (default true), `pose_topic` (default
-`/sim/sea_state/boat_pose`), `base_link_rest_z_m` (2026-10-21, below),
-`renderer` / `raycast_backend` (2026-11-07, below), `hold_sim_while_rendering` /
-`gz_world_name` / `real_time_factor` (2026-11-09: the ray-cast pauses Gazebo while a ping cycle
-overruns, `core/sim_hold.py`; `full_mission_launch.py sonar_hold_sim:=`), `fouling` (2026-11-11:
-the ray-cast's fouled fraction of object and wall surfaces for this run, −1 = the profile's;
-launch arg `sonar_fouling`).
-
-**Ray-cast renderer (2026-11-07): moved to `.claude/raycast-live.md`.** Read it before
-selecting `renderer: raycast`, launching with `sonar_renderer:=` / `real_time_factor:=`, or
-touching `sonar/raycast`. In short: the run is slowed as a whole on `/clock`, and since
-2026-11-09 Gazebo is also paused while a slow ping renders (a quay costs 1–16 s a ping), so no
-ping is lost; MCS lists the generated live variants `config/raycast_live_sonar.yaml` (first-order
-multipath, bit-identical) and `raycast_fast_sonar.yaml` (also no diffraction, identical by eye)
-next to the full `raycast_default_sonar.yaml` (`sonar/raycast/config.write_variant_profiles`);
-`warp-lang==1.19.0` must import in the node's `/usr/bin/python3`; keep range ≤ 30 m on the 8 GB
-GPU; ground-truth contacts only with `raycast.labels.enabled` (the harbour profiles, since
-2026-11-11: `sonar/raycast/labels.py`, read off the renderer's own mesh and oracle); FBR lock
-measured offline on a recorded track with the processor's own tracker
-(`analysis/raycast_bottomline.py`), not yet in a live run.
-Those three carry the **provisional core** (anchored at bath3 only: +11 dB at the harbour) and
-no shadow floor. **Harbour profiles (2026-11-10):** `raycast_harbour_live_sonar.yaml` /
-`raycast_harbour_fast_sonar.yaml` add the harbour site calibration (v2 core, its empirical
-near-nadir table edge-held to 4.5 m, the NC #15 floor 18 dB under a smoothed per-ping ambient
-reference, the near range -- ringing, water column -- measured at 1200 bins / 44.3 µs; since
-2026-11-11 the table fades in over 0.8 m after the first echo, `correction.onset_fade_m`)
--- provisional, harbour worlds only, never the comparison profile; details and limits in
-`.claude/raycast-live.md`. **Since 2026-11-14 (completion round, session 01):**
-`raycast_harbour_fast` is the **production sensor** for harbour worlds (altitude 4.5–11.3 m,
-range ≤ 30 m, refused beyond), `raycast_harbour_live` the slow **reference** for convergence,
-the geometric renderer **legacy**; the generic `raycast_default / live / fast` warn when loaded
-on a scene with objects. The harbour profiles now carry a 2 cm sea surface, solid (elastic)
-shell walls, face waviness 0.5° / 0.10 m with a 1.5° draft, and two phase-convention fixes;
-`…_flash_narrow` / `…_flash_wide` / `…_shell_opaque` are the bracket ends for the sensitivity
-study and `raycast_harbour_{fast,live}_20261112_sonar.yaml` the frozen copies of the
-2026-11-12 state (regression only). Physics and inputs: `docs/sonar_model.md` section 15;
-what to know before an edit: the last entry of `.claude/raycast-live.md`. The whole-engine
-verification (V1–V9 of the acceptance criteria) runs on the GPU from
-`~/ros2_ws/sim_runs/sim_acceptance/01_sonar_physics/` (this machine only), not in the smoke
-gate; smoke `[19]` holds the closed forms and conventions it rests on.
-
-**Installation, vertical datum, pose path: moved to `.claude/sensor-pose.md`.** Read it
-before touching the pose path (`sss_sim_node` pose handling, `renderer._sensor_pose` /
-`_pitch_centre`, `sea.motion`), `sensor_depth_m` (0.22) / `mount_x_m` (−0.345) /
-`base_link_rest_z_m`, or comparing wave-run or Gazebo recordings across dates (several
-changes broke bit-for-bit comparability).
-
-Ground-truth JSON per ping cycle:
-`{"t_sim": float, "contacts": [{"side","object_id","type","slant_range_m","extent_bins","shadow_bins","visible","ping_number","ghost","via"}]}`
-— `ghost`/`via` mark a multipath image (`via: "wall:<name>"` / `"surface"`,
-`""` direct); consumers aggregate on `(object_id, via)`; both keys default
-to direct, so pre-wall streams parse unchanged. A wall's own face echo is a
-contact with `type: "wall"` and a **string** `object_id: "wall:<name>"`
-(objects keep integer ids); published only on cycles that have contacts.
-
-### 3.2 `mavros_shim_node` — on by default in the launches
-
-Subscribes `/blueboat/odom`; publishes `/mavros/global_position/compass_hdg`
-(`Float64`), `/mavros/imu/data` (`Imu`), `/mavros/local_position/pose`
-(`PoseStamped`), `/mavros/local_position/velocity_local` (`TwistStamped`,
-world frame — the `.svlog` vx/vy), `/mavros/global_position/global` (`NavSatFix`, BEST_EFFORT
-sensor-data QoS, ~5 Hz) from the ENU position about `sim_origin_lat` /
-`sim_origin_lon` — **filled by `sss_sim_launch.py` from the world's geo
-anchor** when empty; the legacy 43.6961 / 7.3080 default applies only to
-unanchored worlds, with a warning. The odom subscription is the node's
-entire drive train (f489a21 shipped without it: four topics, zero messages).
-
-### 3.3 World Builder — `world_builder` (GUI, PySide6)
-
-A six-screen wizard, in Create or Edit mode. **Its full description is in
-`blueboat_sss_sim/blueboat_sss_sim/builder/CLAUDE.md`**, which loads when
-working on files there. Two rules hold everywhere: **never rebuild the scene
-or open a modal from a slot that a canvas item event emitted** (the
-2026-09-16 use-after-free segfault that lost a world), and a saved world is
-immutable — every save, Edit re-saves included, takes a new `_i` folder
-(NC #10).
-
-### 3.4 CLI entry points
-
-Console scripts are listed in `setup.py`; each takes `--help`. The `.svlog`
-tools (`sss_svlog_compare`, `analysis.svlog_digest`, `analysis.object_signature`,
-`analysis.wall_contrast`, `sss_calibration_report`) — which answers which
-question, and their caveats — are in the superproject skill
-`.claude/skills/svlog/SKILL.md`. Run `sss_svlog_compare` on every model
-change; run `svlog_digest` first on any `.svlog`.
-
-### 3.4b Generated worlds (2026-11-15, completion round session 02)
-
-`worldgen_campaign --spec <yaml> --seeds 1,2,3 --out <root>` builds harbour worlds headless from a
-`blueboat_campaign/1` specification: a procedural basin, a seabed with sediment patches and relief (R2 presets
-fitted on the FIT recording), structures, and litter of the **object set version 2** (11 classes) drawn from
-the population model, all pinned, with a content digest that repeats. Every new world, hand-made included, gets
-its ground truth: `metadata.yaml` schema version 2 (additive, `format` unchanged) and
-`ground_truth_rasters.npz`.
-
-**The catalogue is the object set version 2 (since 2026-11-15, Stage 6, owner's order).** Eleven
-classes (`objects.V2_CLASSES`); the 22 others were deleted, and a world that names one does not
-load: `SceneModel.load`, the ray-cast mesher and the placement raise, naming the class and its
-replacement (`objects.REMOVED_CLASSES`). **The earlier construction of the seven classes that
-existed before is kept for an instance without `params.spec: 2`** — a build path, not a kept
-class: it keeps every world and every result made before bit-identical (the real harbour world,
-the beach-box worlds, session 01's evidence). **New worlds always carry `spec: 2`** (the campaign
-generator and every rebuild write it). Session 01's scripts that named deleted classes have
-patched copies in `~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/e1_patched/`; which command
-moved where: `02_world_builder/command_map.md`. Brackets: R5 (`raycast.objects.corner_floor_coherence`, profiles
-`…_corner_low` / `…_corner_high`) and R6 (`uncertain_materials`). **Read `.claude/worldgen-campaign.md` before
-touching `worldgen/campaign.py`, `population.py`, `domain.py`, `groundtruth.py`, the version 2 builders of
-`compounds.py` or `depth/layers/heterogeneity.py`** (opt-in `spec: 2`, pinned entries, random streams, the
-digest, `sand` as the only reference sediment).
-
-### 3.5 Launch files
-
-`full_mission_launch.py`, `sss_sim_launch.py`, `sim_world_launch.py`, `sea_state_launch.py`.
-Since 2026-11-15 `full_mission_launch.py` forwards Control's `sim_config` (`field_equivalent` |
-`legacy`) and its overrides exactly as `Sim_launch.py` (R-6), derives the odometry topics from it
-(R-7) and takes `spawn_yaw`, `with_sonar`, `thrust_gain`, `odom_base_delay`, `sea_kappa`,
-`sea_presets_file`; sea situations are `sea_schedule:=<share>/config/sea_situations/<name>.yaml`. Since 2026-11-16 a generated world
-starts **paused** (`hold_until_sea_armed:=true`) and the sea node unpauses it once the hull is armed: with the
-physical CoG Gazebo's box alone capsized the boat in the first seconds. `field_matched` / `field_matched_x2` (the
-2026-09-07 FIT sea) need the plant's asymmetry `thrust_gain:=[0.3805,0.6055]` beside them.
-What each does, the `ApplyLinkWrench` detection rule and the **optional ROS imports the
-offline smoke gate depends on**: `blueboat_sss_sim/launch/CLAUDE.md` (loads when working
-there; read it before editing any launch module).
-
----
-
-## 4. NON-NEGOTIABLE CONSTRAINTS
-
-Violating any of these breaks another module, the hardware swap, or the
-scientific argument.
-
-1. **Interface fidelity is absolute.** Topic names, message types, QoS
-   (BEST_EFFORT/KEEP_LAST/10), parameter names, ping-enable semantics = the
-   real `sss_node.py`. **Never define a new message type** — reuse
-   `blueboat_interfaces`; extra simulation data goes on new additive JSON
-   topics (as `ground_truth/contacts`).
-
-2. **`raw` frames must be byte-valid Ping Protocol, checksum included** —
-   downstream rebuilds `.svlog` files from them for SonarView. Layout:
-   `'B''R' | u16 payload_len | u16 msg_id=2198 | u8 src | u8 dst | 52-byte
-   fixed payload | u16[num_results] | u16 checksum(sum of all prior bytes)`;
-   frame length `8 + 52 + 2·num_results + 2` (1262 B at 600 bins).
-   `parse_frame()` is the round-trip oracle; keep it working.
-
-3. **Both sides must be published from the same timer tick** — the
-   simulator's own rule (downstream no longer forces it): the two channels'
-   ping counters stay in lockstep, every simulated row two-sided by
-   construction.
-
-4. **The first bottom return must survive every change to the acoustic
-   model.** Six coupled pieces make downstream bottom tracking lock; remove
-   any and the tracker fails silently: (1) the vertical beam weight at nadir
-   (at tilt 20°/FWHM 50° the Gaussian tail alone gives 0.00436 there, so the
-   FBR rides on it and `beam_sidelobe_floor` (0.004) is the guard when the
-   fan is rolled up >0.55°, the tilt reduced or the aperture narrowed; keep
-   w(nadir) ≥ ~0.004); (2) the specular near-nadir lobe
-   (`specular_strength`; 1.75 since 2026-10-30 = the FBR-crest fit raised to
-   the smallest value with no regression of `calibration.seabed.fbr_envelope`
-   -- sand and seagrass, 0.6-22 m, the corpus acquisitions; any acoustic
-   change must keep that envelope, which caught the first pass-2 candidate
-   losing the FBR at 7-21 m); (3) the specular component rendered and speckled
-   **separately** from the diffuse field, low CV (`specular_looks`); (4)
-   pulse-length range smearing (`pulse_smearing`); (5) (2026-09-18) that
-   component's **own range law** (`specular_spreading_exponent` 2.0: a
-   coherent reflection is an image source, spreading once over the folded
-   path, not twice like the diffuse field) — it makes the FBR follow the
-   device's measured altitude law instead of falling two to three times too
-   fast; set equal to `spreading_exponent`, the pre-2026-09-18 behaviour is
-   back exactly; (6) (2026-09-19) the coherent channel keeps the per-sample
-   **mean** normalisation under `image_formation: energy` (`_Acc.den_s`) —
-   an image source's aperture is a Fresnel zone, not a resolution cell;
-   area-weighting it puts the nadir `r/y` growth on the FBR (measured: the
-   reported peak **8.6 dB** off the corpus anchor). The smoke test
-   re-verifies FBR lock with every object family (open-frame lattice classes
-   included) in the scene; `[2c]` gates the altitude law itself.
-
-5. **Speckle statistics are load-bearing, not decoration.** Diffuse:
-   multiplicative `Exp(1)`; coherent specular: `Gamma(L, 1/L)`, low CV.
-   Since 2026-09-02 `Exp(1)` comes from the renderer's coherent
-   ground-scatterer field (`Ping.texture`, `coherent_scatterers: true`), so
-   it is also *correlated* along range (pulse) and track (footprint overlap)
-   as the corpus measures; `Ping.power` stays the noiseless mean,
-   `speckle: false` is untouched. Smoke `[2g]` gates mean, CV and both lag-1
-   correlations.
-
-6. **Power calibration is anchored to the field corpus, and moves once** —
-   through a pre-registered gate, on **both** anchors (`bath3` 1.40 m and
-   `reflectionEvidenceFullharbour` 7.33 m; a single-altitude fit cannot
-   separate level from slope). Current values: `calibration_db_offset`
-   **81.1 dB** (the **only** level constant, fit against the reported level,
-   never a count histogram), `tvg_compensation` **0.30**,
-   `specular_spreading_exponent` **2.0**, `specular_strength` **1.75**,
-   `receiver_ceiling_db` **67.9**, noise floor **3.39e-09**, water column
-   **4.68e-06**, `reverberation_db` **18**. Changing any of them silently
-   invalidates every comparison against real data. `docs/sonar_model.md` §6
-   records which constants are measured, jointly determined, undetermined —
-   keep it current whenever one moves. How they got here (2026-09-18,
-   2026-10-30, the failed bundle A in `field_candidate_v1_sonar.yaml`):
-   `blueboat_sss_sim/blueboat_sss_sim/calibration/CLAUDE.md`.
-
-7. **Never raise launch's global log level to suppress noise.** Filter by
-   message content on the screen handler instead.
-
-8. **Never modify the control stack or other packages.** Integrate by
-   serving identical interfaces, not by patching neighbours (MCS trajectory
-   discovery included: `builder/paths.py` reimplements the predicate rather
-   than importing `mcs.*`).
-
-9. **The renderer's ground-sample step must stay coupled to the slant-bin
-   size.** A fixed step leaves range bins unpopulated.
-
-10. **World folders are immutable snapshots** — never overwritten by Create
-    (name dedupe), Edit (re-saves take a new `_i` folder) or tooling
-    (`mission_metrics` etc. write only into `--out`). Regenerate rather than
-    edit; `builder_state.yaml` makes regeneration a load-away. Legacy mission
-    bundles keep loading (their frozen `sonar.yaml`/`trajectory.yaml` are the
-    resolver fallbacks) and are equally write-once.
-
-11. **Project-level (owner's decision, 2026-10-20; superproject CM-11):** the
-    headline detector is a YOLO model in BlueBoat-Perception, trained on
-    *simulated* datasets that Perception's dataset mode labels from this
-    module's ground truth, with its confidence calibrated on held-out
-    simulated worlds. Real water validates this simulator (boat motion and
-    sensor), runs the heading-response experiment and serves the final
-    demonstration; a labelled real dataset blocks nothing. The consequence
-    stays stated: a simulation-trained detector inherits its aspect
-    sensitivity from this module's model, so the model is what the real
-    heading-response experiment bounds, and the module's data are also for
-    the policy comparison and development.
-
-12. **Limits never reflect.** World-limit borders are Gazebo collision-only
-    geometry, in neither `scene.walls`, the rasters, nor the manifest. Only
-    authored walls are acoustic.
-
-13. **No return from land, and no objects on it.** Terrain at or above the
-    transducer (a dry beach, an awash bank) scatters nothing back into the
-    water (`renderer._ping_geometry`, `dz > 0` mask; the horizon cull hides
-    what lies beyond the waterline); random placement never lands above
-    `DRY_HEIGHT_M` (−0.05 m). A fully wet world is bit-identical either way.
-
-14. **Nothing ticked means nothing placed.** `objects.classes: {}` (no class
-    enabled in the builder) yields zero objects; only a config *without* the
-    key falls to the legacy random composition (2026-09-05 fix — an empty
-    selection used to scatter 29 objects).
-
-15. **A shadow is a measurement, not a hole** (2026-09-18; extended
-    2026-09-19: the floor is referenced to the **ambient** seabed level at
-    that range, not the culled bin's own would-be response, which collapses
-    to zero on a back-facing flank or over land, put the worst bin 40 dB
-    under the device's and drew a hard black band between a simulated object
-    and its shadow; `reverberation_reference: unoccluded` restores it).
-    Three corpus-anchored rules, each reversible by one constant: a culled
-    bin holds the **reverberation floor** (`reverberation_db` 18 below the
-    lit seabed at that range, with the seabed's own speckle — the quay
-    measures 17–25; `0` restores the white receiver floor that made every
-    shadow 30 dB too deep); a **transmitting** material attenuates its own
-    shadow rather than zeroing it (`pp_shell` 0.11, measured on the field
-    box's 9.6 dB shadow; every other material opaque, as every object was);
-    **ground truth is read off the rendered mask**, never from
-    `h·R/altitude`, so a label cannot contradict its picture. A detector
-    learns a shadow's statistics; a merely *empty* shadow teaches nothing the
-    real device will confirm.
-
-16. **A world can have dry land in it, and it is authored, not carved.** The
-    `land` layer lifts a drawn area over the waterline and carries the
-    seabed up to it, the outline **rounded** by an opening-closing disc
-    (`round_m`) so a handful of clicked vertices reads as a shoreline, not a
-    polygon. A dredged basin with a negative floor is the hard-edged
-    alternative and composites normally rather than being silently swallowed
-    by its "deepen" blend. NC #13 does the rest: dry cells return nothing,
-    the horizon cull hides what lies beyond.
-
-17. **Objects are rendered from material physics, never tuned per object**
-    (2026-09-28, the user's rule: "apply it to any kind of object/material
-    ... we don't have to tune this ever again"). Only **material** and
-    **geometry** decide how an object returns:
-    * **rough** materials (RMS height >= `COHERENT_ROUGHNESS_LIMIT_M`,
-      1.6 mm: concrete, rope, tyre tread, generic) and **aggregates** of many
-      members (lattice classes, rope, chain, anchor, debris, coils) stay on
-      the raster's Lambert path — the right law for a wavelength-rough
-      scatterer, bit-identical to before;
-      (fired brick, 1 mm, is on the smooth side: C = 6e-7 at normal
-      incidence, 0.5 at 77° off it — a facet object, smoke `[14]`);
-    * **smooth solid primitives** (`objects.is_facet_object`: a smooth
-      material on a box / cylinder / capsule / cone / annulus — any primitive
-      `solids.tessellate` knows — proud of the seabed) scatter in the **facet
-      layer** (`sonar/facets.py`): coherent Kirchhoff patches scaled by the
-      material's reflection coefficient and the Eckart coherent fraction,
-      plus the incoherent residual; glints, their aspect dependence (a wall
-      within ~1 deg of broadside), edges and layover EMERGE from the
-      geometry. In the raster they only occlude (`facet_bump`; the seabed
-      beneath dimmed by their two-way transmission, 0 when opaque);
-    * a material's acoustics are **physical constants with citations**
-      (`_ACOUSTIC` in `worldgen/materials.py`: density, sound speed,
-      backing, wall), plus MEASURED properties labelled as such (a shell's
-      transmission from a field shadow). The one constant tying an object's
-      cross-section to the calibrated seabed is literature
-      (`sand_lambert_mu_db`, J&R), never fitted to an object.
-
-    **Adding a class** = its `Solid` primitive (or aggregate mask) and, when
-    it is not one solid, its parts (`worldgen/compounds.py`); **adding
-    a material** = its physical constants, with a citation, never a
-    brightness. A brightness knob on an object or a class is a violation.
-    **Ray-cast, `raycast.objects.mode: solid` (2026-11-11, the harbour profiles): one surface rule
-    for objects, walls and seabed.** The sheet is the terrain (`depth.npz`); every object is meshed
-    at load from the manifest as its parts (`worldgen/compounds.py`: one primitive, or a drum's
-    hoops and chimes, a wire pot's rods and mesh, a car tyre's steel-belted tread band ...), each with its material
-    (`sonar/raycast/object_mesh.py`); a wall is built of its `material` (concrete | metal, chosen
-    in the World Builder). A material is its reflection |R| and RMS roughness: the surface mirrors
-    `R·√C` (Kirchhoff patches) and scatters `1 − C` diffusely (`scattering.DiffuseLaw`), C =
-    Eckart's coherent fraction; rough materials have C = 0. `raycast.objects.fouling` (0..1, per
-    run: node `fouling`) covers that fraction of every object and wall with sediment (seabed-like,
-    no mirror) — a sensitivity axis, not a calibration. Still no brightness knob: a class gains
-    realism by a better **geometry**, never by a level. `raster` stays the default elsewhere.
-    Not modelled: hollow bodies (pipe bore, drum), sheet-pile corrugation, absorption in a tyre's
-    rubber (its tread echo is an upper bound).
-    New object physics is proved first against textbook closed forms (plate,
-    cylinder, sphere — smoke `[14]`), then against the corpus at the field's
-    own geometry; `docs/sonar_model.md` §12 carries the derivation, the
-    evidence and the limits.
-
----
-
-## 5. Data: world folders, formats, what not to overwrite
-
-`~/worlds/<path_name>/<world_name>/`, built by
-`worldgen/world_folder.build_world_folder`. Every file and its format:
-`docs/configuration_guide.md` §3. What the code does not tell you:
-
-- `scene.npz` + `scene_manifest.yaml` are the **ground truth**.
-  `SceneModel.stale_rasters()` names the object rasters a world built before
-  the current model lacks — logged by every loader; the cure is a rebuild
-  (Edit), never a patch.
-- `metadata.yaml` is **the cross-module contract** (`blueboat_world_meta/1`:
-  anchor, spawn, limits, walls and every object in local + GPS). Downstream
-  reads it, **never** `builder_state.yaml` (GUI-internal, may churn).
-- `ground_truth_rasters.npz` (since 2026-11-15) holds `seabed_class`, `in_domain` and `survey_area` on the
-  world grid; `metadata.yaml` gained the additive fields of schema version 2 (per object: role, family, state,
-  `nominal_target`, `effectively_buried`, height over the seabed, face and axis directions; per world: depth
-  domain, seabed classes, content digest). `docs/configuration_guide.md` §3.1.
-- `depth.npz` is the **terrain-only** height raster (pre-object-stamp). The Gazebo
-  visuals (`world.sdf` objects and walls, `seabed.stl`) stand on it since 2026-11-02
-  (`write_world_sdf(terrain_height=...)`); before, they stood on the stamped raster, so
-  every object floated on its own top over a bump (visual only, the acoustic scene was
-  right). A world built earlier keeps that picture until re-saved (Edit -> new `_i`).
-- `scene_manifest.yaml` stays **version 1**: the `geo:` block is additive;
-  `SceneModel.load` rejects any other version.
-- RNG determinism: a config **with** a `depth:` section splits the seed into
-  two streams (`[seed, 0]` terrain, `[seed, 1]` objects), so editing the
-  bathymetry never moves the objects. A legacy config without `depth:` keeps
-  the single historical stream, bit-identical to every existing bundle.
-- Rasters are `(ny, nx)`, origin at the min corner; `export_scene_maps` flips
-  vertically for north-up images.
-
----
-
-## 6. Configuration
-
-World YAML schema: `docs/configuration_guide.md` §1; sonar config (every
-`acquisition:` / `model:` knob): `docs/configuration_guide.md` §2, the
-physics behind them `docs/sonar_model.md`; sea state:
-`docs/sea_state_model.md`. **Unknown keys raise by name** in the sonar
-sections, `terrain:`, `walls:`, `depth:` (presets, layers, masks, svlog,
-paint) and `orientation:`; `world:`, `objects:` (top level, classes,
-explicit entries), `materials:` and extra `geo:` keys ignore them —
-`configuration_guide.md` lists both.
-The traps:
-
-- `geo:` `theta_deg != 0` is rejected (the world frame is the anchor's ENU
-  frame by definition).
-- With `depth:`, `terrain:` contributes only texture; without it, legacy
-  behaviour is bit-identical.
-- **An `objects.explicit` entry pins only what it states**: every other field
-  is drawn from the shared RNG stream, so an entry of just `type,x,y` moves
-  when anything before it changes. Screen 5 therefore writes all of
-  `worldgen.objects.PINNED_FIELDS` + `material`, and
-  `roll_deg`/`pitch_deg`/`rest` **only** for an object that actually rested
-  (any tilt sends the instance down the 3-D solid path). `transmission` and
-  `roughness_m` follow a pinned `material` (since 2026-10-21); `object_id`
-  is positional and seeds rope/chain/debris/coil/lattice shapes, so deleting
-  or reordering a pinned object re-draws those shapes of later objects.
-- `BuilderState.objects.placed` (never in a world YAML) = Screen 4's random
-  field pinned into verbatim instances; while non-empty,
-  `state_to_world_config` emits `classes: {}` — keeping the classes would
-  place the field twice. `placed_signature` detects a later Screen-4 change.
-- Every material carries physical acoustic constants (`_ACOUSTIC` in
-  `worldgen/materials.py`), never a brightness (NC #17); `transmission` is 0
-  for all but `pp_shell`. `config/materials_literature.yaml` is an
-  **override**, not the default, so existing worlds do not move.
-- `DEFAULT_COMPOSITION` (the legacy random field of a world YAML without `objects.classes`) was
-  reduced on 2026-11-15 to `tire_car`, `concrete_block`, `chain`, `debris` (the classes of it that
-  survived Stage 6; the render fixture was re-baselined once for it). Otherwise it is not
-  reshuffled — new classes enter via
-  `objects.classes`, never by reshuffling legacy seeds.
-- `wall_multipath_enabled: true` by default is a strict no-op without walls.
-
----
-
-## 7. Commands
-
-All package-relative commands run from the package source root,
-`BlueBoat-SSS-Sim/blueboat_sss_sim/`. Offline tools are `python3 -m
-blueboat_sss_sim.<module>` (no ROS); ROS entry points need `colcon build
---packages-select blueboat_sss_sim` from `~/ros2_ws`. Pinging starts with
-`ros2 topic pub --once /side_scan_sonar/ping/enable std_msgs/msg/Bool 'data: true'`.
-The dev end-to-end (`full_mission_launch.py with_control:=true`) runs from
-the workspace root with `source env.sh` (venv + workspace) —
-`blueboat_control`'s nodes import casadi/acados at module scope regardless
-of `controller_type`.
-
-### Offline smoke test
+Simulated results follow `../SIM_VALIDITY_CONDITIONS.md` (superproject root).
+
+*On 2026-11-18 the old sections moved verbatim, numbers kept: §1, §2, §7, §8 → `.claude/development.md`;
+§3 (3.1–3.5) → `.claude/interface.md`; §4 (NC #1–#17) → `.claude/constraints.md`; §5, §6 → `.claude/data-config.md`.
+A citation such as "simCLAUDE.md §3.1" or "NC #15" finds its full text there.*
+
+**Detail loads by itself:** each `.claude/rules/*.md` is a path-scoped rule that imports one `.claude/` topic
+file when you read or edit a matching file; the tables below name the same files for reading by hand.
+
+## 0. Frozen (2026-11-18) — read first
+
+- **The code is frozen** at tag `sim-freeze-v1.0-2026-11-18` (the owner creates it), code digest
+  **`cc29e08780aac4cd`**, engine digest `ffacf236faa57010`. The digest covers every `*.py` under
+  `blueboat_sss_sim/blueboat_sss_sim/` and `blueboat_sss_sim/config/*.yaml` (`core/provenance.py`
+  `tree_files()`). **Change none of them**; a change is a new simulator version, by owner decision only.
+  `setup.py` also installs `blueboat_sss_sim/docs/*.md` and `docs/engineering/*.md`, so adding or removing a
+  file there changes the install (needs a rebuild); module notes go to the repository-root `docs/` instead.
+- **Before producing results:** `python3 -m blueboat_sss_sim.core.provenance --check` (exit 1 = stale
+  install) must give code digest `cc29e08780aac4cd`. Rebuild a stale install with
+  `cd ~/ros2_ws && rm -rf build/blueboat_sss_sim install/blueboat_sss_sim && colcon build --packages-select blueboat_sss_sim`.
+- **Record per run** what the conditions file lists: world content digest (`metadata.yaml`
+  `content_digest`), profile SHA-256, sea, controller, bracket ends (R1, R2, R5, R6), fouling, seeds. The
+  node publishes most of it on `/side_scan_sonar/ground_truth/run_info`.
+- **Envelope (conditions file §2):** production profile `raycast_harbour_fast_sonar.yaml`, 20 m range,
+  1200 bins, 44.3 µs, both sides; altitude **4.5–7.0 m**; ground range 5–20 m with 8–20 m reported apart;
+  campaign-generator worlds with sediment patches; seas `calm`, `harbour_chop`, `field_matched`
+  (`field_matched_x2` is not a rougher sea: a yaw arm for PID and LoS only, with `thrust_gain:=[0.3805,0.6055]`
+  for the FIT seas); MPC field gains for the headline, LoS as the disturbance arm, always
+  `sim_config:=field_equivalent`; dataset at the R6 low end; ≥ 3 seeds, disjoint dataset and evaluation
+  seeds. Never 600 bins or long pulses.
+- **Labels come from the rendered picture and the world metadata, never from a contact**:
+  `slant_range_m` is the across-track range (up to 6 bins off), `shadow_bins` is geometric (5 to 35 bins too
+  long). An offline GCS rebuild's waterfall can run 5.11 s behind ping time: align on the seabed images' `t_s`
+  or the ground truth's `t_sim`.
+- Known defects and their sizes: `~/ros2_ws/sim_runs/sim_acceptance/10_evidence/SIM_FREEZE_CARD.md` §3. The
+  backlog in `.claude/TODO.md` / `TODO2.md` is for a future version only; cross-repository open items:
+  superproject `docs/OPEN_ITEMS.md`. Dated history: `BlueBoat-SSS-Sim/docs/HISTORY.md`.
+
+## 1. Architecture in brief (full: `.claude/development.md` §2, `blueboat_sss_sim/docs/architecture.md`)
+
+- **The sonar is not a Gazebo plugin.** Gazebo owns hull dynamics and pose; a ROS 2 Python node renders
+  against the same generated scene. One `SceneModel` emits both `world.sdf` and `scene.npz`.
+- **Renderers:** the GPU ray-cast (`renderer: raycast`, run in a slowed simulation with Gazebo paused while a
+  ping renders; `warp-lang==1.19.0` in the node's `/usr/bin/python3`) with the harbour profiles
+  (`raycast_harbour_fast` = production, `raycast_harbour_live` = slow reference, `…_flash_narrow/_wide` and
+  `…_corner_low/_high` = bracket ends); the geometric renderer is **legacy**.
+- **Worlds:** `worldgen_campaign --spec <yaml> --seeds 1,2,3 --out <root>` builds harbour worlds headless
+  (object set version 2: 11 classes; a world naming one of the 22 deleted classes does not load). World
+  folders are immutable (NC #10); `metadata.yaml` is the cross-module contract.
+- **Sea state:** `sea/` drives `ros/sea_state_node.py` (current, waves, wind into Gazebo).
+- **Layering:** `core/`, `worldgen/`, `sonar/`, `analysis/` import no ROS and no Qt; `ros/` is a thin shell;
+  `builder/` is the only Qt code.
+
+## 2. Interface (full: `.claude/interface.md`)
+
+Node `side_scan_sonar`: `/side_scan_sonar/{port,starboard}/profile` (`blueboat_interfaces/OmniscanProfile`)
+and `…/raw` (`std_msgs/UInt8MultiArray`, byte-valid Ping Protocol), BEST_EFFORT / KEEP_LAST / 10; additive
+simulation-only JSON on `/side_scan_sonar/ground_truth/{contacts,sensor,run_info}`; `…/ping/enable`
+(`std_msgs/Bool`, pinging is **off at start-up**). Pose from `/sim/sea_state/boat_pose`, fallback
+`/blueboat/odom_gz` then `/blueboat/odom`. Parameter names and defaults equal the real `sss_node.py`
+(`range_length_mm` 20000, `num_results` 1200, `msec_per_ping` 50, `gain_index` −1, `pulse_len_percent`
+0.00125). `mavros_shim_node` publishes the MAVROS topics from odometry. Launch files: `full_mission_launch.py`,
+`sss_sim_launch.py`, `sim_world_launch.py`, `sea_state_launch.py` (`blueboat_sss_sim/launch/CLAUDE.md`).
+
+## 3. Non-negotiable constraints (full text, reasons and constants: `.claude/constraints.md`)
+
+1. Interface fidelity is absolute; never define a new message type (additive JSON topics only).
+2. `raw` frames are byte-valid Ping Protocol, checksum included (`parse_frame()` is the oracle).
+3. Both sides are published from the same timer tick.
+4. The first bottom return survives every acoustic change (six coupled pieces).
+5. Speckle statistics are load-bearing (diffuse `Exp(1)`, specular `Gamma(L, 1/L)`, correlated).
+6. Power calibration is anchored to the field corpus and moves once, on both anchors.
+7. Never raise launch's global log level to suppress noise.
+8. Never modify the control stack or other packages.
+9. The renderer's ground-sample step stays coupled to the slant-bin size.
+10. World folders are immutable snapshots.
+11. The headline detector is trained on simulated datasets labelled by Perception's dataset mode (CM-11).
+12. Limits never reflect. 13. No return from land, no objects on it. 14. Nothing ticked means nothing placed.
+15. A shadow is a measurement, not a hole. 16. Dry land is authored, not carved.
+17. Objects are rendered from material physics, never tuned per object.
+
+## 4. Data and configuration (full: `.claude/data-config.md`)
+
+`scene.npz` + `scene_manifest.yaml` are the ground truth; `metadata.yaml` (`blueboat_world_meta/1`, schema
+version 2) is what downstream reads, never `builder_state.yaml`; `ground_truth_rasters.npz` holds the
+seabed classes and domain. Unknown keys raise by name in the sonar sections. Schemas:
+`blueboat_sss_sim/docs/configuration_guide.md`.
+
+## 5. Commands
+
+From the package source root `BlueBoat-SSS-Sim/blueboat_sss_sim/`:
 
 ```bash
-python3 -m test.smoke_test        # from the package source root
+python3 -m blueboat_sss_sim.core.provenance --check     # identity of the installed simulator
+python3 -m test.smoke_test                              # offline gate, ~540 checks, ~260 s, system python
+ros2 topic pub --once /side_scan_sonar/ping/enable std_msgs/msg/Bool 'data: true'
 ```
 
-The only automated gate of the Stop hook (no lint, no type-check). ~540
-checks (sections to `[20]`: object set version 2, population, campaign), ~260 s, on the system python; the venv runs one visible `SKIP`
-fewer checks (the bridge checks and the `ApplyLinkWrench` detection need
-ROS; one more SKIP when the `BlueBoat-SSS` checkout beside it is missing). The venv
-interpreter is `~/ros2_ws/.venv/bin/python3` (`env.sh` activates it only
-when sourced from `~/ros2_ws`). Which checks were added when: `git log -p test/smoke_test.py`.
-The slow calibration checks are `python3 -m test.calibration_fit_test` (manual, ~2 min).
-`[12]` imports PySide6's QtGui, which needs `libEGL.so.1`: a container
-without it crashes there (`apt-get install libegl1`).
-Section `[10]` (sea state) is unit-level only. Boat motion is never simulated offline (the
-user's rule, 2026-10-08): the existing `simulate_3dof` stays the only
-offline loop. `grep -n 'print("\['
-test/smoke_test.py` lists the sections. Two rules the code does not
-explain: the **render fixture** `test/fixtures/render_baseline_v1.npz` is
-rebaselined only for a deliberate model change, by deleting the file, and only after
-the old model has re-rendered the old fixture bit for bit; it is
-compared to **float precision** (1e-12 of each array's scale) — the venv's
-numpy 2.4 and the system numpy 1.26 differ by a few ULP. It renders with the default
-profile's mount, so a geometry change in `config/default_sonar.yaml` is a model change
-(and checks with hard-coded geometry must be made mount-aware, never widened). `[2f]` reads the
-field corpus at `$BLUEBOAT_SSS_CORPUS` (default `~/ros2_ws/data/SSS_data`) and
-skips without it. Calibration gates: `[2c]`, `[2e]`, `[2f]`; object physics:
-`[14]`. Runs serialize on `/tmp/blueboat_sss_smoke.lock` — give a manual run
-a generous timeout. GUI checks, outside the gate:
-`QT_QPA_PLATFORM=offscreen python3 -m test.gui_smoke`.
+Running a script by path imports the **installed** package, not the source tree; prefix
+`PYTHONPATH=<package source root>` for source measurements. Gazebo gate: `.claude/gazebo-gate.md`. The Stop
+hook (`.claude/settings.json`, gitignored) runs the smoke test after an edit of a package `.py` or
+`config/*.yaml` file. Running a simulated survey from the command line: superproject skill `sim-run-recording`.
 
-### Gazebo gate — waves and current end to end
+## 6. Read before touching
 
-Real time, ~5–6 min per scenario, **not** in the Stop hook. Command, checks, where the validation inputs live and how they are
-rebuilt: `.claude/gazebo-gate.md` — read it before running or changing
-`test/gazebo_sea_test.py` or `analysis/sea_validation.py`.
+| Before … | Read |
+|---|---|
+| producing or interpreting any simulated result | `../SIM_VALIDITY_CONDITIONS.md`, the freeze card |
+| selecting the ray-cast, `sonar_renderer:=`, `real_time_factor:=`, or touching `sonar/raycast` | `.claude/raycast-live.md` |
+| the pose path, `sensor_depth_m`, `mount_x_m`, comparing wave or Gazebo recordings across dates | `.claude/sensor-pose.md` |
+| `worldgen/campaign.py`, `population.py`, `domain.py`, `groundtruth.py`, `compounds.py` v2 | `.claude/worldgen-campaign.md` |
+| a launch module | `blueboat_sss_sim/launch/CLAUDE.md` |
+| the World Builder | `blueboat_sss_sim/blueboat_sss_sim/builder/CLAUDE.md` |
+| calibration or a level constant | `blueboat_sss_sim/blueboat_sss_sim/calibration/CLAUDE.md` |
+| the sea state | `blueboat_sss_sim/blueboat_sss_sim/sea/CLAUDE.md`, `docs/sea_state_model.md` |
+| any `.svlog` tool | superproject skill `svlog` |
+| the physics of the model | `blueboat_sss_sim/docs/sonar_model.md`, `seabed_model.md` |
+| development rules (frames, sides, randomness, adding a class) | `.claude/development.md` §8 |
 
-### Session hooks
-
-`.claude/settings.json` (gitignored) runs `.claude/tools/smoke_gate.py`
-(stdlib only; its docstring is the spec): **PostToolUse** marks the session
-dirty on an in-scope edit and reminds to regenerate worlds after
-`config/`/`sonar/`/`worldgen/` edits; **Stop** runs the suite when an
-in-scope file changed and **exits 2 to block the stop** until it passes.
-The hook's `timeout` (450 s) must stay above the script's
-`SUITE_TIMEOUT_S` (420 s, raised from 300 s on 2026-10-20 when the suite
-reached ~205 s): a harness-cancelled Stop hook does not block, so
-a too-short timeout makes the gate pass silently.
-
----
-
-## 8. Working on this module
-
-- **Read `docs/` first** — `architecture.md`, `sonar_model.md` (physics,
-  assumptions A1–A13), `topics.md` (raw-frame byte map),
-  `integration_guide.md`, `configuration_guide.md`, `developer_guide.md`,
-  `roadmap.md`.
-- Frames: world ENU, z = 0 at the surface, depths negative; world (0, 0) is
-  the GPS anchor. Internal math uses ENU yaw; hardware- or user-facing
-  values use compass degrees. Angle conversions in `core/geometry.py`;
-  **geodesy only in `core/geo.py`** (never a second formula, never a
-  neighbour's copy).
-- Sides: `Side.PORT.sign = +1` (+y body), `STARBOARD = -1`; look direction =
-  vehicle heading ∓ 90°. On the wire `transducer_heading_deg` is the
-  **mounting angle**, constant −90 (port) / +90 (starboard), as the device
-  reports it (`sonar/encoder.py`, since 2026-09-15; older sim recordings
-  carry the absolute bearing); `vehicle_heading_deg` carries the compass
-  heading. `Side.channel` (0 port, 1 starboard) goes to byte 34 of the raw
-  frame, the authoritative side identity downstream.
-- Randomness: every stochastic component takes a `numpy.random.Generator`;
-  nothing touches the global RNG. World content derives entirely from the
-  seed (split streams under `depth:` — §5).
-- Wizard controls: tool rows are `builder.layout.ToolBar` (wrapping),
-  previews `ScaledImage`, side-by-side panels `split(...)`; never a bare
-  `QHBoxLayout` tool row, whose minimum width becomes the window's.
-- Adding a litter class / depth pattern / seabed layer: one registry entry
-  (`CATALOG`, `DEPTH_PRESETS`, `register(LayerSpec)`) —
-  `docs/developer_guide.md`. A class reproducing a *known* object gives its
-  dimensions as `params_schema` rows overriding the drawn sizes **after** the
-  draw, so the RNG stream is untouched. How it SOUNDS is never a class
-  setting (NC #17). Construction knobs the renderer reads (`wall_mm`,
-  `flooded`) go in `_CONSTRUCTION_PARAMS` so a pinned entry carries them.
-  A class that is not one solid gets a builder in `worldgen/compounds.py`
-  (parts inside the stored footprint, from the instance's own seeded
-  values); the ray-cast and the Gazebo visuals both read it.
-  Geomorphology + citation go into `docs/seabed_model.md`.
-- Cost budget of the **geometric** renderer (20 Hz at the default 50 ms `msec_per_ping`, 25 ms real-time
-  budget per ping; the ray-cast runs in a slowed simulation instead, §3.1): renderer ~6–7 ms
-  per ping-side; facet layer ~1.2 ms per smooth object in the beam per
-  ping-side; wall multipath ×1.0–1.5 (only with walls).
-- Walls a boat can cross are **pontoons**; a quay under the hull is a
-  modelling error, not a renderer bug. Objects meant to lie, lean or stand at
-  random get `orientation.rest`; the legacy flat stamp stays the default so
-  no existing world moves.
-- The corpus carries **GPS and attitude** in every file (id-150, 25 Hz);
-  three processor-written files freeze `time_boot_ms` (`read_svlog` →
-  `clock_frozen`, file-order pairing). `worldgen.depth` must not import
-  `analysis` at module level (`analysis/__init__` reaches `worldgen.scene`):
-  `depth/svlog.py` imports `analysis.bathymetry` inside the function.
-- "X looks wrong" on the sea state: reproduce offline first with
-  `sea.simulate_3dof`; a depth report with
-  `python3 -m blueboat_sss_sim.analysis.bathymetry <svlog> --lat0 --lon0`.
-- "The level / the shadows look wrong": reproduce against **both** NC #6
-  anchors (`beach_sept/bath3.svlog`, `reflectionEvidenceFullharbour.svlog`),
-  never one — 18 dB hot at 1.2 m *and* correct at 7 m is a slope, which a
-  single-altitude comparison reads as an offset. Compare the seabed's
-  absolute dB-vs-slant tail past 1.4 × altitude and the reported peak
-  against `66.60 − 11.28·log₁₀ alt` separately — different statistics,
-  fitted by different constants (`docs/sonar_model.md` §6).
-- `~/ros2_ws/sim_review_work/` (outside the repos) holds the 2026-09-18
-  review's measurement scripts — **provenance for `sim_review.md`, never a
-  gate**: frozen at the pre-2026-09-18 constants, so re-running them reports
-  large deltas that are *the fix*.
-- Running a script by path imports the **installed** package
-  (`~/ros2_ws/install/...`), not the source tree, so such measurements
-  silently describe the last `colcon build`. Prefix
-  `PYTHONPATH=<package source root>` (or pipe the code through
-  `python3 - <<'PY'` from that root).
-- Superproject rules hold here (root `CLAUDE.md` §2.1, §3): **never
-  `git commit` or `git push`** — the user stages and commits;
-  **`BlueBoat-Control` and `BlueBoat-MCS` are updated by additions only**
-  (owner, 2026-10-20; they were frozen at tag `v1.0`) — without an explicit
-  user order they are read-only neighbours, and a needed change becomes an
-  item in this module's `TODO.md`.
+Superproject rules hold here: **never `git commit`, `git push` or `git tag`**; `BlueBoat-Control` and
+`BlueBoat-MCS` are changed by additions only, and only on an explicit user order.

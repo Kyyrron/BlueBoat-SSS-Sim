@@ -53,3 +53,14 @@ on which Gazebo's buoyancy box alone capsizes the boat in the ~4 s before the se
 itself in every run until then). No physics change; the 20 s start cut of the motion statistics stays (A-07). Not with
 `use_stock_world` (Control's `world_launch.py` starts Gazebo running): that path still has the capsize. Never start a
 world paused without a sea node in the launch -- nothing would unpause it.
+
+**`path_source` (2026-11-18, session 13, owner order R-3; included in the freeze tag).** `full_mission_launch.py`
+declares `path_source` (default `mission`) and passes it to the `master_control` it starts, inside the launch's own
+parameter dict (after a tuning file, before `control_params_file`), exactly as Control's `Sim_launch.py`. With
+`replanner` a built world hosts a replanner-owned run: master_control holds at the spawn pose until the first
+accepted `/blueboat/update_path` (Control `docs/PATH_UPDATE_INTERFACE.md`); `trajectory_file` stays required and
+`path_generation` still loads it, but nothing follows it. There is no launch-side value check: master_control
+refuses anything but `mission | replanner` with a FATAL at its start. Launch files are outside the code digest
+(`core/provenance.py` `tree_files()`), so `cc29e08780aac4cd` is unchanged; the run context (`run_ctx`) is not
+changed, so a fixed-mission run's records are unchanged byte for byte. `tools/sim_record/record_run.py` records
+the value in `run.json`.

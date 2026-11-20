@@ -23,7 +23,7 @@ validation worlds and trajectory are data built with the World Builder
 and the Pattern Designer — how, and the results, in
 `docs/sea_state_validation.md`. They live outside every repository and were
 lost once (empty from 2026-10-12). They were rebuilt on 2026-10-20 by
-`~/ros2_ws/sim_runs/sea_validation/build_inputs.py` (deterministic, refuses
+`~/ros2_ws/sim_runs/sea_validation/build_inputs.py` ((2026-11-18) not on this machine any more: `~/ros2_ws/sim_runs/sea_validation/` was removed before session 11; the `_v2` worlds' builder is `~/ros2_ws/sim_runs/sim_acceptance/02_world_builder/worlds_src/build_sea_validation_v2.py`) (deterministic, refuses
 to overwrite). On 2026-10-20 the gate ran 24/25 (5 m) and 23/24 (1.5 m). The
 only failure each time was an intermittent "fresh pose" stall in *waves*,
 which passed when re-run (`TODO.md`).
