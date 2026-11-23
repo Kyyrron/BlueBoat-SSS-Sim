@@ -6,6 +6,13 @@
 > [`../SIM_VALIDITY_CONDITIONS.md`](../SIM_VALIDITY_CONDITIONS.md) (superproject root), and every result
 > sentence starts "In a calibrated simulation environment, …". Freeze card with digests and defect sizes:
 > `~/ros2_ws/sim_runs/sim_acceptance/10_evidence/SIM_FREEZE_CARD.md`. History: [docs/HISTORY.md](docs/HISTORY.md).
+>
+> **Simulator v1.1 (2026-11-21, owner order, session 14), world generation only, pending the owner's signature:**
+> the World Builder's Screen 5 gained a *Mission-like* mode, and the repository a second package,
+> [`blueboat_harbour_population`](blueboat_harbour_population/) (the evidence-based population model, outside the
+> code digest). Code digest v1.1 `bbd4112928645e13` (only `builder/` changed); engine, generator, profiles and sea
+> presets unchanged, and every v1.0 world rebuilds with the same content digest. Model and evidence:
+> [docs/population/](docs/population/).
 
 Two things, cleanly separated:
 
@@ -18,6 +25,9 @@ Two things, cleanly separated:
    simple distributions), preview, save. Worlds land in
    `~/worlds/<path_name>/<world_name>/` and are **immutable** — every
    save, edited or not, creates a new folder. Harbour campaign worlds are built headless by `worldgen_campaign`.
+   Screen 5 places objects by hand (*Manual*) or, since v1.1, *Mission-like*: by a harbour type, a density level
+   1–10 and a seed, from documented harbour statistics (`blueboat_harbour_population`); the same model builds
+   worlds headless from a specification with a `placement:` block.
 2. **Simulated SSS** — a physically motivated Omniscan 450 simulation
    publishing a **byte-identical drop-in replacement** of the real
    `sss_node.py` interface (profiles, raw Ping-Protocol frames,
@@ -37,6 +47,9 @@ python3 -m blueboat_sss_sim.core.provenance --check      # must give code digest
 
 # Harbour campaign worlds, headless (from the package source root blueboat_sss_sim/)
 ros2 run blueboat_sss_sim worldgen_campaign --spec config/campaign_example.yaml --seeds 1,2,3 --out ~/worlds/campaign
+
+# Mission-like worlds (v1.1): the population model drives the same generator (from blueboat_harbour_population/)
+python3 -m blueboat_harbour_population build --spec examples/mission_like_example.yaml --seeds 1,2,3 --out ~/worlds/ml
 
 # Build a world by hand (GUI; needs `pip install PySide6`)
 ros2 run blueboat_sss_sim world_builder
@@ -95,6 +108,8 @@ automatically.
 |---|---|
 | [docs/TUTORIAL.md](docs/TUTORIAL.md) | the step-by-step tutorial: path, world, Gazebo, recording, results, ray-cast |
 | [docs/HISTORY.md](docs/HISTORY.md) | dated decisions, the completion round, the freeze |
+| [docs/population/POPULATION_MODEL.md](docs/population/POPULATION_MODEL.md) | the mission-like placement: sources, kernels, levels, profiles, groups, seeds, splits, validation (v1.1) |
+| [docs/population/EVIDENCE.md](docs/population/EVIDENCE.md) | harbour seabed litter: densities, cases, spatial patterns, per class, references |
 | [docs/architecture.md](blueboat_sss_sim/docs/architecture.md) | design principles, layout, dataflow, decision records |
 | [docs/integration_guide.md](blueboat_sss_sim/docs/integration_guide.md) | install, launch composition, sim↔real swap, GPS contract |
 | [docs/configuration_guide.md](blueboat_sss_sim/docs/configuration_guide.md) | every YAML knob (world / depth / sonar) + world-folder formats |
@@ -123,6 +138,7 @@ of their status lines predate the freeze (the freeze card and the conditions fil
 | `sonar/` | calibrated acoustic renderer, noise, Ping-Protocol encoder, walls (quays/pontoons) + multipath; `sonar/raycast/` the ray-cast sensor (GPU) and its empirical correction layer |
 | `calibration/` | field calibration against the `.svlog` corpus (`sss_calibration`): registry, manifests, the seabed engine, artifacts |
 | `sea/` | ROS-free sea state: JONSWAP wave field, a seeded smooth Gauss-Markov current with weak eddies, hydrostatic wave force on the hull, wind, presets, plain-language options and timelines |
-| `builder/` | the world-builder GUI (the only PySide6 code; zero ROS) |
+| `builder/` | the world-builder GUI (the only PySide6 code; zero ROS); Screen 5's Mission-like mode (`pages/mission_panel.py`, `placement.py`) |
 | `analysis/` | ground-truth detection metrics, `.svlog` reader, sim-to-real calibration |
 | `ros/` | `sss_sim_node` (the drop-in sonar), `mavros_shim_node`, `sea_state_node` (current + waves into Gazebo) |
+| `../blueboat_harbour_population/` | a second package (v1.1): `populate(environment, params, seed) -> PlacementPlan`, its evidence file, the `build` / `batch` / `card` CLI, the simulator adapter |

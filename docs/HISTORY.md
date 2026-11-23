@@ -85,3 +85,23 @@ Evidence root: `~/ros2_ws/sim_runs/sim_acceptance/` (this machine only). The cri
   as `Sim_launch.py` does, so a built world can host a replanner-owned run. Launch files are outside the code
   digest (`cc29e08780aac4cd` unchanged) and the default is unchanged; the change is included in the freeze tag.
   No package file changed. `~/ros2_ws/sim_runs/replanner/handoff_13_R-3.md`.
+
+## Simulator v1.1: world generation (2026-11-21, session 14, owner order)
+
+- **Mission-like placement.** World Builder Screen 5 gained a mode switch, *Manual* (as before) or *Mission-like*:
+  a harbour type, the target classes, a density level 1–10 and a seed fill the world with targets, debris, small
+  litter and structures as documented harbours are filled. The model is a second package of this repository,
+  `blueboat_harbour_population` (outside the code digest, its own version 1.0.0 and digests written into every
+  world's builder state; its parameters can be recalibrated without a new simulator version). It also builds worlds
+  headless from a campaign specification with a `placement:` block (and an `environment:` block for a real depth
+  file), through the frozen generator used as a library.
+- **What changed in the package:** `builder/` only (`state.py`: a `placement` record written only when set;
+  `placement.py`, `pages/mission_panel.py` new; `pages/place_page.py`: the switch, Manual paths verbatim;
+  `worker.py`: the build passes the record to `metadata.yaml`, and two workers; `map/canvas.py`: an optional object
+  colour). Code digest v1.1 `bbd4112928645e13`; engine digest `ffacf236faa57010`, generator digest `4de0d3a4…`,
+  profiles and sea presets unchanged.
+- **Regression:** the 32 recorded worlds with a builder state rebuild identically from v1.0 (`1932b9a`) and v1.1
+  (content digest, `builder_state.yaml`, `world.sdf`, `seabed.stl`, `depth_baked.tif`); a fixed scene renders
+  bit-identical pings (geometric) and within the GPU's own run-to-run floor (ray-cast, 7.5e-15 against 7.7e-15).
+  Evidence: `~/ros2_ws/sim_runs/worldgen_v11/` (`HANDOFF_14.md`). Decision record for the owner:
+  `~/ros2_ws/sim_runs/sim_acceptance/sim_v1.1_worldgen_decision.md`; proposed tag `sim-v1.1-worldgen-2026-11-21`.

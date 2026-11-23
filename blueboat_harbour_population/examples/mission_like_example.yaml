@@ -1,0 +1,33 @@
+# Example specification of mission-like worlds (blueboat_campaign/1 + placement):
+#
+#   python3 -m blueboat_harbour_population build --spec examples/mission_like_example.yaml --seeds 1,2,3 --out <worlds root>
+#
+# Everything above `placement:` is the frozen campaign generator's own specification (the environment: a
+# procedural basin round an MCS trajectory). `placement:` is read by blueboat_harbour_population, which then
+# drives the frozen generator; the old `worldgen_campaign` command does not know the key.
+# One world per (case, seed) at <root>/<path name>/<name>-<case>-s<seed>/, its card under <root>/.population/.
+format: blueboat_campaign/1
+name: ml_example
+path: Shiraishijima_lawnmower          # an MCS Pattern Designer trajectory with a GPS anchor
+world: {margin_m: 25, resolution_m: 0.10}
+defaults:
+  depth_band_m: [5.2, 6.6]             # floor depth at the centre: altitude 4.5-7.0 m needs water 4.72-7.22 m
+  grade_max: 0.004
+  basin: {quays: 2, pontoon: true, mooring_blocks: 1}
+  sediment: {reference: sand, finer: soft_mud, coarser: gravel, heterogeneity: nominal}
+  clutter: nominal                     # cobbles; the small litter follows the placement's density level
+  face_geometry: new
+  uncertain_materials: low             # R6: the dataset is rendered at the low end
+run:
+  sonar_profile: raycast_harbour_fast
+  sea_state: calm
+  sim_config: field_equivalent
+placement:
+  mode: mission_like
+  profile: fishing_harbour
+  density_level: 5                     # 1..10; 5 = a typical documented harbour
+  split: development                   # seeds 1..99999; dataset, tuning and evaluation have their own ranges
+cases:                                 # the density level as an experiment factor
+  - {name: l2, placement: {density_level: 2}}
+  - {name: l5}
+  - {name: l8, placement: {density_level: 8}}

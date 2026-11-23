@@ -721,7 +721,11 @@ class BuilderMapView(QGraphicsView):
         in place, so a selection change re-pens two items instead of
         rebuilding the scene."""
         kind = str(o.get("kind", "manual"))
-        color = {"scatter": C_OBJ_SCATTER, "pinned": C_OBJ_PINNED}.get(
+        # An object may bring its own colour (Screen 5, Mission-like mode:
+        # one colour per class); without one, the colour says where the
+        # instance came from, as always.
+        color = o.get("color") or {"scatter": C_OBJ_SCATTER,
+                                    "pinned": C_OBJ_PINNED}.get(
             kind, C_OBJ_MANUAL)
         item.setPath(self._object_path(o))
         pen = _cosmetic_pen(theme.ACCENT if selected else color,

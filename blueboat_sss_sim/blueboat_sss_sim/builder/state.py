@@ -13,6 +13,7 @@ from is later renamed or deleted.
 
 from __future__ import annotations
 
+import copy
 import os
 
 import dataclasses
@@ -211,10 +212,16 @@ class BuilderState:
     depth: DepthState = field(default_factory=DepthState)
     objects: ObjectsState = field(default_factory=ObjectsState)
     world_name: str = ""
+    #: The record of a Mission-like placement (Screen 5, simulator v1.1,
+    #: 2026-11-21; ``builder/placement.py``): what was asked, the planner's
+    #: version and digests, the ``placement`` block of ``metadata.yaml``.
+    #: Empty for every Manual world, and an empty record is **not written**:
+    #: a Manual world's ``builder_state.yaml`` is what it always was.
+    placement: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------- I/O
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "format": STATE_FORMAT,
             "path": dataclasses.asdict(self.path),
             "limits_rect": dict(self.limits_rect) if self.limits_rect else None,
@@ -223,6 +230,9 @@ class BuilderState:
             "objects": dataclasses.asdict(self.objects),
             "world_name": self.world_name,
         }
+        if self.placement:
+            d["placement"] = copy.deepcopy(self.placement)
+        return d
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "BuilderState":
@@ -238,6 +248,7 @@ class BuilderState:
             depth=DepthState(**(d.get("depth") or {})),
             objects=ObjectsState(**(d.get("objects") or {})),
             world_name=str(d.get("world_name", "")),
+            placement=copy.deepcopy(dict(d.get("placement") or {})),
         )
 
     def save(self, path: str | Path) -> None:

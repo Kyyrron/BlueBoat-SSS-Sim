@@ -1,0 +1,36 @@
+# Split registry of generated worlds (mission-like placement).
+#
+# A world belongs to one split. Two things keep the splits apart:
+#   1. its placement seed lies in the split's seed range;
+#   2. its harbour (when the world is built on a real harbour's bathymetry) belongs to the split.
+# `populate` and the `build` command refuse a seed or a harbour of another split unless the caller overrides
+# the guard with a reason, which is then written into the world's metadata.
+#
+# Seed ranges: [DESIGN]. No range existed before 2026-11-21 (the validity conditions only say "disjoint").
+# Seeds 1..99999 stay free for development and for the worlds of session 02 (seeds 1, 2, 3).
+# Harbour split: [DESIGN], from the companion (section 7): dataset and evaluation worlds from different
+# harbours. The owner decides the final assignment before dataset recording starts; `unassigned` harbours can be
+# used with any split only through the override.
+format: blueboat_population_splits/1
+splits:
+  development: {seeds: [1, 99999], use: "development, examples, regression; never a thesis result"}
+  dataset: {seeds: [100000, 199999], use: "worlds the detector is trained and validated on"}
+  tuning: {seeds: [200000, 299999], use: "worlds the survey policies and thresholds are tuned on"}
+  evaluation: {seeds: [300000, 399999], use: "worlds of the evaluation campaign; never seen before it"}
+harbours:
+  # dataset
+  provincetown: dataset
+  boston: dataset
+  venice: dataset
+  # tuning
+  charleston: tuning
+  cherbourg: tuning
+  # evaluation
+  port_angeles: evaluation
+  plymouth: evaluation
+  boothbay: evaluation
+  # not assigned yet: the owner decides
+  port_gardner: unassigned
+  marseille: unassigned
+# Worlds with no real harbour behind them (campaign basins, hand-made worlds) carry no `harbour` and are guarded
+# by their seed alone.

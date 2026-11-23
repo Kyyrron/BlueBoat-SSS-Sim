@@ -17,6 +17,15 @@ instances first (one confirmation, then every object is editable
 individually). Pinning is faithful -- a pinned world rebuilds the same
 objects the scatter produced -- and it is what makes "move that drum two
 metres left" possible at all.
+
+**Mission-like mode (simulator v1.1, 2026-11-21).** A switch at the top of
+the map gives the choice: *Manual* (this page as it always was) or
+*Mission-like*, where the objects are planned by the package
+``blueboat_harbour_population`` from the environment of Screens 1-4, a
+harbour type, a density level and a seed (``mission_panel.py``; the
+bookkeeping in ``builder/placement.py``). The plan is drawn on the map and is
+not editable; *Convert to manual* turns it into ordinary pinned objects.
+Nothing of the Manual mode changes: its rows, its random stream, its commit.
 """
 
 from __future__ import annotations
@@ -28,23 +37,32 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QUndoStack
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMessageBox, QPushButton, QScrollArea,
-                               QSpinBox, QVBoxLayout, QWidget)
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMessageBox, QPushButton,
+                               QScrollArea, QSpinBox, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from ...core.types import PlacedObject
 from ...worldgen.materials import MaterialLibrary
 from ...worldgen.objects import (CATALOG, is_facet_object,
                                  make_explicit_instances, rest_poses,
                                  typical_instance)
+from .. import placement
 from ..forms import SchemaForm
-from ..layout import ToolBar, split
+from ..layout import ToolBar, WrapScroll, split
 from ..layers.commands import SnapshotCommand
 from ..map.canvas import BuilderMapView, Mode
 from ..state import BuilderState, ObjectsState, scatter_signature
-from ..worker import PlacementWorker, hover_text, is_dry
+from ..worker import (EnvironmentWorker, PlacementWorker, PlanWorker,
+                      hover_text, is_dry)
 from . import WizardPage
 from .objects_page import ClassInfoDialog, _DistRow, _OrientRow, _RestRow
+
+#: map indices of the planned objects (Mission-like mode): far above any
+#: row of the page, so that every row slot ignores them
+PLAN_BASE = 1_000_000
+#: pause between a change of a Mission-like control and the plan [ms]
+PLAN_DEBOUNCE_MS = 150
 
 
 class ObjectEditDialog(QDialog):
@@ -288,6 +306,14 @@ class PlacePage(WizardPage):
             "double-click to edit every value, Delete to remove it. "
             "Objects scattered by the previous screen are dimmer: moving "
             "one pins that random field so each object becomes editable.")
+    HINT_MISSION = (
+        "Mission-like: the world is filled as a real harbour of the chosen "
+        "type is: targets, debris, small litter and the structures it needs, "
+        "where such objects lie in documented harbours. Choose the harbour "
+        "type, the objects, the density and the seed on the left; the map "
+        "shows the plan, coloured by class, and the quays and pontoons "
+        "coloured by their use (double-click a wall to change it). Convert "
+        "to manual makes every object editable.")
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -349,7 +375,30 @@ class PlacePage(WizardPage):
         self._form_scroll.setWidgetResizable(True)
         left.addWidget(self._form_scroll, 1)
         left_w.setMinimumWidth(240)
-        body.addWidget(left_w)
+        # Mission-like mode: the left pane is a stack (the catalogue, or the
+        # Mission-like controls); the map on the right is shared.
+        self._mode = placement.MANUAL
+        self._hp, self._sa, self._why = placement.import_planner()
+        self._panel = None
+        self._left = QStackedWidget()
+        self._left.addWidget(left_w)
+        if self._hp is not None:
+            from .mission_panel import MissionPanel
+            self._panel = MissionPanel(self._hp)
+            scroll = WrapScroll(self._panel)
+            # the wizard's dark window shows through (a scroll area's
+            # viewport otherwise takes the desktop's palette)
+            scroll.viewport().setAutoFillBackground(False)
+            self._panel.setAutoFillBackground(False)     # setWidget() turned it on
+            self._left.addWidget(scroll)
+            self._panel.changed.connect(self._schedule_plan)
+            self._panel.convert_requested.connect(self._convert_to_manual)
+            self._panel.replan_requested.connect(self._replan)
+            self._panel.heat_toggled.connect(lambda *_: self._schedule_plan())
+            self._panel.profile.currentIndexChanged.connect(
+                lambda *_: self._sync_feature_rows(force=True))
+        self._init_mission_state()
+        body.addWidget(self._left)
         body.setStretchFactor(0, 0)
 
         # --- right: tools + the map ---------------------------------------
@@ -359,6 +408,29 @@ class PlacePage(WizardPage):
         body.addWidget(right_w)
         body.setStretchFactor(1, 3)
         bar = ToolBar()
+        self._b_manual = QPushButton("Manual")
+        self._b_mission = QPushButton("Mission-like")
+        for b, tip in ((self._b_manual, "Place objects by hand, class by class "
+                                        "(as always)."),
+                       (self._b_mission, "Fill the world as a real harbour of a "
+                                         "chosen type is filled: targets, debris, "
+                                         "small litter and structures, by a "
+                                         "density level and a seed.")):
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            bar.add(b)
+        self._b_manual.setChecked(True)
+        self._b_manual.clicked.connect(
+            lambda *_: self._switch_mode(placement.MANUAL))
+        self._b_mission.clicked.connect(
+            lambda *_: self._switch_mode(placement.MISSION))
+        if self._hp is None:
+            self._b_mission.setEnabled(False)
+            self._b_mission.setToolTip(
+                "The package blueboat_harbour_population cannot be imported "
+                f"({self._why}): build the workspace (colcon build) to use "
+                "this mode.")
+        bar.separator()
         self._b_place = QPushButton("Place")
         self._b_select = QPushButton("Select")
         for b, tip in ((self._b_place, "Left-click the map to drop the armed "
@@ -402,6 +474,7 @@ class PlacePage(WizardPage):
         self.map.object_drag_finished.connect(self._on_drag_finished)
         self.map.object_double_clicked.connect(self._edit)
         self.map.mode_changed.connect(self._on_map_mode)
+        self.map.wall_double_clicked.connect(self._on_wall_double_clicked)
         self.map.status.connect(lambda m: self._status.setText(m))
         self.map.hover.connect(self._on_hover)
         self.map.hover_left.connect(lambda: self._hover.setText(""))
@@ -458,6 +531,8 @@ class PlacePage(WizardPage):
 
     # ------------------------------------------------------------- tools
     def _set_mode(self, mode: Mode) -> None:
+        if mode is Mode.OBJECT and self._mode == placement.MISSION:
+            mode = Mode.SELECT                  # nothing is placed by hand here
         if mode is Mode.OBJECT and not self._armed:
             self._on_map_mode(self.map.mode)     # the button follows the map
             return
@@ -528,6 +603,8 @@ class PlacePage(WizardPage):
 
     # ------------------------------------------------------------- edits
     def _on_click(self, point) -> None:
+        if self._mode == placement.MISSION:
+            return
         if not self._armed or self._form is None:
             return
         before = self._snapshot()
@@ -680,11 +757,15 @@ class PlacePage(WizardPage):
                 "label": spec.display_label,
                 "dry": is_dry(self._preview, item["x"], item["y"]),
             }, i == self._selected))
+        items += self._plan_items()             # none in Manual mode
         self.map.set_objects(items)
         self._sync_buttons()
         self._summary_line()
 
     def _summary_line(self) -> None:
+        if self._mode == placement.MISSION:
+            self._mission_summary()
+            return
         kinds = {"scatter": 0, "pinned": 0, "manual": 0}
         dry = 0
         for r in self._rows:
@@ -733,10 +814,16 @@ class PlacePage(WizardPage):
     def _after_worker(self) -> None:
         if self._pending:
             self._run_preview()
+        elif self._env_after_preview:
+            self._env_after_preview = False
+            self._start_environment()
 
     def _show(self, result: dict) -> None:
         if self.sender() is not None and self.sender() is not self._worker:
             return                          # a superseded worker's result
+        if self._mode == placement.MISSION:
+            self._preview_result = result   # for a switch back to Manual
+            return
         self._preview = result
         # The worker brings the field Screen 4 scatters (and the depth
         # overlay). The pinned and hand-placed rows stay this page's own --
@@ -766,6 +853,10 @@ class PlacePage(WizardPage):
 
     # --------------------------------------------------------- wizard API
     def enter(self, state: BuilderState) -> None:
+        # What a Mission-like record needs and Screen 3 drops (no-ops for a
+        # state without a record: every Manual world).
+        placement.reassert(state)
+        placement.restore_layers(state)
         self._state = state
         if self._seed_seen != int(state.objects.seed):
             # Reseeded only when the seed changed: leaving and returning
@@ -783,7 +874,8 @@ class PlacePage(WizardPage):
                                       [r["y_min"], r["y_max"]])
         if self._armed and self._form is not None:
             self._form.prefill(state.objects.classes.get(self._armed))
-        self._check_stale(state)
+        if not getattr(state, "placement", None):
+            self._check_stale(state)
         # What the state already holds is shown at once and is this page's
         # document from now on (Edit mode, a resumed autosave, a return
         # here); the worker only adds the scattered field. Until 2026-09-28
@@ -796,6 +888,12 @@ class PlacePage(WizardPage):
                          for i in state.objects.explicit])
         self._selected = -1
         self._undo.clear()
+        self._init_mission_state()
+        if (placement.mode_of(state) == placement.MISSION
+                and self._panel is not None):
+            self._enter_mission(state)
+            return
+        self._show_mode(placement.MANUAL)
         self._refresh_map()
         self._set_mode(Mode.OBJECT if self._armed else Mode.SELECT)
         self._run_preview()
@@ -832,6 +930,8 @@ class PlacePage(WizardPage):
             state.objects.placed_signature = now
 
     def commit(self, state: BuilderState) -> bool:
+        if self._mode == placement.MISSION:
+            return self._commit_mission(state)
         placed = [r["item"] for r in self._rows if r["kind"] == "pinned"]
         manual = [r["item"] for r in self._rows if r["kind"] == "manual"]
         pinned = self._field_pinned or bool(placed)
@@ -842,4 +942,439 @@ class PlacePage(WizardPage):
                                                 state.objects.classes)
                               if pinned else ""),
             pinned=pinned)
+        self._commit_manual_record(state, placed, manual)
         return True
+
+    # ===================================================== Mission-like mode
+    # Everything below serves the Mission-like mode only; in Manual mode none
+    # of it runs (the hooks above return at once), so a Manual world is built
+    # from exactly the state it always was.
+    def _init_mission_state(self) -> None:
+        self._env = None                    # the planner's Environment
+        # The workers are kept across entries: dropping the last reference
+        # to a running QThread aborts the process (the rule of
+        # _run_preview). A result of an earlier entry is ignored below.
+        if not hasattr(self, "_env_worker"):
+            self._env_worker = None
+            self._plan_worker = None
+        self._env_pending = bool(self._env_worker is not None and self._env_worker.isRunning())
+        self._env_after_preview = False
+        self._plan_pending = False
+        self._plan = None                   # the last plan ...
+        self._plan_block = None             # ... and the block it answers
+        self._plan_heat = None
+        self._stored = None                 # a plan stored in the state (Edit, Back)
+        self._stash = None                  # the Manual rows while planning
+        self._convert = None                # a plan converted to manual, not committed yet
+        self._clear_record = False          # Manual chosen over a stored plan
+        self._preview_result = None
+        self._feature_key = None
+        if not hasattr(self, "_plan_timer"):
+            self._plan_timer = QTimer(self)
+            self._plan_timer.setSingleShot(True)
+            self._plan_timer.setInterval(PLAN_DEBOUNCE_MS)
+            self._plan_timer.timeout.connect(self._start_plan)
+
+    def _show_mode(self, mode: str) -> None:
+        """Buttons, left pane and tools for ``mode`` (no data changes)."""
+        self._mode = mode
+        mission = mode == placement.MISSION
+        hint = self._layout.itemAt(1).widget() if self._layout.count() > 1 else None
+        if isinstance(hint, QLabel):
+            hint.setText(self.HINT_MISSION if mission else self.HINT)
+        self._b_manual.setChecked(not mission)
+        self._b_mission.setChecked(mission)
+        self._left.setCurrentIndex(1 if (mission and self._panel is not None) else 0)
+        for b in (self._b_place, self._b_select, self._b_edit, self._b_del,
+                  self._b_undo, self._b_redo, self._b_clear):
+            b.setVisible(not mission)
+        if mission:
+            self._status.setText("")
+            self.map.set_mode(Mode.SELECT)
+            self._on_map_mode(Mode.SELECT)
+        else:
+            self.map.set_overlay(None, key="mission")
+            self._sync_buttons()
+            self._b_undo.setEnabled(self._undo.canUndo())
+            self._b_redo.setEnabled(self._undo.canRedo())
+
+    def _manual_rows(self) -> list:
+        """The hand-placed rows, without the structures a plan added."""
+        return [r for r in self._rows if r["kind"] == "manual"
+                and not placement.is_plan_structure(r["item"])]
+
+    # ------------------------------------------------------------ switching
+    def _switch_mode(self, mode: str) -> None:
+        if mode == self._mode or self._state is None:
+            self._show_mode(self._mode)
+            return
+        if mode == placement.MISSION:
+            if self._panel is None:
+                self._show_mode(placement.MANUAL)
+                return
+            self._stash = {"rows": copy.deepcopy(self._rows), "pinned": self._field_pinned,
+                           "selected": self._selected}
+            self._rows = [dict(r) for r in self._manual_rows()]
+            self._selected = -1
+            self._undo.clear()
+            self._convert = None
+            self._show_mode(placement.MISSION)
+            self._panel.set_result(None, busy="reading the environment…")
+            self._refresh_map()
+            self._start_environment()
+            return
+        # back to Manual: the rows as they were, the plan forgotten
+        self._plan_timer.stop()
+        self._env_after_preview = False
+        if self._stash is not None:
+            self._rows = self._stash["rows"]
+            self._field_pinned = self._stash["pinned"]
+            self._selected = -1
+        else:
+            self._rows = [dict(r) for r in self._manual_rows()]
+            self._field_pinned = False
+        self._clear_record = placement.mode_of(self._state) == placement.MISSION
+        self._plan = self._plan_block = self._stored = None
+        self._stash = None
+        self._undo.clear()
+        self._show_mode(placement.MANUAL)
+        self._refresh_map()
+        self._set_mode(Mode.OBJECT if self._armed else Mode.SELECT)
+        if self._preview_result is not None:
+            res, self._preview_result = self._preview_result, None
+            self._show(res)
+        elif not any(r["kind"] == "scatter" for r in self._rows):
+            self._run_preview()
+
+    def _enter_mission(self, state: BuilderState) -> None:
+        """Screen 5 opens on a state that holds a plan (Edit mode, Back):
+        the stored plan is shown as it is and is what Next keeps; the
+        controls show what it was made with. Nothing is planned again unless
+        a control changes or Re-plan is pressed."""
+        rec = dict(state.placement)
+        self._stored = rec
+        self._stash = None
+        self._rows = [{"kind": "manual", "item": dict(i)} for i in state.objects.explicit
+                      if not placement.is_plan_structure(i)]
+        self._show_mode(placement.MISSION)
+        params = dict(rec.get("params") or {})
+        self._panel.set_block(params)
+        meta = dict(rec.get("metadata") or {})
+        self._panel.set_result({"expected_shares": meta.get("weights") or {},
+                                "expected": meta.get("expected") or {"total": 0, "targets": 0, "debris": 0},
+                                "realised": meta.get("realised") or {"targets": 0, "debris": 0, "groups": 0},
+                                "warnings": meta.get("warnings") or []}, busy="reading the environment…")
+        self._refresh_map()
+        self._start_environment()
+
+    # -------------------------------------------------------- environment
+    def _start_environment(self) -> None:
+        if self._worker is not None and self._worker.isRunning():
+            self._env_after_preview = True      # one heavy build at a time
+            return
+        if self._env_worker is not None and self._env_worker.isRunning():
+            self._env_pending = True
+            return
+        self._env_pending = False
+        st = copy.deepcopy(self._state)
+        st.objects.explicit = [dict(r["item"]) for r in self._manual_rows()]
+        self._env_worker = EnvironmentWorker(st)
+        self._env_worker.ready.connect(self._on_environment)
+        self._env_worker.failed.connect(self._on_environment_failed)
+        self._env_worker.finished.connect(self._after_environment)
+        self._env_worker.start()
+
+    def _after_environment(self) -> None:
+        if self._env_pending:
+            self._start_environment()
+
+    def _on_environment(self, env) -> None:
+        if self.sender() is not None and self.sender() is not self._env_worker:
+            return
+        if self._env_pending:
+            return                          # a newer read was asked for: it follows
+        self._env = env
+        self._sync_feature_rows(force=True)
+        if self._mode != placement.MISSION:
+            return
+        # the hover readout and the dry-land check read the environment's raster
+        self._preview = {"grid": {"origin_x": env.x0 + 0.5 * env.cell_m, "origin_y": env.y0 + 0.5 * env.cell_m,
+                                  "resolution": env.cell_m, "nx": env.shape[1], "ny": env.shape[0]},
+                         "depth": env.depth}
+        if self._stored is not None and self._plan is None:
+            same = env.digest() == self._stored.get("environment_digest")
+            self._panel.set_stale(not same, "" if same else
+                                  "The world has changed since this plan was made (Screens 2-4): its objects may "
+                                  "no longer sit where the model would put them. Re-plan follows the world as it "
+                                  "is; Next keeps the stored plan.")
+            self._redraw_mission()
+            return
+        self._schedule_plan()
+
+    def _on_environment_failed(self, msg: str) -> None:
+        if self._panel is not None:
+            self._panel.set_result(None, error=f"the environment could not be read: {msg}")
+
+    def _sync_feature_rows(self, force: bool = False) -> None:
+        if self._env is None or self._panel is None:
+            return
+        from blueboat_harbour_population.sources import default_use
+        p = self._hp.default_parameters()
+        prof = self._panel.profile.currentData()
+        rows = [(f.id, f.kind, default_use(p, prof, f.kind)) for f in self._env.features]
+        key = (prof, tuple(rows))
+        if force or key != self._feature_key:
+            self._feature_key = key
+            self._panel.set_features(rows)
+
+    # ---------------------------------------------------------------- plans
+    def _schedule_plan(self) -> None:
+        if self._mode != placement.MISSION:
+            return
+        if self._plan is None and self._stored is None:
+            self._panel.set_result(None, busy="planning…")
+        self._plan_timer.start()
+
+    def _replan(self) -> None:
+        self._schedule_plan()
+
+    def _start_plan(self) -> None:
+        if self._mode != placement.MISSION or self._env is None:
+            return
+        if self._plan_worker is not None and self._plan_worker.isRunning():
+            self._plan_pending = True
+            return
+        self._plan_pending = False
+        block = self._panel.block()
+        self._plan_worker = PlanWorker(self._env, block, heat=self._panel.heat.isChecked())
+        self._plan_worker.ready.connect(self._on_plan)
+        self._plan_worker.failed.connect(self._on_plan_failed)
+        self._plan_worker.finished.connect(self._after_plan)
+        self._plan_worker.start()
+
+    def _after_plan(self) -> None:
+        if self._plan_pending:
+            self._start_plan()
+
+    def _on_plan(self, plan, heat, block) -> None:
+        if self.sender() is not None and self.sender() is not self._plan_worker:
+            return
+        if self._mode != placement.MISSION or self._env is None or plan.environment_digest != self._env.digest():
+            return                          # a plan of an earlier entry or mode
+        self._plan, self._plan_block, self._plan_heat = plan, block, heat
+        self._stored = None
+        self._panel.set_stale(False)
+        busy = "planning…" if (self._plan_pending or block != self._panel.block()) else ""
+        self._panel.set_result(plan.report, busy=busy)
+        self._redraw_mission()
+
+    def _on_plan_failed(self, msg: str, block) -> None:
+        if self.sender() is not None and self.sender() is not self._plan_worker:
+            return
+        self._plan = self._plan_block = None
+        self._panel.set_result(None, error=msg)
+        self._redraw_mission()
+
+    # -------------------------------------------------------------- drawing
+    def _plan_entries(self) -> tuple[list, list]:
+        """(litter and debris, structures) on the map: the current plan's, or
+        the stored one's."""
+        if self._plan is not None:
+            return self._plan.instances, self._plan.structures
+        if self._stored is not None and self._state is not None:
+            return (list(self._state.objects.placed),
+                    [i for i in self._state.objects.explicit if placement.is_plan_structure(i)])
+        return [], []
+
+    def _plan_items(self) -> list:
+        if self._mode != placement.MISSION:
+            return []
+        from blueboat_harbour_population import card
+        out = []
+        litter, structures = self._plan_entries()
+        for k, e in enumerate(list(litter) + list(structures)):
+            if e["type"] == "chain":
+                continue
+            spec = CATALOG[e["type"]]
+            typ = typical_instance(spec)
+            role = dict(e.get("params") or {}).get("role")
+            colour = (card.CLASS_COLOUR_DARK.get(e["type"]) if role != "structure" else "#c9c8c2")
+            out.append((PLAN_BASE + k, {
+                "x": e["x"], "y": e["y"], "yaw": e.get("yaw", 0.0),
+                "length": e.get("length", typ.length), "width": e.get("width", typ.width),
+                "round": spec.round_footprint, "kind": "plan", "color": colour,
+                "label": f"{spec.display_label} (planned)",
+                "dry": is_dry(self._preview, e["x"], e["y"])}, False))
+        return out
+
+    def _redraw_mission(self) -> None:
+        self._refresh_map()
+        self._draw_overlay()
+
+    def _draw_overlay(self) -> None:
+        """Features coloured by their use and, when asked, the expected
+        density: one raster on the map, at most 400 cells a side."""
+        env = self._env
+        if env is None or self._mode != placement.MISSION:
+            self.map.set_overlay(None, key="mission")
+            return
+        from blueboat_harbour_population import card
+        ny, nx = env.shape
+        step = max(1, int(np.ceil(max(nx, ny) / 400.0)))
+        xs, ys = env.centres()
+        xs, ys = xs[::step], ys[::step]
+        X, Y = np.meshgrid(xs, ys)
+        rgba = np.zeros((len(ys), len(xs), 4), dtype=np.uint8)
+        heat = self._plan_heat if self._panel.heat.isChecked() else None
+        if heat is not None:
+            h = heat[::step, ::step]
+            ok = np.isfinite(h) & (h > 0)
+            if ok.any():
+                v = np.clip(h / max(float(np.nanpercentile(h[ok], 98)), 1e-9), 0.0, 1.0)
+                lo, hi = np.array([205, 226, 251]), np.array([16, 66, 129])
+                for c in range(3):
+                    rgba[..., c] = np.where(ok, lo[c] + (hi[c] - lo[c]) * v, 0).astype(np.uint8)
+                # low densities stay see-through: the tint grows with the density
+                rgba[..., 3] = np.where(ok, 30 + 190 * v, 0).astype(np.uint8)
+        uses = {}
+        if self._plan is not None:
+            uses = {f["id"]: f["use"] for f in self._plan.report.get("features", [])}
+        elif self._stored is not None:
+            uses = {f["id"]: f["use"] for f in (self._stored.get("metadata") or {}).get("features", [])}
+        width = max(1.5, 0.75 * env.cell_m * step)
+        for f in env.features:
+            use = uses.get(f.id)
+            if not use or use in ("none", "far_field"):
+                continue
+            near = f.distance(X, Y) <= (width if f.geometry != "point" else 2.5)
+            col = card.USE_COLOUR_DARK.get(use, "#c9c8c2").lstrip("#")
+            rgb = [int(col[i:i + 2], 16) for i in (0, 2, 4)]
+            for c in range(3):
+                rgba[..., c] = np.where(near, rgb[c], rgba[..., c])
+            rgba[..., 3] = np.where(near, 230, rgba[..., 3])
+        self.map.set_overlay({"rgba": rgba, "origin": (float(xs[0]), float(ys[0])),
+                              "cell_m": float(env.cell_m * step)}, key="mission")
+
+    def _mission_summary(self) -> None:
+        litter, structures = self._plan_entries()
+        n_t = sum(1 for e in litter if e["type"] != "debris")
+        line = (f"Mission-like: {n_t} targets, {len(litter) - n_t} debris, "
+                f"{sum(1 for e in structures if e['type'] != 'chain')} structures planned")
+        if self._manual_rows():
+            line += f" · {len(self._manual_rows())} hand-placed kept"
+        if self._stored is not None and self._plan is None:
+            line += " · the stored plan"
+        self._summary.setText(line)
+
+    def _on_wall_double_clicked(self, index: int) -> None:
+        if self._mode != placement.MISSION or self._panel is None:
+            return
+        # Deferred: the signal comes from the scene's own dispatch, where a
+        # dialog must not run.
+        QTimer.singleShot(0, lambda: self._ask_wall_use(index))
+
+    def _ask_wall_use(self, index: int) -> None:
+        walls = self.map.walls()
+        if not (0 <= index < len(walls)):
+            return
+        fid = str(walls[index].get("name", ""))
+        if fid not in self._panel.feature_ids():
+            return
+        choices = self._panel.use_choices()
+        use, ok = QInputDialog.getItem(self, "Use of the feature",
+                                       f"What is {fid} used for?", [c.replace("_", " ") for c in choices],
+                                       0, False)
+        if ok:
+            self._panel.set_feature_use(fid, choices[[c.replace("_", " ") for c in choices].index(use)])
+
+    # ------------------------------------------------------------- convert
+    def _convert_to_manual(self) -> None:
+        """The plan becomes ordinary objects: the litter a pinned field
+        (editable one by one), the structures hand-placed objects. The
+        world records that it started as a Mission-like plan and, at Next,
+        whether it was edited since."""
+        litter, structures = self._plan_entries()
+        if not litter and not structures:
+            return
+        if self._plan is not None:
+            record = self._plan_record(self._plan)
+            layers = self._plan.layers
+        else:
+            record = dict(self._stored or {})
+            layers = record.get("layers") or []
+        self._rows = ([{"kind": "pinned", "item": dict(e)} for e in litter]
+                      + [dict(r) for r in self._manual_rows()]
+                      + [{"kind": "manual", "item": dict(e)} for e in structures])
+        self._field_pinned = True
+        placed = [r["item"] for r in self._rows if r["kind"] == "pinned"]
+        manual = [r["item"] for r in self._rows if r["kind"] == "manual"]
+        self._convert = {"record": record, "layers": [dict(L) for L in layers],
+                         "digest": placement.list_digest(placed + manual)}
+        self._plan = self._plan_block = self._stored = None
+        self._stash = None
+        self._undo.clear()
+        self._show_mode(placement.MANUAL)
+        self._refresh_map()
+        self._set_mode(Mode.SELECT)
+        self._status.setText("converted: every planned object can now be moved, edited or deleted")
+
+    def _plan_record(self, plan) -> dict:
+        """The record a plan leaves in the state (the adapter's), computed on
+        a throw-away copy of the state."""
+        st = copy.deepcopy(self._state)
+        st.objects.explicit = [dict(r["item"]) for r in self._manual_rows()]
+        self._sa.apply_plan(st, plan, run={"sonar_fouling": self._sa.fouling_of(plan.seed)})
+        return dict(st.placement)
+
+    # --------------------------------------------------------------- commit
+    def _commit_mission(self, state: BuilderState) -> bool:
+        """Write the last plan (or keep the stored one). Next is refused
+        while the plan on the map is not the one the controls ask for; Back
+        ignores the answer, and the last finished plan is kept."""
+        manual = [dict(r["item"]) for r in self._manual_rows()]
+        if self._plan is not None:
+            state.objects = ObjectsState(
+                seed=state.objects.seed, classes=dict(state.objects.classes),
+                explicit=manual, placed=[], placed_signature="", pinned=True)
+            self._sa.apply_plan(state, self._plan,
+                                run={"sonar_fouling": self._sa.fouling_of(self._plan.seed)})
+            current = self._plan_block == self._panel.block() and not self._plan_pending
+            if not current:
+                self._status.setText("the plan is being updated: press Next again once it is shown")
+            return bool(current)
+        if self._stored is not None:
+            placement.reassert(state)
+            placement.restore_layers(state)
+            return True
+        self._status.setText("no plan yet: wait for the plan to appear on the map")
+        return False
+
+    def _commit_manual_record(self, state: BuilderState, placed: list, manual: list) -> None:
+        """After the Manual commit: a plan converted on this screen leaves
+        its record and its layers; Manual chosen over a stored plan clears
+        it; a converted world updates ``edited``. A state that never had a
+        plan is not touched."""
+        rec = dict(getattr(state, "placement", None) or {})
+        if self._convert is not None:
+            conv = self._convert
+            state.depth.layers = placement.strip_reserved(state.depth.layers) + placement.unreserve(conv["layers"])
+            if conv["record"].get("seabed"):
+                state.depth.seabed = placement.plain(dict(conv["record"]["seabed"]))
+            new = placement.convert_record(conv["record"], edited=False)
+            new["converted_digest"] = conv["digest"]
+            new["layers"] = placement.unreserve(conv["layers"])
+            state.placement = new
+            rec = new
+            self._convert = None
+            self._clear_record = False
+        elif self._clear_record:
+            placement.clear(state)
+            self._clear_record = False
+            return
+        if rec.get("mode") == placement.MANUAL and rec.get("origin"):
+            edited = placement.list_digest(placed + manual) != rec.get("converted_digest")
+            rec = placement.plain(rec)
+            rec["edited"] = edited
+            rec.setdefault("metadata", {})["edited"] = edited
+            state.placement = rec
+            placement.reassert(state)

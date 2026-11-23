@@ -29,8 +29,18 @@ class GenerateWorker(QThread):
     def run(self) -> None:
         try:
             from ..worldgen.world_folder import build_world_folder
-            out = build_world_folder(self._state, worlds_root=self._root,
-                                     progress=self.progressed.emit)
+            from . import placement
+            # A world with a Mission-like placement carries its record into
+            # metadata.yaml; every other world is built by the same call as
+            # always (no ``extras`` argument at all).
+            ex = placement.extras(self._state)
+            if ex:
+                out = build_world_folder(self._state, worlds_root=self._root,
+                                         progress=self.progressed.emit,
+                                         extras=ex)
+            else:
+                out = build_world_folder(self._state, worlds_root=self._root,
+                                         progress=self.progressed.emit)
             self.finished_path.emit(str(out))
         except Exception as exc:
             traceback.print_exc()
@@ -424,3 +434,57 @@ def is_dry(preview: dict | None, x: float, y: float) -> bool:
     exempts them), so Screen 5 warns rather than refuses."""
     d = depth_at(preview, x, y)
     return d is not None and d <= DRY_DEPTH_M
+
+
+# ------------------------------------------------- Screen-5 Mission-like mode
+class EnvironmentWorker(QThread):
+    """Screen 5, Mission-like: the planning environment of the state (the
+    water, the depth, the sediment and the features), from the generator's
+    own build pipeline, once per screen entry. Works on a copy of the state.
+    The planner is imported here, never at module level."""
+
+    ready = Signal(object)              # the planner's Environment
+    failed = Signal(str)
+
+    def __init__(self, state: BuilderState, features: list | None = None,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._state = state
+        self._features = list(features or [])
+
+    def run(self) -> None:
+        try:
+            from blueboat_harbour_population import sim_adapter
+            self.ready.emit(sim_adapter.environment_from_state(
+                self._state, features=self._features))
+        except Exception as exc:                        # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+
+
+class PlanWorker(QThread):
+    """Screen 5, Mission-like: one plan for the current controls. ``block``
+    is the placement block; the result is ``(plan, expected density or
+    None, block)``, so the page can tell which controls a result answers."""
+
+    ready = Signal(object, object, object)
+    failed = Signal(str, object)
+
+    def __init__(self, environment, block: dict, heat: bool = False,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._env = environment
+        self._block = dict(block)
+        self._heat = bool(heat)
+
+    def run(self) -> None:
+        try:
+            from blueboat_harbour_population import populate
+            plan = populate(self._env, self._block)
+            heat = None
+            if self._heat:
+                from blueboat_harbour_population.validation import expected_density
+                heat = expected_density(self._env, self._block)
+            self.ready.emit(plan, heat, self._block)
+        except Exception as exc:                        # noqa: BLE001
+            self.failed.emit(str(exc), self._block)

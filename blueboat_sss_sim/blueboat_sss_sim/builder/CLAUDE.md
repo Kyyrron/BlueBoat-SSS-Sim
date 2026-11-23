@@ -195,3 +195,27 @@ the window first and scrolls only below its own minimum (every screen fits
   a pinned field (`objects.placed`), its structures are explicit instances.
 - Every saved world now also gets its ground truth (`metadata.yaml` schema version 2, additive;
   `ground_truth_rasters.npz`) and a content digest: `worldgen/groundtruth.py`, called by `build_world_folder`.
+
+## Screen 5 Mission-like mode (2026-11-21, simulator v1.1, session 14)
+
+- A switch at the top of the map: **Manual** (the page as it always was) or **Mission-like**. In Mission-like the
+  left pane is `pages/mission_panel.py` (harbour type, classes with their expected shares, mix, density slider 1–10
+  with the expected counts, seed + Roll, split, "also add", a closed Advanced with the use of each feature) and the
+  planned objects are drawn in their class colours, not editable. **Convert to manual** turns the plan into ordinary
+  pinned rows; the world then records `placement: {mode: manual, origin, edited}`.
+- The model is not here: `blueboat_harbour_population` (repository root), imported lazily (`placement.import_planner`).
+  Without it the switch is disabled and the builder works as before.
+- **Invariants (tested by `test/placement_test.py`):** a Manual state never gets a `placement` key (an empty record
+  is not written, so `builder_state.yaml` of a Manual world is byte for byte what it was); the Manual branches of
+  `enter`/`commit` are the v1.0 code verbatim; the planner never draws from the page's own `[5, seed]` stream; the
+  placement seed is not the world seed (Roll never moves the seabed); plan objects are never page rows (indices
+  `PLAN_BASE` + k); `commit` writes only the last finished plan and refuses Next while the controls ask for another.
+- **What a plan leaves in the state:** the litter as the pinned field (`objects.placed`, `pinned`), its structures in
+  `objects.explicit` (names `ml_…`), its small-litter layers in `depth.layers` (ids `ml_…`, own seeds), the seabed
+  declaration (`depth.seabed`, which Screen 3 drops: `placement.reassert` puts it back on entry and commit), and
+  `BuilderState.placement` (the block, the model's digests, the `metadata.yaml` block). The build passes that block
+  as `extras` to the frozen `build_world_folder`.
+- The environment is read once per entry into the mode, on a copy of the state, after the scatter preview (one heavy
+  build at a time); plans are re-made 150 ms after a control changes and never replace a running worker. A wall's use
+  is set by a double-click, the dialog deferred to the event loop (the canvas rule above).
+

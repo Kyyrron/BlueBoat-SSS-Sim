@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>blueboat_harbour_population</name>
+  <version>1.0.0</version>
+  <description>
+    Evidence-based population of harbour seabeds with litter, debris and
+    structures (the "mission-like" object placement of the BlueBoat world
+    builder): populate(environment, params, seed) -> PlacementPlan. Pure
+    Python (numpy, scipy, PyYAML), no ROS and no Qt. It lives outside the
+    blueboat_sss_sim package on purpose: its parameters are recalibrated
+    without changing the simulator's code digest.
+  </description>
+  <maintainer email="killian.bertrand2002@gmail.com">Killian BERTRAND</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

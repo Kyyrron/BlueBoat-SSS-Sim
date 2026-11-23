@@ -1,5 +1,7 @@
 __pycache__/
 data/
+# the population model's own data (its evidence parameters and splits) is source, not field data
+!blueboat_harbour_population/blueboat_harbour_population/data/
 *.svlog
 *.mcap
 metadata.yaml
