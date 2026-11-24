@@ -8,12 +8,13 @@ Design choices:
   it can be enabled (``seabed_collision: true``) for future AUV work.
 * Objects are exported as simple SDF primitives (box / cylinder) with the
   material colour -- their *acoustic* appearance is owned entirely by the
-  sonar renderer, Gazebo only needs them visible and physically present.
+  sonar renderer, Gazebo only needs them visible (they carry no
+  collision body; the walls do).
 * The world-level plugin block is copied from the existing BlueBoat
   ``world.sdf`` so the vehicle spawns and behaves identically
   (physics, buoyancy, sensors, scene broadcaster). The plugin filename
-  prefix is configurable: ``ignition-gazebo`` (Fortress, current project
-  default) or ``gz-sim`` (Garden/Harmonic).
+  prefix is configurable: ``gz-sim`` (Garden/Harmonic, the default) or
+  ``ignition-gazebo`` (Fortress).
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ..core.types import PlacedObject
+from ..core.geometry import bilinear_sample
+from ..core.types import PlacedObject, Wall
 from .materials import MaterialLibrary
 from .objects import CATALOG
 from .scene import SceneModel
@@ -49,6 +51,7 @@ _WORLD_PLUGINS = """\
         </density_change>
       </graded_buoyancy>
     </plugin>
+    <plugin filename="{p}-apply-link-wrench-system" name="{n}::ApplyLinkWrench"></plugin>
 """
 
 
@@ -65,12 +68,14 @@ def _write_stl(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
             f.write(b"\0\0")
 
 
-def _seabed_mesh(scene: SceneModel, max_verts_axis: int = 200
+def _seabed_mesh(scene: SceneModel, max_verts_axis: int = 200,
+                 height: np.ndarray | None = None
                  ) -> tuple[np.ndarray, np.ndarray]:
-    """Decimate the heightmap into a triangle grid mesh (world coords)."""
+    """Decimate the heightmap into a triangle grid mesh (world coords).
+    ``height`` (default ``scene.height``) is the raster meshed."""
     g = scene.grid
     step = max(1, int(np.ceil(max(g.nx, g.ny) / max_verts_axis)))
-    hz = scene.height[::step, ::step]
+    hz = (scene.height if height is None else height)[::step, ::step]
     ny, nx = hz.shape
     xs = g.origin_x + np.arange(0, g.nx, step)[:nx] * g.resolution
     ys = g.origin_y + np.arange(0, g.ny, step)[:ny] * g.resolution
@@ -86,13 +91,75 @@ def _seabed_mesh(scene: SceneModel, max_verts_axis: int = 200
     return verts, faces.astype(np.int64)
 
 
+def _compound_sdf(o: PlacedObject, z_base: float, lib: MaterialLibrary) -> str:
+    """An object of several parts (``worldgen.compounds``): one visual per
+    part, in the envelope's frame -- the geometry the ray-cast sensor meshes,
+    placed by the same rule (``scene_mesh.facet_transform``). An annulus is
+    drawn as a disc and a rod's axis is the SDF cylinder's z."""
+    from . import compounds
+    from .solids import rot_x, rot_y, rotation_rpy, rpy_from_rotation
+    env = compounds.envelope(o)
+    if o.rested:
+        z, rpy = o.rest_z, (o.roll, o.pitch, o.yaw)
+    else:
+        z, rpy = z_base + o.effective_height - float(env.extent[2]), (0.0, 0.0, o.yaw)
+    axis_to_z = (rot_y(np.pi / 2), rot_x(-np.pi / 2), np.eye(3))
+    visuals = []
+    for i, p in enumerate(compounds.parts(o)):
+        sol, R = p.solid, p.R
+        if sol.kind == "box":
+            geom = f"<box><size>{sol.a:.3f} {sol.b:.3f} {sol.c:.3f}</size></box>"
+        elif sol.kind == "ellipsoid":
+            geom = f"<ellipsoid><radii>{sol.a:.3f} {sol.b:.3f} {sol.c:.3f}</radii></ellipsoid>"
+        else:                                    # cylinder, annulus (as a disc)
+            length = sol.c if sol.kind == "annulus" else sol.b
+            R = R @ axis_to_z[2 if sol.kind == "annulus" else sol.axis]
+            geom = (f"<cylinder><radius>{sol.a:.3f}</radius>"
+                    f"<length>{length:.3f}</length></cylinder>")
+        r, gg, b = lib.get(p.material or o.material).color
+        roll, pitch, yaw = rpy_from_rotation(R)
+        visuals.append(f"""
+        <visual name="v{i}">
+          <pose>{p.t[0]:.3f} {p.t[1]:.3f} {p.t[2]:.3f} {roll:.4f} {pitch:.4f} {yaw:.4f}</pose>
+          <geometry>{geom}</geometry>
+          <material>
+            <ambient>{r} {gg} {b} 1</ambient>
+            <diffuse>{r} {gg} {b} 1</diffuse>
+          </material>
+        </visual>""")
+    roll, pitch, yaw = rpy_from_rotation(rotation_rpy(*rpy))
+    return f"""
+    <model name="obj_{o.object_id:04d}_{o.type}">
+      <static>true</static>
+      <pose>{o.x:.3f} {o.y:.3f} {z:.3f} {roll:.4f} {pitch:.4f} {yaw:.4f}</pose>
+      <link name="link">{"".join(visuals)}
+      </link>
+    </model>"""
+
+
 def _object_sdf(o: PlacedObject, z_base: float, lib: MaterialLibrary) -> str:
     spec = CATALOG[o.type]
+    from .compounds import _BUILDERS
+    if o.type in _BUILDERS:
+        return _compound_sdf(o, z_base, lib)
     color = lib.get(o.material).color
     h = max(o.effective_height, 0.01)
-    z = z_base + h / 2 - o.proud_height * o.burial * 0.5
+    # The visual is the part proud of the seabed, standing on it: its top at
+    # terrain + effective height, where the acoustic scene puts it. (Until
+    # 2026-11-11 the burial was subtracted a second time -- it is already in
+    # the effective height -- and the top sat proud * burial / 2 too low.)
+    z = z_base + h / 2
+    if o.rested and spec.solid(o) is not None:
+        return _rested_object_sdf(o, spec, z_base, color)
     if spec.sdf_shape == "cylinder_upright":
         geom = (f"<cylinder><radius>{o.length / 2:.3f}</radius>"
+                f"<length>{h:.3f}</length></cylinder>")
+        pose = f"{o.x:.3f} {o.y:.3f} {z:.3f} 0 0 {o.yaw:.4f}"
+    elif spec.sdf_shape == "cone":
+        # SDF <cone> only exists from SDFormat 15 (Ionic); Harmonic renders
+        # nothing for it. An upright cylinder at half the base radius is the
+        # visual stand-in -- the acoustic shape is entirely mask-driven.
+        geom = (f"<cylinder><radius>{o.length / 4:.3f}</radius>"
                 f"<length>{h:.3f}</length></cylinder>")
         pose = f"{o.x:.3f} {o.y:.3f} {z:.3f} 0 0 {o.yaw:.4f}"
     elif spec.sdf_shape == "cylinder":
@@ -119,24 +186,179 @@ def _object_sdf(o: PlacedObject, z_base: float, lib: MaterialLibrary) -> str:
     </model>"""
 
 
+def _wall_sdf(w: Wall, z_floor: float) -> str:
+    """One basin wall as a static box, visible and *solid*.
+
+    Walls carry a collision mirroring the visual: like a real quay or
+    pontoon, the boat cannot drive through one. They are also emitted so
+    that the Gazebo scene and the acoustic scene cannot disagree about a
+    structure this large -- the renderer bounces ghosts off these same
+    walls, read from the same manifest.
+    """
+    cx, cy = 0.5 * (w.x0 + w.x1), 0.5 * (w.y0 + w.y1)
+    # A pontoon floats: its box spans the draft to the top and leaves the
+    # water beneath it free, exactly as the acoustic model treats it.
+    z_base = -float(w.draft_m) if w.kind == "pontoon" else z_floor
+    h = max(w.top_z - z_base, 0.05)
+    cz = z_base + h / 2.0
+    yaw = float(np.arctan2(w.y1 - w.y0, w.x1 - w.x0))
+    box = f"<box><size>{w.length:.3f} {w.thickness:.3f} {h:.3f}</size></box>"
+    return f"""
+    <model name="wall_{w.name}">
+      <static>true</static>
+      <pose>{cx:.3f} {cy:.3f} {cz:.3f} 0 0 {yaw:.4f}</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry>{box}</geometry>
+          <material>
+            <ambient>0.55 0.55 0.52 1</ambient>
+            <diffuse>0.55 0.55 0.52 1</diffuse>
+          </material>
+        </visual>
+        <collision name="c">
+          <geometry>{box}</geometry>
+        </collision>
+      </link>
+    </model>"""
+
+
+def _rested_object_sdf(o: PlacedObject, spec, z_base: float, color) -> str:
+    """A 3-D rested object: the same primitive the acoustic stamp used,
+    at the settled pose (rest orientation composed with the bank tilt).
+    ``rest_z`` is the WORLD z of the solid's centre (``solids.settle``
+    returns it absolute; ``sonar/facets.py`` and the ray-cast mesh read it
+    so). Until 2026-11-11 the terrain height was added to it here, which
+    drew every rested object one water depth too deep in Gazebo."""
+    from .solids import rotation_rpy, rpy_from_rotation, rot_y
+    sol = spec.solid(o)
+    R = rotation_rpy(o.roll, o.pitch, o.yaw)
+    if sol.kind in ("cylinder", "capsule") and sol.axis == 0:
+        # The SDF cylinder's axis is z; the class frame has it along x.
+        R = R @ rot_y(np.pi / 2)
+        geom = (f"<cylinder><radius>{sol.a:.3f}</radius>"
+                f"<length>{sol.b:.3f}</length></cylinder>")
+    elif sol.kind in ("cylinder", "annulus"):
+        geom = (f"<cylinder><radius>{sol.a:.3f}</radius>"
+                f"<length>{(sol.b if sol.kind == 'cylinder' else sol.c):.3f}"
+                f"</length></cylinder>")
+    elif sol.kind == "cone":
+        geom = (f"<cylinder><radius>{sol.a / 2:.3f}</radius>"
+                f"<length>{sol.b:.3f}</length></cylinder>")
+    else:
+        geom = (f"<box><size>{sol.a:.3f} {sol.b:.3f} {sol.c:.3f}</size></box>")
+    roll, pitch, yaw = rpy_from_rotation(R)
+    z = o.rest_z
+    r, gg, b = color
+    return f"""
+    <model name="obj_{o.object_id:04d}_{o.type}">
+      <static>true</static>
+      <pose>{o.x:.3f} {o.y:.3f} {z:.3f} {roll:.4f} {pitch:.4f} {yaw:.4f}</pose>
+      <link name="link">
+        <visual name="v">
+          <geometry>{geom}</geometry>
+          <material>
+            <ambient>{r} {gg} {b} 1</ambient>
+            <diffuse>{r} {gg} {b} 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>"""
+
+
+def _limits_sdf(scene: SceneModel) -> str:
+    """Four invisible, collision-only boxes just outside the world extent.
+
+    The world-builder's "limits": the boat physically cannot leave the
+    drawn rectangle, but nothing is visible and -- crucially -- nothing is
+    added to ``scene.walls``, so the sonar never sees them (limits are
+    non-reflective by design; only authored walls reflect).
+    """
+    xmin, ymin, xmax, ymax = scene.grid.extent
+    z_lo = float(scene.height.min()) - 0.5
+    # Reach over any dry land (a beach above z = 0) as well as the water.
+    z_hi = max(1.0, float(scene.height.max()) + 0.5)
+    h = z_hi - z_lo
+    cz = z_lo + h / 2.0
+    t = 0.5
+    sx = (xmax - xmin) + 2.0 * t
+    sy = (ymax - ymin) + 2.0 * t
+    cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
+    sides = (
+        ("north", cx, ymax + t / 2, sx, t),
+        ("south", cx, ymin - t / 2, sx, t),
+        ("east", xmax + t / 2, cy, t, sy),
+        ("west", xmin - t / 2, cy, t, sy),
+    )
+    out = []
+    for name, px, py, bx, by in sides:
+        out.append(f"""
+    <model name="limit_{name}">
+      <static>true</static>
+      <pose>{px:.3f} {py:.3f} {cz:.3f} 0 0 0</pose>
+      <link name="link">
+        <collision name="c">
+          <geometry><box><size>{bx:.3f} {by:.3f} {h:.3f}</size></box></geometry>
+        </collision>
+      </link>
+    </model>""")
+    return "".join(out)
+
+
+def _terrain(scene: SceneModel, terrain_height: np.ndarray | None) -> np.ndarray:
+    """The raster the Gazebo visuals stand on (see :func:`write_world_sdf`)."""
+    if terrain_height is not None:
+        t = np.asarray(terrain_height, dtype=np.float64)
+        if t.shape != scene.height.shape:
+            raise ValueError(f"terrain_height {t.shape} != the scene grid "
+                             f"{scene.height.shape}")
+        return t
+    fb = getattr(scene, "facet_bump", None)
+    if fb is not None and np.shape(fb) == scene.height.shape:
+        return scene.height - np.asarray(fb, dtype=np.float64)
+    return scene.height
+
+
 def write_world_sdf(scene: SceneModel, out_dir: str | Path,
                     world_name: str = "generated_ocean",
-                    plugin_prefix: str = "ignition",
+                    plugin_prefix: str = "gz",
                     water_alpha: float = 0.4,
                     seabed_collision: bool = False,
-                    material_overrides: dict | None = None) -> Path:
+                    material_overrides: dict | None = None,
+                    limits_collision: bool = False,
+                    terrain_height: np.ndarray | None = None) -> Path:
     """Write ``world.sdf`` + ``seabed.stl`` into ``out_dir``.
 
+    The Gazebo visuals stand on the **terrain**, never on the acoustic
+    raster (2026-11-02): ``scene.height`` carries every object's own stamp
+    (a facet object's top as its occluder, a Lambert object's relief), so
+    placing an object at ``scene.sample_height`` stood it on its own top and
+    meshing that raster drew each stamp as a bump under it -- the boxed
+    weight of the pool worlds sat 0.55 m above the floor on a pyramid.
+    Visual only: ``scene.npz`` is written elsewhere and untouched.
+
     Args:
-        plugin_prefix: ``"ignition"`` (Fortress; matches the current BlueBoat
-            world) or ``"gz"`` (Garden/Harmonic plugin naming).
+        plugin_prefix: ``"gz"`` (Garden/Harmonic plugin naming) or
+            ``"ignition"`` (Fortress).
+        limits_collision: emit four invisible collision-only boxes along
+            the world extent (the builder's impenetrable, non-reflective
+            limits).
+        terrain_height: the pre-object-stamp height raster on
+            ``scene.grid`` (``depth.npz``'s). Objects, walls and the seabed
+            mesh use it. Without it the facet objects' stamps are removed
+            (``height - facet_bump``); a Lambert object's relief then stays
+            in the mesh.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     lib = MaterialLibrary(material_overrides)
 
-    verts, faces = _seabed_mesh(scene)
+    terrain = _terrain(scene, terrain_height)
+    verts, faces = _seabed_mesh(scene, height=terrain)
     _write_stl(out / "seabed.stl", verts, faces)
+
+    def ground(x, y):
+        return bilinear_sample(terrain, scene.grid, np.asarray(x, float),
+                               np.asarray(y, float), fill=float(terrain.min()))
 
     if plugin_prefix == "gz":
         p, n = "gz-sim", "gz::sim::systems"
@@ -145,6 +367,28 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
 
     xmin, ymin, xmax, ymax = scene.grid.extent
     sx, sy = xmax - xmin, ymax - ymin
+    # The water plane must cover the grid extent, not sit at the Gazebo
+    # origin: a builder world's rectangle is drawn around the GPS path and
+    # is generally offset from (0, 0) (the anchor). The legacy configs'
+    # origin = (-size/2, -size/2) made the two coincide and hid this.
+    cx, cy = 0.5 * (xmin + xmax), 0.5 * (ymin + ymax)
+
+    # GPS anchor: Gazebo's standard mechanism for georeferencing a world.
+    # World (0, 0) is the anchor; the world frame is its local ENU frame,
+    # matching the manifest's geo block and the MCS path design frame.
+    geo_block = ""
+    if scene.geo_anchor is not None:
+        a = scene.geo_anchor
+        geo_block = f"""
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>{a.lat0:.9f}</latitude_deg>
+      <longitude_deg>{a.lon0:.9f}</longitude_deg>
+      <elevation>0</elevation>
+      <heading_deg>0</heading_deg>
+    </spherical_coordinates>
+"""
 
     collision_block = ""
     if seabed_collision:
@@ -154,13 +398,20 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
         </collision>"""
 
     objects_sdf = "".join(
-        _object_sdf(o, float(scene.sample_height(np.array([o.x]), np.array([o.y]))[0]), lib)
+        _object_sdf(o, float(ground(np.array([o.x]), np.array([o.y]))[0]), lib)
         for o in scene.objects)
+    # Walls sit on the deepest point they span, so a sloping basin never
+    # leaves one floating above the seabed.
+    walls_sdf = "".join(
+        _wall_sdf(w, float(np.min(ground(
+            np.linspace(w.x0, w.x1, 16), np.linspace(w.y0, w.y1, 16)))))
+        for w in scene.walls)
+    limits_sdf = _limits_sdf(scene) if limits_collision else ""
 
     sdf = f"""<?xml version="1.0" ?>
 <sdf version="1.6">
   <world name="{world_name}">
-    <scene><grid>false</grid></scene>
+    <scene><grid>false</grid></scene>{geo_block}
 {_WORLD_PLUGINS.format(p=p, n=n)}
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
@@ -172,6 +423,7 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
 
     <model name="water_plane">
       <static>true</static>
+      <pose>{cx:.3f} {cy:.3f} 0 0 0 0</pose>
       <link name="link">
         <visual name="water_plane">
           <geometry>
@@ -198,7 +450,7 @@ def write_world_sdf(scene: SceneModel, out_dir: str | Path,
         </visual>{collision_block}
       </link>
     </model>
-{objects_sdf}
+{objects_sdf}{walls_sdf}{limits_sdf}
   </world>
 </sdf>
 """

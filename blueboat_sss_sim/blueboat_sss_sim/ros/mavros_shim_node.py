@@ -14,35 +14,70 @@ It is strictly optional -- the sonar interface itself does not need it
 Published topics
 ----------------
 /mavros/global_position/compass_hdg   std_msgs/Float64 (deg, 0 = North, CW)
+/mavros/global_position/global        sensor_msgs/NavSatFix (~5 Hz, synthetic)
 /mavros/imu/data                      sensor_msgs/Imu  (orientation + ang vel)
 /mavros/local_position/pose           geometry_msgs/PoseStamped
+
+The NavSatFix is synthesized from the ENU odom position about the
+``sim_origin_lat`` / ``sim_origin_lon`` parameters (equirectangular
+inverse) and throttled to ~5 Hz, matching the field GPS rate. It exists
+so the BlueBoat GCS's GPS-anchored map can anchor against the simulator
+exactly as it does against the real boat.
 """
 
 from __future__ import annotations
 
+import math
+
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from nav_msgs.msg import Odometry
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import Imu
+from rclpy.qos import QoSPresetProfiles
+from sensor_msgs.msg import Imu, NavSatFix, NavSatStatus
 from std_msgs.msg import Float64
 
 from ..core.geometry import enu_yaw_to_compass_deg, quat_to_rpy
+
+EARTH_RADIUS_M = 6378137.0
+GPS_RATE_HZ = 5.0
 
 
 class MavrosShimNode(Node):
     def __init__(self) -> None:
         super().__init__("mavros_shim")
         self.declare_parameter("odom_topic", "/blueboat/odom")
+        # Geographic position of the ENU world origin (defaults match
+        # the GCS's built-in simulator origin).
+        self.declare_parameter("sim_origin_lat", 43.6961)
+        self.declare_parameter("sim_origin_lon", 7.3080)
 
         self._hdg_pub = self.create_publisher(
             Float64, "/mavros/global_position/compass_hdg", 10)
         self._imu_pub = self.create_publisher(Imu, "/mavros/imu/data", 10)
         self._pose_pub = self.create_publisher(
             PoseStamped, "/mavros/local_position/pose", 10)
+        # `sss_processor_node` subscribes this to fill GLOBAL_POSITION_INT's
+        # vx/vy in every .svlog it writes. Nothing published it in
+        # simulation, so every simulated recording reported a stationary
+        # boat -- measured 2026-09-19 on sessions/beach_sim: 0.000 m/s on
+        # all 1480 fixes, over a track 191 m long. Anything downstream that
+        # scales a waterfall row by the reported speed degraded on
+        # simulated data and on it alone.
+        self._vel_pub = self.create_publisher(
+            TwistStamped, "/mavros/local_position/velocity_local", 10)
+        # Real mavros publishes NavSatFix as sensor data (BEST_EFFORT).
+        self._fix_pub = self.create_publisher(
+            NavSatFix, "/mavros/global_position/global",
+            QoSPresetProfiles.SENSOR_DATA.value)
+        self._last_fix_stamp = -1e18
 
+        # The whole node is driven by this subscription -- without it every
+        # publisher above stays silent (that exact regression shipped once).
         self.create_subscription(
-            Odometry, self.get_parameter("odom_topic").value, self._on_odom, 10)
+            Odometry, str(self.get_parameter("odom_topic").value),
+            self._on_odom, 10)
 
     def _on_odom(self, msg: Odometry) -> None:
         q = msg.pose.pose.orientation
@@ -63,14 +98,50 @@ class MavrosShimNode(Node):
         pose.pose = msg.pose.pose
         self._pose_pub.publish(pose)
 
+        # `/blueboat/odom` carries the twist in the body frame
+        # (child_frame_id base_link); mavros publishes velocity_local in the
+        # world frame, so rotate it by the yaw before handing it on.
+        vel = TwistStamped()
+        vel.header = msg.header
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        vx_b = float(msg.twist.twist.linear.x)
+        vy_b = float(msg.twist.twist.linear.y)
+        vel.twist.linear.x = cy * vx_b - sy * vy_b
+        vel.twist.linear.y = sy * vx_b + cy * vy_b
+        vel.twist.linear.z = float(msg.twist.twist.linear.z)
+        vel.twist.angular = msg.twist.twist.angular
+        self._vel_pub.publish(vel)
+
+        self._maybe_publish_fix(msg)
+
+    def _maybe_publish_fix(self, msg: Odometry) -> None:
+        """~5 Hz synthetic NavSatFix from the ENU position (see docstring)."""
+        stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if stamp - self._last_fix_stamp < 1.0 / GPS_RATE_HZ:
+            return
+        self._last_fix_stamp = stamp
+        lat0 = float(self.get_parameter("sim_origin_lat").value)
+        lon0 = float(self.get_parameter("sim_origin_lon").value)
+        east = float(msg.pose.pose.position.x)
+        north = float(msg.pose.pose.position.y)
+        fix = NavSatFix()
+        fix.header = msg.header
+        fix.status.status = NavSatStatus.STATUS_FIX
+        fix.status.service = NavSatStatus.SERVICE_GPS
+        fix.latitude = lat0 + math.degrees(north / EARTH_RADIUS_M)
+        fix.longitude = lon0 + math.degrees(
+            east / (EARTH_RADIUS_M * math.cos(math.radians(lat0))))
+        fix.altitude = 0.0
+        self._fix_pub.publish(fix)
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = MavrosShimNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass   # Ctrl-C, or a launch teardown (rclpy's own SIGINT handler)
     finally:
         node.destroy_node()
         if rclpy.ok():

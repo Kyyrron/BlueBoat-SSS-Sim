@@ -1,0 +1,29 @@
+# Sea situation `field_matched` (R3, session 03, written 2026-11-16 13:05): the fitted sea of the 2026-09-07 FIT runs
+# (field statistics FIT only). Mean wind 4.48 m/s from 30 deg (all three mean signatures, 03_sea_state/tools/mean_joint.py), waves Hs 0.068 m
+# (straight-leg roll, Batch 1a), fluctuating disturbance: form 'iso' (MISS: no form within +-25 % for every controller; the closer admissible form), best fit {"yaw_moment_std_nm": 0.9913910890153973, "yaw_moment_tau_s": 0.4340420280408169}.
+# The plant's thrust asymmetry a = -0.228 is NOT part of the sea: launch with thrust_gain:=[0.3805,0.6055] (Control R-10).
+# PROVISIONAL until Batch 2 part B (owner, 2026-11-16: waits for Control's diagnosis of the controller spread, CR-03-2).
+# Evidence: ~/ros2_ws/sim_runs/sim_acceptance/03_sea_state/handoff_03.md.
+format: blueboat_sea_schedule/1
+name: field_matched
+seed: 0
+interpolation: hold
+keyframes:
+- t_s: 0.0
+  current:
+    preset: none
+  waves:
+    hs_m: 0.0679
+    tp_s: 0.938
+    from_deg: 30.0
+    crest: short
+    wakes: none
+  wind:
+    speed_mps: 4.476
+    from_deg: 30.0
+    gust_intensity: 0.0
+    gust_tau_s: 2.0
+    gust_dir_deg: 0.0
+  yaw_moment:
+    std_nm: 0.9914
+    tau_s: 0.434

@@ -1,0 +1,38 @@
+# Example campaign for the World Builder's headless generator (blueboat_campaign/1):
+#
+#   python3 -m blueboat_sss_sim.worldgen.campaign --spec config/campaign_example.yaml --seeds 1,2,3 --out ~/worlds
+#   (installed: worldgen_campaign --spec ... --seeds ... --out ...)
+#
+# One world per (case, seed) at <out>/<path name>/<name>-<case>-s<seed>/; nothing is overwritten.
+# Every key under `defaults` is a condition variable of E4; a case overrides any of them.
+# Meaning, sources and [DESIGN] values: docs/seabed_model.md par. 9-11, docs/configuration_guide.md par. 4.
+format: blueboat_campaign/1
+name: e4_example
+path: Shiraishijima_lawnmower          # an MCS Pattern Designer trajectory with a GPS anchor (a name or a file)
+world: {margin_m: 25, resolution_m: 0.10}   # limits = the path's bounding box + margin; at most 150 m a side
+defaults:
+  depth_band_m: [6.0, 8.0]             # floor depth at the centre, drawn in the band (domain: 5.0-11.0 m)
+  grade_max: 0.008                     # largest floor grade [m/m]
+  basin: {quays: 2, pontoon: true, mooring_blocks: 1}
+  sediment: {reference: sand, finer: soft_mud, coarser: gravel, heterogeneity: nominal}   # R2: low | nominal | high
+  clutter: nominal                     # small litter and cobbles: none | low | nominal | high
+  objects:
+    set: v2
+    composition: realistic             # realistic | balanced
+    density_per_ha: 10                 # 2 | 10 | 30, or sparse | nominal | dense
+    target_share: 0.5
+    burial: nominal                    # low | nominal | high
+    fouling: [0.2, 1.0]                # one value per world, for the sonar's `fouling` parameter
+    hotspots: {decay_m: 15, share_within_30m: 0.7}
+    min_target_spacing_m: 3.0
+  face_geometry: new                   # new | used | a share of used objects in [0, 1]
+  uncertain_materials: nominal         # R6: low | nominal | high
+run:                                   # recorded with each world, not used by the generator
+  sonar_profile: raycast_harbour_fast
+  sea_state: calm
+  sim_config: field_equivalent
+cases:
+  - {name: sparse_low, objects: {density_per_ha: 2}, sediment: {heterogeneity: low}, basin: {quays: 1}}
+  - {name: nominal}
+  - {name: dense_high, objects: {density_per_ha: 30}, sediment: {heterogeneity: high}, basin: {quays: 3}}
+validation_instances: []               # e.g. [{class: plastic_box, variant: nafco_68l}]

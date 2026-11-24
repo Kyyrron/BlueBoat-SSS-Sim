@@ -1,0 +1,147 @@
+# Seabed recipes for the World Builder's Depth & seabed screen: layer
+# stacks with literature defaults, laid over whatever depth source is
+# selected. Geometry is written in the unit square of the world-limits
+# rectangle (u east 0..1, v north 0..1; *_frac radii scale with the
+# rectangle's shorter side). References: docs/seabed_model.md.
+format: blueboat_seabed_recipes/1
+recipes:
+  fishing_port_basin:
+    label: Fishing-port basin
+    consequence: A flat dredged floor at a round design depth, faint dredge ridges, silt and mud thickening away from the entrance, a scour hole at the berth.
+    reference: "[24] JFA 2023; [26] USACE CEM V-5; [30] Winterwerp 2005; [31] Boyd et al. 2005; [29] Mujal-Colilles et al. 2017"
+    layers:
+      - kind: basin
+        name: Dredged basin
+        geometry: {type: polygon, points_uv: [[0.12, 0.12], [0.88, 0.12], [0.88, 0.88], [0.12, 0.88]]}
+        params: {floor_depth: 3.5, overdredge_m: 0.3, rim_slope: 3.0, relief_m: 0.12, relief_spacing_m: 4.0, relief_heading_deg: 0.0, feather_m: 1.5}
+      - kind: siltation
+        name: Silt from the entrance
+        geometry: {type: polyline, points_uv: [[0.35, 0.0], [0.65, 0.0]]}
+        params: {shoal_m: 0.5, length_m: 60.0, profile: smoothstep, side: left, material_enabled: true, near_material: sand, far_material: mud}
+      - kind: hole
+        name: Berth scour
+        geometry: {type: ellipse, centre_uv: [0.22, 0.5], rx_frac: 0.07, ry_frac: 0.035, angle_deg: 0.0}
+        params: {depth_m: 1.2, profile: gaussian, rim_m: 0.1, lag_material: true, material: gravel}
+      - kind: furrows
+        name: Dredge furrows
+        mask: {kind: polygon, points_uv: [[0.12, 0.12], [0.88, 0.12], [0.88, 0.88], [0.12, 0.88]], feather_m: 2.0}
+        params: {spacing_m: 4.0, depth_m: 0.12, width_m: 1.2, heading_deg: 0.0, jitter: 0.2}
+      - kind: ripples
+        name: Current ripples
+        mask: {kind: polygon, points_uv: [[0.12, 0.12], [0.88, 0.12], [0.88, 0.88], [0.12, 0.88]], feather_m: 2.0}
+        params: {wavelength_m: 0.5, height_m: 0.04, heading_deg: 90.0, asymmetry: 0.4, irregularity: 0.5}
+  marina:
+    label: Marina basin
+    consequence: A shallow flat basin floor of dark mud with scour pits where the piles stand and a sand tongue at the entrance.
+    reference: "[24] JFA 2023; [23] Canal & River Trust; [30] Winterwerp 2005; [29] Mujal-Colilles et al. 2017"
+    layers:
+      - kind: basin
+        name: Marina floor
+        geometry: {type: polygon, points_uv: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]}
+        params: {floor_depth: 2.5, overdredge_m: 0.2, rim_slope: 3.0, relief_m: 0.05, feather_m: 1.0}
+      - kind: material_region
+        name: Mud floor
+        mask: {kind: polygon, points_uv: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]], feather_m: 3.0}
+        params: {material: mud, edge: dithered}
+      - kind: siltation
+        name: Sand at the entrance
+        geometry: {type: polyline, points_uv: [[0.4, 0.0], [0.6, 0.0]]}
+        params: {shoal_m: 0.2, length_m: 25.0, profile: exp, side: left, material_enabled: true, near_material: sand, far_material: mud}
+      - kind: pits
+        name: Pile scour pits
+        params: {density_per_100m2: 0.3, depth_m: 0.3, radius_m: 1.0}
+      - kind: ripples
+        name: Fine wave ripples
+        mask: {kind: polygon, points_uv: [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]], feather_m: 3.0}
+        params: {wavelength_m: 0.35, height_m: 0.025, heading_deg: 0.0, asymmetry: 0.1, irregularity: 0.6}
+  river_reach:
+    label: River reach (meandering)
+    consequence: A dark deep band swinging to the outer bank of each bend, coarse lag in it, pale point bars opposite, dunes marching down the channel.
+    reference: "[13] Leopold & Wolman 1957; [14] Keller & Melhorn 1978; [16] Ahmed et al. 2024; [19] Ashley 1990; [20] van Rijn 1984"
+    layers:
+      - kind: channel
+        name: Channel
+        geometry: {type: polyline, points_uv: [[0.0, 0.5], [0.25, 0.32], [0.5, 0.68], [0.75, 0.32], [1.0, 0.5]]}
+        params: {template: asymmetric, width_m: 25.0, depth_m: 4.0, bank_depth_m: 0.3, thalweg_frac: 0.5, pool_spacing_w: 6.0, pool_amplitude_m: 0.6, feather_m: 3.0, lag_material: true, thalweg_material: gravel, bar_material: sand}
+      - kind: dunes
+        name: Dunes in the channel
+        mask: {kind: polyline_band, points_uv: [[0.0, 0.5], [0.25, 0.32], [0.5, 0.68], [0.75, 0.32], [1.0, 0.5]], width_m: 18.0, feather_m: 3.0}
+        params: {wavelength_m: 12.0, height_m: 0.0, heading_deg: 90.0, asymmetry: 0.6, irregularity: 0.5}
+  navigation_canal:
+    label: Navigation canal
+    consequence: A flat trapezoidal channel of dark silt with brighter sloping banks either side.
+    reference: "[22] Rijkswaterstaat 2020; [23] Canal & River Trust; [26] USACE CEM V-5"
+    layers:
+      - kind: channel
+        name: Canal
+        geometry: {type: polyline, points_uv: [[0.0, 0.5], [1.0, 0.5]]}
+        params: {template: trapezoid, width_m: 40.0, depth_m: 4.0, bank_depth_m: 0.3, side_slope: 3.0, pool_amplitude_m: 0.0, feather_m: 2.0}
+      - kind: material_region
+        name: Silt bed
+        mask: {kind: polyline_band, points_uv: [[0.0, 0.5], [1.0, 0.5]], width_m: 34.0, feather_m: 4.0}
+        params: {material: mud, edge: dithered}
+      - kind: ripples
+        name: Current ripples
+        params: {wavelength_m: 0.6, height_m: 0.05, heading_deg: 90.0, asymmetry: 0.5, irregularity: 0.4}
+  sheltered_beach:
+    label: Sheltered beach (low energy)
+    consequence: A steep narrow Dean profile from the shore with a small swash step, no bar, fine ripples, sand fining to mud offshore.
+    reference: "[1] Bruun 1954; [2] Dean 1991; [8] Jackson et al. 2002; [9] Wiberg & Harris 1994; [5] Wright & Short 1984"
+    layers:
+      - kind: gradient
+        name: Beach profile (Dean)
+        geometry: {type: polyline, points_uv: [[0.0, 0.0], [0.0, 1.0]]}
+        params: {profile: dean, depth_start: -0.3, depth_end: 8.0, dean_A: 0.12, side: right}
+      - kind: shelf
+        name: Swash step
+        geometry: {type: polyline, points_uv: [[0.06, 0.0], [0.06, 1.0]]}
+        params: {step_m: 0.3, width_m: 2.0, deep_side: right}
+      - kind: ripples
+        name: Wave ripples
+        params: {wavelength_m: 0.45, height_m: 0.04, heading_deg: 90.0, asymmetry: 0.2, irregularity: 0.4}
+      - kind: material_gradient
+        name: Sand to mud offshore
+        geometry: {type: polyline, points_uv: [[0.0, 0.0], [0.0, 1.0]]}
+        params: {material_from: sand, material_to: mud, length_m: 120.0, profile: smoothstep, side: right}
+  open_beach:
+    label: Open beach (intermediate, barred)
+    consequence: A Dean profile with a bright shore-parallel bar and dark trough, cut by rip channels, ripples across the shoreface.
+    reference: "[2] Dean 1991; [5] Wright & Short 1984; [6] Holman et al. 2014; [7] Short 1985; [9] Wiberg & Harris 1994"
+    layers:
+      - kind: gradient
+        name: Beach profile (Dean)
+        geometry: {type: polyline, points_uv: [[0.0, 0.0], [0.0, 1.0]]}
+        params: {profile: dean, depth_start: -0.3, depth_end: 12.0, dean_A: 0.10, side: right}
+      - kind: bar
+        name: Bar, trough and rips
+        geometry: {type: polyline, points_uv: [[0.0, 0.0], [0.0, 1.0]]}
+        params: {side: right, distance_m: 45.0, height_m: 0.7, width_m: 8.0, trough_m: 0.3, rip_spacing_m: 150.0, rip_width_m: 15.0}
+      - kind: ripples
+        name: Wave ripples
+        params: {wavelength_m: 0.6, height_m: 0.07, heading_deg: 90.0, asymmetry: 0.3, irregularity: 0.5}
+      - kind: material_gradient
+        name: Cross-shore sorting
+        geometry: {type: polyline, points_uv: [[0.0, 0.0], [0.0, 1.0]]}
+        params: {material_from: gravel, material_to: sand, length_m: 30.0, profile: smoothstep, side: right}
+  tidal_flat:
+    label: Tidal flat with a creek
+    consequence: An almost flat dark mud floor sloping imperceptibly seaward, cut by a meandering creek, dotted with burrows.
+    reference: "[11] Friedrichs 2011; [13] Leopold & Wolman 1957; [33] Jackson & Richardson 2007"
+    layers:
+      - kind: gradient
+        name: Flat gradient
+        geometry: {type: polyline, points_uv: [[0.0, 0.0], [0.0, 1.0]]}
+        params: {profile: linear, depth_start: -0.5, depth_end: 1.5, length_m: 800.0, side: right}
+      - kind: channel
+        name: Tidal creek
+        geometry: {type: polyline, points_uv: [[0.0, 0.45], [0.3, 0.6], [0.6, 0.4], [1.0, 0.55]]}
+        params: {template: parabola, width_m: 6.0, depth_m: 1.2, bank_depth_m: 0.0, pool_amplitude_m: 0.0, feather_m: 1.0}
+      - kind: material_region
+        name: Mud
+        params: {material: mud, edge: dithered}
+      - kind: pits
+        name: Burrows
+        params: {density_per_100m2: 1.0, depth_m: 0.08, radius_m: 0.3}
+      - kind: ripples
+        name: Tidal ripples
+        params: {wavelength_m: 0.4, height_m: 0.035, heading_deg: 0.0, asymmetry: 0.3, irregularity: 0.5}

@@ -1,0 +1,948 @@
+# Parameters of the harbour population model: every number, with its tag, bracket and sources.
+#
+# A PARAMETER is a mapping with the keys `value` and `tag` (and `bracket`, `sources`, `used_by`, `note`).
+# Tags: REF     read in a source (the source key says which; how it was read is in docs/population/EVIDENCE.md)
+#       DERIVED computed from referenced values (the computation is in `note` or in EVIDENCE.md)
+#       DESIGN  a modelling choice: a default with a bracket and a reason, never a measurement
+#       CHECK   not verified
+#       FROZEN  a value of the frozen simulator, copied here (a test compares it with the simulator's)
+# `sources` are the keys of docs/population/EVIDENCE.md, section "References" (R1-R27: the companion's numbering,
+# re-read on 2026-11-21; R28 on: found by this session; TD the targets document; HD the harbours document through
+# the companion; FRZ the frozen simulator; S02 the simulator's session-02 code; MODEL this model's own statistics).
+# `used_by` names the function that reads the parameter (module.function of this package).
+#
+# Class order everywhere: plastic_box (T1), drum_200l (T2), concrete_block (T3), trap_pot (T4),
+# pipe_steel (T5), tire_car (T6), net_bundle (T7); debris is C1.
+format: blueboat_population_parameters/1
+
+# ------------------------------------------------------------------------------------------------ density
+levels:
+  density_per_ha:
+    # mean density of sonar-size litter (targets + debris; no structures, no small litter) in the active
+    # band, for the density level 1..10: 10^((s-1)/4) up to 5, 10 * 10^((s-5)/5) from 5
+    value: {1: 1.0, 2: 1.78, 3: 3.16, 4: 5.62, 5: 10.0, 6: 15.8, 7: 25.1, 8: 39.8, 9: 63.1, 10: 100.0}
+    tag: DESIGN
+    bracket: "level 5: 5.9 to 13.9 per ha (geometric means of the documented basins); level 10: 30 to 500 per ha"
+    sources: [R1, R2, R3, R4, R20, R22, R18, R32, R33, TD]
+    used_by: sources.level_density
+    note: "anchors in EVIDENCE.md section 2: level 1 ~ Port Gardner after removals and the never-cleaned UK harbour
+      surveys (0.2-2 per ha); level 5 = the targets document's nominal 10 per ha (Venice Grand Canal 11.6);
+      Thessaloniki 25 (sonar-size) to 29 per ha between levels 7 and 8; Plymouth Sound tyres 17.6 per ha over its
+      densest 9 ha; Pomos fender shelter ~500 tyres per ha over a 0.36 ha basin (a quay-bound extreme: level 10
+      with a fender line's activity raised)"
+  group_chance:
+    # chance that an emission event is a group (where the source has a group process)
+    value: {1: 0.05, 2: 0.08, 3: 0.10, 4: 0.13, 5: 0.16, 6: 0.19, 7: 0.22, 8: 0.24, 9: 0.27, 10: 0.30}
+    tag: DESIGN
+    bracket: "0 to 0.5"
+    sources: [R18, R3, R15]
+    used_by: sources.group_chance
+    note: "neglected harbours have piles and tyre lines, cleaned ones do not. Checks: 35 % of the 936 mapped tyres of
+      Plymouth Sound have a neighbour within 5 m (groups up to 15); 37 % of the Port Angeles West pots one within
+      10 m (R3 Appendix 2)"
+  small_litter_per_m2:
+    # hard small litter of 0.1 to 0.4 m (the frozen `small_litter` seabed layer), world mean
+    value: {1: 0.010, 2: 0.016, 3: 0.024, 4: 0.038, 5: 0.060, 6: 0.092, 7: 0.14, 8: 0.21, 9: 0.33, 10: 0.50}
+    tag: DESIGN
+    bracket: "0.01 to 0.5 (the frozen R2 clutter presets low and high)"
+    sources: [R12, R11, FRZ]
+    used_by: sources.small_litter_density
+    note: "levels 1, 5, 10 = the frozen presets low, nominal, high (campaign.CLUTTER); geometric between. Ratio to
+      the sonar-size density: 60 at level 5; 16 to 28 measured in the Krk anchorage (R11)"
+  retention:
+    # share of the planned objects that the 3 m spacing rule leaves, measured on the reference basins
+    # (Part 4 statistics); the model divides its intensities by it
+    value: {1: 0.98, 2: 0.98, 3: 0.98, 4: 0.98, 5: 0.98, 6: 0.955, 7: 0.93, 8: 0.905, 9: 0.88, 10: 0.855}
+    tag: DERIVED
+    bracket: "0.6 to 1.0"
+    sources: [MODEL]
+    used_by: sources.retention
+    note: "realised over asked density in the active band, mean of the six named profiles over 200 seeds x 12
+      campaign basins (worldgen_v11/stats, passes 1 and 2): 0.98 up to level 5, 0.855 at level 10, linear between;
+      the profiles spread about it by up to +-0.09 at level 10 (groups need more room)"
+
+active_band_m:
+  value: 50.0
+  tag: DESIGN
+  bracket: "30 to 100"
+  sources: [TD]
+  used_by: sources.active_band
+  note: "water within this distance of a source feature is the band that the level's density refers to"
+
+far_field_share:
+  value: 0.02
+  tag: DESIGN
+  bracket: "0.005 to 0.10"
+  sources: [R2]
+  used_by: sources.far_field
+  note: "density outside the active band over the level's density; Venice lagoon-wide over Grand Canal = 0.0065"
+
+point_reach_m:
+  value: 15.0
+  tag: DESIGN
+  bracket: "10 to 30"
+  sources: [R10, R40]
+  used_by: sources.reach_m
+  note: "a point feature (a mooring block, an outlet) owns the water within this distance"
+
+dominating_per_ha:
+  value: 600.0
+  tag: DESIGN
+  bracket: "fixed"
+  sources: [MODEL]
+  used_by: sampling.candidates
+  note: "candidates are drawn at this density over a source's reach and thinned; a level or a share is a subset"
+
+# ------------------------------------------------------------------------------------------------ envelope
+envelope:
+  altitude_m:
+    value: [4.5, 7.0]
+    tag: FROZEN
+    sources: [FRZ]
+    used_by: model.allowed_mask
+    note: "SIM_VALIDITY_CONDITIONS.md section 2"
+  heave_margin_m:
+    value: 0.10
+    tag: FROZEN
+    sources: [FRZ]
+    used_by: model.allowed_mask
+    note: "worldgen/domain.py HEAVE_MARGIN_M"
+  border_m:
+    value: 2.0
+    tag: FROZEN
+    sources: [FRZ]
+    used_by: model.allowed_mask
+    note: "no object within 2 m of the world's limits (campaign.plan_world)"
+
+spacing:
+  target_m:
+    value: 3.0
+    tag: DESIGN
+    bracket: "2 to 5"
+    sources: [TD]
+    used_by: sampling.hard_core
+    note: "between singles and between groups, so that two echoes do not merge"
+  other_m:
+    value: 1.0
+    tag: FROZEN
+    sources: [FRZ]
+    used_by: sampling.hard_core
+    note: "debris to anything (population.populate)"
+  clearance_m:
+    value: 0.3
+    tag: FROZEN
+    sources: [FRZ]
+    used_by: sampling.hard_core
+    note: "gap between two footprints, and between a footprint and a wall or a structure"
+
+# ------------------------------------------------------------------------------------------------ sources
+# A source tag: what a feature is used for. `emits`: relative emission of each class (0 = never);
+# `debris`: relative emission of debris; `kernel`: where its objects lie, as a density per unit area against
+# the distance to the feature: a `near` part (shape and scale) holding 1 - broad_share of the objects and a
+# flat part over the active band holding broad_share; `groups`: the group processes it has, each with the
+# class it groups and its weight in the group chance.
+tags:
+  fender_line:
+    label: {value: "Fender line (boats berthed against tyre fenders)", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.3, drum_200l: 0.05, concrete_block: 0.1, trap_pot: 0.1, pipe_steel: 0.05,
+              tire_car: 1.0, net_bundle: 0.3}
+      tag: DESIGN
+      bracket: "tyres dominant"
+      sources: [R22, R23, R24]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: DESIGN, bracket: "0.2 to 1", sources: [R22], used_by: sources.target_share}
+    kernel:
+      value: {near: half_normal, scale_m: 3.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "scale 2 to 4 m; broad share 0.1 to 0.4"
+      sources: [R22, R24]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.6, spots_per_100m: 1.5, sigma_m: 6.0}
+      tag: DESIGN
+      bracket: "share 0.3 to 0.8; 1 to 3 spots per 100 m; sigma 3 to 12 m"
+      sources: [R18, R3, R32]
+      used_by: sources.patch_field
+      note: "litter is lost at particular berths: all six man-made sonar targets of St Mary's Harbour lie in one
+      47 x 43 m patch at the quay head (R32); the share and the spot spacing are checked against the measured
+      patterns (EVIDENCE.md section 4)"
+    groups:
+      value: {tyre_line: {class: tire_car, weight: 1.0}}
+      tag: DESIGN
+      sources: [R22, R24]
+      used_by: groups.processes
+  urban_quay:
+    label: {value: "City quay, promenade or bridge", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.5, drum_200l: 0.1, concrete_block: 0.2, trap_pot: 1.0, pipe_steel: 0.2,
+              tire_car: 0.6, net_bundle: 0.2}
+      tag: DESIGN
+      bracket: "lattice items (bicycles, scooters, trolleys) dominant: 90 % of the large items in Copenhagen"
+      sources: [R19, R20]
+      used_by: sources.tag_mix
+    debris: {value: 1.0, tag: DESIGN, bracket: "0.5 to 2", sources: [R21], used_by: sources.target_share}
+    kernel:
+      value: {near: bump, mode_m: 3.0, scale_m: 3.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "0 to 10 m from the wall, mode at 2 to 4 m"
+      sources: [R19, R20]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.6, spots_per_100m: 1.5, sigma_m: 6.0}
+      tag: DESIGN
+      bracket: "share 0.3 to 0.8; 1 to 3 spots per 100 m; sigma 3 to 12 m"
+      sources: [R18, R3, R32]
+      used_by: sources.patch_field
+      note: "litter is lost at particular berths: all six man-made sonar targets of St Mary's Harbour lie in one
+      47 x 43 m patch at the quay head (R32); the share and the spot spacing are checked against the measured
+      patterns (EVIDENCE.md section 4)"
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+    stand_in:
+      # trap_pot instances of this source stand for lattice objects the object set lacks
+      value: {trap_pot: {share: 1.0, of: {bicycle: 0.63, e_scooter: 0.37}}}
+      tag: DERIVED
+      bracket: "share 0.8 to 1"
+      sources: [R19]
+      used_by: instances.stand_in
+      note: "Copenhagen 2020: 299 bicycles and 178 e-scooters among the lattice items = 0.63 / 0.37"
+  working_quay:
+    label: {value: "Working quay, shipyard or crane berth", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.2, drum_200l: 0.5, concrete_block: 0.8, trap_pot: 0.1, pipe_steel: 1.0,
+              tire_car: 0.6, net_bundle: 0.3}
+      tag: DESIGN
+      bracket: "metal pieces, wires, tyres, blocks"
+      sources: [R1, R8, R10]
+      used_by: sources.tag_mix
+    debris: {value: 1.5, tag: DESIGN, bracket: "1 to 3", sources: [R8, R21], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 15.0, broad_share: 0.3}
+      tag: DESIGN
+      bracket: "scale 10 to 20 m"
+      sources: [R1, R8]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.6, spots_per_100m: 1.5, sigma_m: 6.0}
+      tag: DESIGN
+      bracket: "share 0.3 to 0.8; 1 to 3 spots per 100 m; sigma 3 to 12 m"
+      sources: [R18, R3, R32]
+      used_by: sources.patch_field
+      note: "litter is lost at particular berths: all six man-made sonar targets of St Mary's Harbour lie in one
+      47 x 43 m patch at the quay head (R32); the share and the spot spacing are checked against the measured
+      patterns (EVIDENCE.md section 4)"
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  fishing_berth:
+    label: {value: "Fishing berth", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.8, drum_200l: 0.1, concrete_block: 0.2, trap_pot: 1.0, pipe_steel: 0.1,
+              tire_car: 0.5, net_bundle: 1.0}
+      tag: DESIGN
+      bracket: "traps, nets, crates, some tyres"
+      sources: [TD, R15]
+      used_by: sources.tag_mix
+    debris: {value: 0.7, tag: DESIGN, bracket: "0.3 to 1.5", sources: [TD], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 12.0, broad_share: 0.3}
+      tag: DESIGN
+      bracket: "scale 10 to 15 m"
+      sources: [TD]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.6, spots_per_100m: 1.5, sigma_m: 6.0}
+      tag: DESIGN
+      bracket: "share 0.3 to 0.8; 1 to 3 spots per 100 m; sigma 3 to 12 m"
+      sources: [R18, R3, R32]
+      used_by: sources.patch_field
+      note: "litter is lost at particular berths: all six man-made sonar targets of St Mary's Harbour lie in one
+      47 x 43 m patch at the quay head (R32); the share and the spot spacing are checked against the measured
+      patterns (EVIDENCE.md section 4)"
+    groups:
+      value: {gear_ball: {class: trap_pot, weight: 0.5}, tyre_line: {class: tire_car, weight: 0.5}}
+      tag: DESIGN
+      sources: [R15, R22]
+      used_by: groups.processes
+  marina_pontoon:
+    label: {value: "Marina pontoon or finger", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.6, drum_200l: 0.05, concrete_block: 0.3, trap_pot: 0.1, pipe_steel: 0.1,
+              tire_car: 0.6, net_bundle: 1.0}
+      tag: DESIGN
+      bracket: "ropes and textiles about 42 % of the litter by count in sport-boat marinas"
+      sources: [R12, R21]
+      used_by: sources.tag_mix
+    debris: {value: 0.7, tag: DESIGN, bracket: "0.3 to 1.5", sources: [R21], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 7.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "scale 5 to 10 m"
+      sources: [R12, R21]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.6, spots_per_100m: 1.5, sigma_m: 6.0}
+      tag: DESIGN
+      bracket: "share 0.3 to 0.8; 1 to 3 spots per 100 m; sigma 3 to 12 m"
+      sources: [R18, R3, R32]
+      used_by: sources.patch_field
+      note: "litter is lost at particular berths: all six man-made sonar targets of St Mary's Harbour lie in one
+      47 x 43 m patch at the quay head (R32); the share and the spot spacing are checked against the measured
+      patterns (EVIDENCE.md section 4)"
+    groups: {value: {tyre_line: {class: tire_car, weight: 0.3}}, tag: DESIGN, used_by: groups.processes}
+  mooring_block:
+    label: {value: "Mooring block or buoy sinker", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.1, drum_200l: 0.05, concrete_block: 0.6, trap_pot: 0.6, pipe_steel: 0.1,
+              tire_car: 0.2, net_bundle: 0.8}
+      tag: DESIGN
+      bracket: "dropped blocks, cut gear, lines"
+      sources: [R9, R10, R15]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: DESIGN, bracket: "0.2 to 1", sources: [R10], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 5.0, broad_share: 0.1}
+      tag: DESIGN
+      bracket: "scale 3 to 10 m"
+      sources: [R10]
+      used_by: sources.kernel_profile
+    groups: {value: {gear_ball: {class: trap_pot, weight: 0.3}}, tag: DESIGN, used_by: groups.processes}
+  mooring_field:
+    label: {value: "Mooring field", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.1, drum_200l: 0.05, concrete_block: 0.6, trap_pot: 0.6, pipe_steel: 0.1,
+              tire_car: 0.2, net_bundle: 0.8}
+      tag: DESIGN
+      sources: [R10, R15]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: DESIGN, bracket: "0.2 to 1", sources: [R10], used_by: sources.target_share}
+    kernel:
+      value: {near: uniform, scale_m: 5.0, broad_share: 0.0}
+      tag: DESIGN
+      bracket: "uniform over the field, 0 to 10 m beyond it"
+      sources: [R10, R15]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.7, spots_per_ha: 1.0, sigma_m: 15.0}
+      tag: DESIGN
+      bracket: "share 0.4 to 0.9; 0.5 to 3 spots per ha; sigma 8 to 30 m"
+      sources: [R3, R30, R31]
+      used_by: sources.patch_field
+      note: "derelict pots are clustered: Clark-Evans ratio about 0.62 in Port Angeles Harbor West (R3 Appendix 2,
+      derived), 12x between polygons of the Mullica estuary (R31), 50x between North Carolina water bodies (R30)"
+    groups: {value: {gear_ball: {class: trap_pot, weight: 0.3}}, tag: DESIGN, used_by: groups.processes}
+  traffic_lane:
+    label: {value: "Traffic lane across a fishing ground", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.0, drum_200l: 0.0, concrete_block: 0.0, trap_pot: 1.0, pipe_steel: 0.0,
+              tire_car: 0.0, net_bundle: 0.2}
+      tag: DESIGN
+      bracket: "pots whose float lines were cut by traffic"
+      sources: [R3, R15]
+      used_by: sources.tag_mix
+    debris: {value: 0.1, tag: DESIGN, bracket: "0 to 0.5", sources: [R3], used_by: sources.target_share}
+    kernel:
+      value: {near: uniform, scale_m: 15.0, broad_share: 0.0}
+      tag: DESIGN
+      bracket: "half-width 10 to 30 m"
+      sources: [R3, R15]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.9, spots_per_100m: 1.0, sigma_m: 6.5}
+      tag: DERIVED
+      bracket: "share 0.85 to 0.95; spread 5 to 8 m"
+      sources: [R3, R15]
+      used_by: sources.patch_field
+      note: "fitted with the fishing ground (the same pots; lanes are where traffic cut their lines)"
+    groups: {value: {trap_pair: {class: trap_pot, weight: 0.5}}, tag: DESIGN, used_by: groups.processes}
+  fishing_ground:
+    label: {value: "Fishing ground (pots, traps)", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.05, drum_200l: 0.0, concrete_block: 0.05, trap_pot: 1.0, pipe_steel: 0.0,
+              tire_car: 0.05, net_bundle: 0.3}
+      tag: DESIGN
+      sources: [R3, R4, R5]
+      used_by: sources.tag_mix
+    debris: {value: 0.2, tag: DESIGN, bracket: "0 to 0.5", sources: [R3], used_by: sources.target_share}
+    kernel:
+      value: {near: uniform, scale_m: 0.0, broad_share: 0.0}
+      tag: DESIGN
+      bracket: "uniform over the ground"
+      sources: [R3, R4, R5]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.9, spots_per_ha: 1.0, sigma_m: 6.5}
+      tag: DERIVED
+      bracket: "share 0.85 to 0.95; spread 5 to 8 m"
+      sources: [R3, R30, R31]
+      used_by: sources.patch_field
+      note: "fitted to the 206 mapped derelict pots of Port Angeles Harbor West (R3 Appendix 2; 1.34 per ha):
+        median nearest neighbour 17 m, 63 % single at 10 m, Clark-Evans 0.62; the fit gives 15 to 17 m, 0.65 to
+        0.73, 0.55 to 0.63 (worldgen_v11/stats/pot_patch_grid.txt)"
+    groups:
+      value: {trap_pair: {class: trap_pot, weight: 0.7}, gear_ball: {class: trap_pot, weight: 0.3}}
+      tag: DESIGN
+      sources: [R15, R17]
+      used_by: groups.processes
+  dumping_spot:
+    label: {value: "Dumping spot", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.3, drum_200l: 0.4, concrete_block: 0.3, trap_pot: 0.5, pipe_steel: 0.6,
+              tire_car: 1.0, net_bundle: 0.6}
+      tag: DESIGN
+      bracket: "tyres, steel scrap, net, rope, pots (one 60 m3 pile)"
+      sources: [R18]
+      used_by: sources.tag_mix
+    debris: {value: 1.5, tag: DESIGN, bracket: "1 to 3", sources: [R18], used_by: sources.target_share}
+    kernel:
+      value: {near: uniform, scale_m: 6.0, broad_share: 0.0}
+      tag: DESIGN
+      bracket: "radius 3 to 10 m"
+      sources: [R18]
+      used_by: sources.kernel_profile
+    activity:
+      value: 4.0
+      tag: DESIGN
+      bracket: "2 to 5"
+      sources: [R18]
+      used_by: sources.activity_of
+      note: "a dumping spot is a hot spot by nature (one pile of about 60 m3 on Whelan's Reef)"
+    groups: {value: {pile: {class: "*", weight: 3.0}}, tag: DESIGN, sources: [R18], used_by: groups.processes}
+  breakwater_toe:
+    label: {value: "Breakwater or rip-rap toe", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.1, drum_200l: 0.1, concrete_block: 0.8, trap_pot: 0.2, pipe_steel: 0.2,
+              tire_car: 0.3, net_bundle: 0.6}
+      tag: DESIGN
+      bracket: "rubble, snagged nets"
+      sources: [TD, R1]
+      used_by: sources.tag_mix
+    debris: {value: 1.5, tag: DESIGN, bracket: "1 to 3", sources: [TD, R1], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 7.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "scale 5 to 10 m"
+      sources: [R1]
+      used_by: sources.kernel_profile
+    patch:
+      value: {share: 0.6, spots_per_100m: 1.5, sigma_m: 6.0}
+      tag: DESIGN
+      bracket: "share 0.3 to 0.8; 1 to 3 spots per 100 m; sigma 3 to 12 m"
+      sources: [R18, R3, R32]
+      used_by: sources.patch_field
+      note: "litter is lost at particular berths: all six man-made sonar targets of St Mary's Harbour lie in one
+      47 x 43 m patch at the quay head (R32); the share and the spot spacing are checked against the measured
+      patterns (EVIDENCE.md section 4)"
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  outfall:
+    label: {value: "Outfall, drain or river mouth", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.3, drum_200l: 0.1, concrete_block: 0.1, trap_pot: 0.0, pipe_steel: 0.2,
+              tire_car: 0.3, net_bundle: 0.1}
+      tag: DESIGN
+      bracket: "wood is the main item there and is not in the object set"
+      sources: [R3, R9]
+      used_by: sources.tag_mix
+    debris: {value: 1.2, tag: DESIGN, bracket: "0.5 to 2", sources: [R9], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 30.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "scale 20 to 50 m"
+      sources: [R3, R9]
+      used_by: sources.kernel_profile
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  angling_pier:
+    label: {value: "Angling pier", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.2, drum_200l: 0.0, concrete_block: 0.1, trap_pot: 0.2, pipe_steel: 0.1,
+              tire_car: 0.4, net_bundle: 1.0}
+      tag: DESIGN
+      bracket: "lost line and nets"
+      sources: [R13, R18]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: DESIGN, bracket: "0.2 to 1", sources: [R18], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 5.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "scale 3 to 10 m"
+      sources: [R13, R18]
+      used_by: sources.kernel_profile
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  slipway:
+    label: {value: "Slipway", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.3, drum_200l: 0.1, concrete_block: 0.3, trap_pot: 0.1, pipe_steel: 0.2,
+              tire_car: 0.6, net_bundle: 0.4}
+      tag: DESIGN
+      sources: [R18]
+      used_by: sources.tag_mix
+    debris: {value: 0.8, tag: DESIGN, bracket: "0.3 to 1.5", sources: [R18], used_by: sources.target_share}
+    kernel:
+      value: {near: exponential, scale_m: 5.0, broad_share: 0.2}
+      tag: DESIGN
+      bracket: "scale 3 to 10 m"
+      sources: [R18]
+      used_by: sources.kernel_profile
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  # the six tags of the `generic` profile: the targets document's single-kernel model, with the class
+  # affinities of simulator session 02 (worldgen/population.py AFFINITY), one tag per kind of feature
+  generic_quay:
+    label: {value: "Generic hotspot: quay", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.3, drum_200l: 1.0, concrete_block: 1.0, trap_pot: 0.2, pipe_steel: 1.0,
+              tire_car: 1.0, net_bundle: 0.5}
+      tag: FROZEN
+      sources: [S02]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: FROZEN, sources: [S02], used_by: sources.target_share}
+    kernel: &generic_kernel
+      value: {near: exponential, scale_m: 15.0, broad_share: 0.3}
+      tag: DESIGN
+      bracket: "scale 5 to 40 m; 70 % of the objects within 30 m of a hotspot (0.5 to 0.9)"
+      sources: [TD]
+      used_by: sources.kernel_profile
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  generic_pontoon:
+    label: {value: "Generic hotspot: pontoon", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.5, drum_200l: 0.2, concrete_block: 0.2, trap_pot: 0.5, pipe_steel: 0.2,
+              tire_car: 0.5, net_bundle: 0.7}
+      tag: FROZEN
+      sources: [S02]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: FROZEN, sources: [S02], used_by: sources.target_share}
+    kernel: *generic_kernel
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  generic_mooring:
+    label: {value: "Generic hotspot: mooring", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.7, drum_200l: 0.2, concrete_block: 0.2, trap_pot: 1.0, pipe_steel: 0.2,
+              tire_car: 0.2, net_bundle: 1.0}
+      tag: FROZEN
+      sources: [S02]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: FROZEN, sources: [S02], used_by: sources.target_share}
+    kernel: *generic_kernel
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  generic_berth:
+    label: {value: "Generic hotspot: berth", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 1.0, drum_200l: 0.5, concrete_block: 0.5, trap_pot: 1.0, pipe_steel: 0.5,
+              tire_car: 0.5, net_bundle: 1.0}
+      tag: FROZEN
+      sources: [S02]
+      used_by: sources.tag_mix
+    debris: {value: 0.5, tag: FROZEN, sources: [S02], used_by: sources.target_share}
+    kernel: *generic_kernel
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  generic_outlet:
+    label: {value: "Generic hotspot: outlet", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.3, drum_200l: 0.3, concrete_block: 0.3, trap_pot: 0.0, pipe_steel: 0.3,
+              tire_car: 0.3, net_bundle: 0.0}
+      tag: FROZEN
+      sources: [S02]
+      used_by: sources.tag_mix
+    debris: {value: 0.7, tag: FROZEN, sources: [S02], used_by: sources.target_share}
+    kernel: *generic_kernel
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+  generic_breakwater:
+    label: {value: "Generic hotspot: breakwater", tag: DESIGN, used_by: card.legend}
+    emits:
+      value: {plastic_box: 0.0, drum_200l: 0.3, concrete_block: 0.3, trap_pot: 0.2, pipe_steel: 0.3,
+              tire_car: 0.3, net_bundle: 0.5}
+      tag: FROZEN
+      sources: [S02]
+      used_by: sources.tag_mix
+    debris: {value: 1.0, tag: FROZEN, sources: [S02], used_by: sources.target_share}
+    kernel: *generic_kernel
+    groups: {value: {}, tag: DESIGN, used_by: groups.processes}
+
+# ------------------------------------------------------------------------------------------------ profiles
+# A profile: the class weights of a harbour of that type, the share of targets among the sonar-size items,
+# the default use of each kind of feature, and the reference composition of sources for which the class
+# weights hold exactly (a harbour with other sources departs from them; the report shows by how much).
+profiles:
+  fishing_harbour:
+    label: {value: "Fishing harbour (small shelter, Mediterranean or Japanese type)", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 0.10, drum_200l: 0.02, concrete_block: 0.05, trap_pot: 0.10, pipe_steel: 0.03,
+              tire_car: 0.50, net_bundle: 0.20}
+      tag: DESIGN
+      bracket: "tyres 0.3 to 0.7"
+      sources: [R22, R23, R25]
+      used_by: sources.profile_mix
+    target_share: {value: 0.6, tag: DESIGN, bracket: "0.4 to 0.8", sources: [R22], used_by: sources.target_share}
+    kind_use:
+      value: {quay: fender_line, pontoon: fishing_berth, breakwater: breakwater_toe, berth: fishing_berth,
+              pier: angling_pier, slipway: slipway, outlet: outfall, mooring: mooring_block, pile: none,
+              area: mooring_field, lane: traffic_lane, point: dumping_spot}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference:
+      value: {fender_line: 0.5, fishing_berth: 0.3, breakwater_toe: 0.1, slipway: 0.1}
+      tag: DESIGN
+      used_by: sources.centred_affinity
+    typical_levels: {value: [5, 8], tag: DESIGN, sources: [R22, R23], used_by: card.note}
+  trap_harbour:
+    label: {value: "Trap harbour (lobster or crab)", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 0.05, drum_200l: 0.01, concrete_block: 0.04, trap_pot: 0.65, pipe_steel: 0.03,
+              tire_car: 0.07, net_bundle: 0.15}
+      tag: DESIGN
+      bracket: "traps 0.5 to 0.8"
+      sources: [R3, R4, R5, R15]
+      used_by: sources.profile_mix
+    target_share: {value: 0.7, tag: DESIGN, bracket: "0.5 to 0.9", sources: [R3], used_by: sources.target_share}
+    kind_use:
+      value: {quay: fishing_berth, pontoon: fishing_berth, breakwater: breakwater_toe, berth: fishing_berth,
+              pier: angling_pier, slipway: slipway, outlet: outfall, mooring: mooring_block, pile: none,
+              area: fishing_ground, lane: traffic_lane, point: dumping_spot}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference:
+      value: {fishing_ground: 0.4, traffic_lane: 0.2, fishing_berth: 0.25, mooring_block: 0.15}
+      tag: DESIGN
+      used_by: sources.centred_affinity
+    typical_levels: {value: [3, 6], tag: DESIGN, sources: [R3, R4], used_by: card.note}
+  city_harbour:
+    label: {value: "City harbour (city-centre quays, canals)", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 0.15, drum_200l: 0.02, concrete_block: 0.05, trap_pot: 0.35, pipe_steel: 0.05,
+              tire_car: 0.25, net_bundle: 0.13}
+      tag: DESIGN
+      bracket: "lattice items (as trap_pot stand-ins) 0.2 to 0.6"
+      sources: [R19, R20]
+      used_by: sources.profile_mix
+    target_share: {value: 0.6, tag: DESIGN, bracket: "0.4 to 0.8", sources: [R20], used_by: sources.target_share}
+    kind_use:
+      value: {quay: urban_quay, pontoon: marina_pontoon, breakwater: breakwater_toe, berth: urban_quay,
+              pier: urban_quay, slipway: slipway, outlet: outfall, mooring: mooring_block, pile: none,
+              area: mooring_field, lane: none, point: dumping_spot}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference:
+      value: {urban_quay: 0.7, marina_pontoon: 0.3}
+      tag: DESIGN
+      used_by: sources.centred_affinity
+    typical_levels: {value: [4, 8], tag: DESIGN, sources: [R2, R20], used_by: card.note}
+  marina:
+    label: {value: "Marina (sport boats)", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 0.15, drum_200l: 0.01, concrete_block: 0.10, trap_pot: 0.05, pipe_steel: 0.04,
+              tire_car: 0.35, net_bundle: 0.30}
+      tag: DESIGN
+      bracket: "ropes and nets 0.2 to 0.45"
+      sources: [R12, R21]
+      used_by: sources.profile_mix
+    target_share: {value: 0.5, tag: DESIGN, bracket: "0.3 to 0.7", sources: [R12], used_by: sources.target_share}
+    kind_use:
+      value: {quay: marina_pontoon, pontoon: marina_pontoon, breakwater: breakwater_toe, berth: marina_pontoon,
+              pier: angling_pier, slipway: slipway, outlet: outfall, mooring: mooring_block, pile: none,
+              area: mooring_field, lane: none, point: dumping_spot}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference:
+      value: {marina_pontoon: 0.7, mooring_block: 0.2, slipway: 0.1}
+      tag: DESIGN
+      used_by: sources.centred_affinity
+    typical_levels: {value: [2, 5], tag: DESIGN, sources: [R12], used_by: card.note}
+  working_port:
+    label: {value: "Working port (commercial quays, shipyard)", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 0.05, drum_200l: 0.05, concrete_block: 0.15, trap_pot: 0.05, pipe_steel: 0.25,
+              tire_car: 0.30, net_bundle: 0.15}
+      tag: DESIGN
+      bracket: "metal pieces and tyres dominant"
+      sources: [R1, R8, R10]
+      used_by: sources.profile_mix
+    target_share: {value: 0.4, tag: DESIGN, bracket: "0.2 to 0.6", sources: [R1, R8], used_by: sources.target_share}
+    kind_use:
+      value: {quay: working_quay, pontoon: working_quay, breakwater: breakwater_toe, berth: working_quay,
+              pier: working_quay, slipway: slipway, outlet: outfall, mooring: mooring_block, pile: none,
+              area: mooring_field, lane: none, point: dumping_spot}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference:
+      value: {working_quay: 0.7, breakwater_toe: 0.2, mooring_block: 0.1}
+      tag: DESIGN
+      used_by: sources.centred_affinity
+    typical_levels: {value: [5, 8], tag: DESIGN, sources: [R1], used_by: card.note}
+  generic:
+    label: {value: "Generic (the targets document's single-kernel model)", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 0.15, drum_200l: 0.05, concrete_block: 0.10, trap_pot: 0.15, pipe_steel: 0.10,
+              tire_car: 0.30, net_bundle: 0.15}
+      tag: DESIGN
+      sources: [TD]
+      used_by: sources.profile_mix
+    target_share: {value: 0.5, tag: DESIGN, bracket: "0.3 to 0.7", sources: [TD], used_by: sources.target_share}
+    kind_use:
+      value: {quay: generic_quay, pontoon: generic_pontoon, breakwater: generic_breakwater, berth: generic_berth,
+              pier: generic_quay, slipway: generic_quay, outlet: generic_outlet, mooring: generic_mooring,
+              pile: none, area: generic_mooring, lane: none, point: generic_quay}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference:
+      value: {generic_quay: 0.45, generic_breakwater: 0.15, generic_berth: 0.15, generic_pontoon: 0.1,
+              generic_mooring: 0.1, generic_outlet: 0.05}
+      tag: DESIGN
+      used_by: sources.centred_affinity
+    typical_levels: {value: [1, 10], tag: DESIGN, used_by: card.note}
+  auto:
+    # every feature keeps its own tag (set in the spec or on Screen 5); a feature without one takes the
+    # mapping below; the class mix is each source's own (no profile weights)
+    label: {value: "Auto, from the features", tag: DESIGN, used_by: card.legend}
+    weights:
+      value: {plastic_box: 1.0, drum_200l: 1.0, concrete_block: 1.0, trap_pot: 1.0, pipe_steel: 1.0,
+              tire_car: 1.0, net_bundle: 1.0}
+      tag: DESIGN
+      used_by: sources.profile_mix
+    target_share: {value: 0.55, tag: DESIGN, bracket: "0.4 to 0.7", used_by: sources.target_share}
+    kind_use:
+      value: {quay: fender_line, pontoon: marina_pontoon, breakwater: breakwater_toe, berth: fishing_berth,
+              pier: angling_pier, slipway: slipway, outlet: outfall, mooring: mooring_block, pile: none,
+              area: mooring_field, lane: traffic_lane, point: dumping_spot}
+      tag: DESIGN
+      used_by: sources.default_use
+    reference: {value: {}, tag: DESIGN, used_by: sources.centred_affinity}
+    typical_levels: {value: [1, 10], tag: DESIGN, used_by: card.note}
+
+# the ten candidate harbours (real bathymetry, companion section 5): the profile a world built there takes
+# by default, and the gaps its world card must state
+harbours:
+  value:
+    provincetown: {profile: trap_harbour}
+    boothbay: {profile: trap_harbour}
+    port_angeles: {profile: trap_harbour, gaps: [wood]}
+    port_gardner: {profile: trap_harbour, gaps: [wood]}
+    charleston: {profile: trap_harbour}
+    boston: {profile: working_port}
+    plymouth: {profile: city_harbour}
+    venice: {profile: city_harbour}
+    marseille: {profile: city_harbour}
+    cherbourg: {profile: fishing_harbour}
+  tag: DESIGN
+  sources: [HD]
+  used_by: params.harbour_profile
+
+# ------------------------------------------------------------------------------------------------ groups
+groups:
+  tyre_line:
+    # tyres hung as fenders along one berth and lost together: a line along the wall
+    value: {members: [2, 6], spacing_m: [0.5, 2.0], lateral_m: 0.3, along: feature}
+    tag: DESIGN
+    bracket: "2 to 6 tyres, 0.5 to 2 m apart"
+    sources: [R22, R24, R18, R43]
+    used_by: groups.tyre_line
+    note: "Pomos: 7 to 9 tyres per berth (R22 with the berth count); in Japan most seabed tyres were boats' own
+      fenders (R43); Plymouth: groups of 2 to 15 tyres at 5 m linking (R18 positions)"
+  pile:
+    value: {members: [5, 30], radius_m: [2.0, 6.0]}
+    tag: DESIGN
+    bracket: "5 to 30 items within 2 to 6 m, overlapping allowed"
+    sources: [R18]
+    used_by: groups.pile
+  gear_ball:
+    value: {members: [2, 6], radius_m: [0.6, 1.5], net_chance: 0.7}
+    tag: DESIGN
+    bracket: "2 to 10 traps with rope"
+    sources: [R15]
+    used_by: groups.gear_ball
+  trap_pair:
+    value: {members: [2, 3], spacing_m: [9.0, 27.0], along: random}
+    tag: REF
+    bracket: "groundline 5 to 20 fathoms = 9 to 37 m inshore; most often 10 to 15 fathoms = 18 to 27 m"
+    sources: [R39, R16, R17]
+    used_by: groups.trap_pair
+    note: "Maine inshore: singles, pairs and triples with one endline (zones A to G of R39)"
+
+# ------------------------------------------------------------------------------------------------ classes
+# The class cards: what an instance of each class looks like. They restate the frozen simulator's own cards
+# (worldgen/population.py `_instance`, `BURIAL_MAX`), which implement the targets document section 4; a test
+# compares them with the simulator. Sizes in metres; `burial` is the upper end of U(0, .) on sand and on mud.
+classes:
+  plastic_box:
+    family: {value: T1, tag: FROZEN, used_by: instances.card}
+    size:
+      value: {length: [0.50, 0.75], width_ratio: [0.55, 0.70], height: [0.22, 0.35], wall_mm: [2.0, 4.0]}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.plastic_box
+    states: {value: {flooded: 0.7, part_filled: 0.3}, tag: FROZEN, sources: [TD], used_by: instances.plastic_box}
+    fill: {value: [0.05, 0.30], tag: FROZEN, sources: [TD], used_by: instances.plastic_box}
+    poses:
+      value: {upright: 0.5, inverted: 0.3, on_long_side: 0.14, on_end: 0.06}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.plastic_box
+    burial: {value: {default: [0.15, 0.40]}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+    material: {value: pp_shell, tag: FROZEN, used_by: instances.card}
+  drum_200l:
+    family: {value: T2, tag: FROZEN, used_by: instances.card}
+    size:
+      value: {diameter: 0.585, height: 0.890, wall_mm: [0.9, 1.6]}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.drum_200l
+    poses: {value: {lying: 0.6, standing: 0.4}, tag: FROZEN, sources: [TD], used_by: instances.drum_200l}
+    states:
+      value: {standing_sediment_inside: 0.3}
+      tag: FROZEN
+      sources: [S02]
+      used_by: instances.drum_200l
+    fill: {value: [0.1, 0.5], tag: FROZEN, sources: [S02], used_by: instances.drum_200l}
+    burial:
+      value: {lying: [0.20, 0.50], standing: [0.10, 0.30]}
+      tag: FROZEN
+      sources: [TD]
+      used_by: instances.burial
+    material: {value: steel_shell, tag: FROZEN, used_by: instances.card}
+  concrete_block:
+    family: {value: T3, tag: FROZEN, used_by: instances.card}
+    size:
+      value: {a: [0.5, 1.0], b: [0.4, 0.8], c: [0.2, 0.6], bevel_mm: [0.0, 30.0]}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.concrete_block
+    poses: {value: {largest_face_down: 0.8}, tag: FROZEN, sources: [TD], used_by: instances.concrete_block}
+    burial: {value: {default: [0.10, 0.30]}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+    material: {value: concrete, tag: FROZEN, used_by: instances.card}
+  trap_pot:
+    family: {value: T4, tag: FROZEN, used_by: instances.card}
+    variants:
+      value: {us_wire: 0.5, jp_frame: 0.5}
+      tag: FROZEN
+      sources: [S02]
+      used_by: instances.trap_pot
+    size:
+      value: {us_wire: {side: 0.61, height: [0.51, 0.61], wire_mm: [1.2, 1.6]},
+              jp_frame: {length: [0.95, 1.00], width: [0.40, 0.68], height: [0.40, 0.45]}}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.trap_pot
+    poses: {value: {upright: 0.8, on_side: 0.2}, tag: FROZEN, sources: [TD, R3, R4, R5], used_by: instances.trap_pot}
+    burial: {value: {default: [0.20, 0.40]}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+    material: {value: steel_rough, tag: FROZEN, used_by: instances.card}
+    fill_fraction: {value: 0.07, tag: FROZEN, sources: [S02], used_by: instances.trap_pot}
+  pipe_steel:
+    family: {value: T5, tag: FROZEN, used_by: instances.card}
+    size:
+      value: {length: [1.0, 3.0], diameter: [0.10, 0.30], wall_mm: [3.0, 8.0]}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.pipe_steel
+    burial: {value: {default: [0.30, 0.60]}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+    material: {value: steel_shell, tag: FROZEN, used_by: instances.card}
+  tire_car:
+    family: {value: T6, tag: FROZEN, used_by: instances.card}
+    size:
+      value: {widths_mm: [165, 175, 185, 195, 205, 215, 225, 235, 245], aspects: [55, 60, 65, 70],
+              rims_in: [13, 14, 15, 16, 17], diameter: [0.55, 0.80]}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.tire_car
+    poses: {value: {flat: 0.85, on_tread: 0.15}, tag: FROZEN, sources: [TD], used_by: instances.tire_car}
+    burial: {value: {default: [0.30, 0.60]}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+    material: {value: rubber, tag: FROZEN, used_by: instances.card}
+  net_bundle:
+    family: {value: T7, tag: FROZEN, used_by: instances.card}
+    variants: {value: {tangle: 0.7, rope_coil: 0.3}, tag: FROZEN, sources: [S02], used_by: instances.net_bundle}
+    size:
+      value: {tangle: {length: [0.5, 2.0], width: [0.4, 1.5], height: [0.1, 0.5], strand_mm: [10.0, 20.0]},
+              rope_coil: {across: [0.3, 0.8], rope_mm: [12.0, 16.0], layers: [2, 8]}}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.net_bundle
+    volume_fraction: {value: {low: 0.05, nominal: 0.12, high: 0.30}, tag: FROZEN, sources: [S02], used_by: instances.net_bundle}
+    burial: {value: {default: [0.50, 0.70]}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+    material: {value: {low: fibre_low, nominal: fibre, high: fibre_high}, tag: FROZEN, used_by: instances.card}
+  debris:
+    family: {value: C1, tag: FROZEN, used_by: instances.card}
+    size:
+      value: {length: [0.2, 1.2], width: [0.15, 0.8], height: [0.05, 0.35]}
+      tag: FROZEN
+      sources: [TD, S02]
+      used_by: instances.debris
+    materials:
+      value: {steel_rough: 0.5, concrete: 0.4, generic: 0.1}
+      tag: FROZEN
+      sources: [S02]
+      used_by: instances.debris
+    burial: {value: {default: [0.25, 0.50]}, tag: FROZEN, sources: [S02], used_by: instances.burial}
+
+burial:
+  scale: {value: {low: 0.5, nominal: 1.0, high: 1.5}, tag: FROZEN, sources: [TD], used_by: instances.burial}
+  cap: {value: 0.9, tag: FROZEN, sources: [TD], used_by: instances.burial}
+  effectively_buried: {value: 0.7, tag: FROZEN, sources: [TD], used_by: plan.report}
+
+nominal_target_min_m: {value: 0.5, tag: FROZEN, sources: [TD], used_by: instances.nominal_target}
+
+# reflectivity of each material name written into an instance (the frozen material library's value; the
+# ray-cast sensor does not read it, the legacy renderer does)
+material_reflectivity:
+  value: {}
+  tag: FROZEN
+  sources: [FRZ]
+  used_by: instances.entry
+  note: "filled by the simulator adapter from worldgen.materials.MaterialLibrary; 0.5 without it"
+
+# ------------------------------------------------------------------------------------------------ structures
+structures:
+  mooring_block:
+    value: {size_m: [2.0, 4.0], height_m: [1.0, 2.8], clearance_under_keel_m: 3.0, spacing_m: [20.0, 30.0],
+            riser_m: [0.5, 2.0], bar_mm: [14.0, 26.0], path_keep_out_m: 6.0}
+    tag: DESIGN
+    bracket: "block sizes as surveyed in the project's harbour; spacing 15 to 45 m"
+    sources: [TD, FRZ, R27, R40, R41]
+    note: "swing radius about 1.7 D + L (R40): 16.5 to 23.6 m for 5 to 8 m of water and 8 to 12 m boats; dense
+      fields let neighbouring circles overlap, so blocks lie about 1 to 1.5 radii apart"
+    used_by: structures.mooring_field
+  pontoon_pile:
+    value: {diameter_m: [0.3, 0.5], spacing_m: 12.0, above_water_m: 0.8,
+            materials: [concrete, steel_rough, wood_rough]}
+    tag: DESIGN
+    sources: [FRZ]
+    used_by: structures.pontoon_piles
+  per_profile:
+    # mooring blocks added per hectare of open water when the environment has none (structures: auto)
+    value: {fishing_harbour: 0.0, trap_harbour: 1.5, city_harbour: 0.0, marina: 2.0, working_port: 0.5,
+            generic: 0.0, auto: 0.0}
+    tag: DESIGN
+    bracket: "0 to 4 per ha"
+    used_by: structures.mooring_field
+
+# ------------------------------------------------------------------------------------------------ small litter
+small_litter:
+  band:
+    value: {width_m: 10.0, factor: 4.0, cap_per_m2: 0.5, floor_share: 0.25}
+    tag: DESIGN
+    bracket: "factor 2 to 10"
+    sources: [R28, R12, R20]
+    used_by: layers.small_litter
+    note: "small debris 10 times denser under Sydney piers than 50 m away (R28); the German marina samples all lie
+      within about 3 m of a quay (R12); never over the frozen R2 high preset"
+  items:
+    value: {length_min_m: 0.10, length_max_m: 0.40, height_min_m: 0.06, height_max_m: 0.12}
+    tag: FROZEN
+    sources: [FRZ]
+    used_by: layers.small_litter
+
+# ------------------------------------------------------------------------------------------------ redistribution
+redistribution:
+  value: {light_classes: [plastic_box, net_bundle], share: 0.3, distance_m: [2.0, 8.0]}
+  tag: DESIGN
+  bracket: "0 to 30 % of the light items, a few metres towards deeper water"
+  sources: [R15]
+  used_by: model.redistribute
+
+# ------------------------------------------------------------------------------------------------ realism guard
+guard:
+  factor: {value: 10.0, tag: DESIGN, bracket: "3 to 30", used_by: model.realism_guard,
+           note: "hotspots inside a harbour are 10 to 100 times its mean (Port Angeles West against East)"}
+  documented_per_ha:
+    # highest documented density of the class averaged over a surveyed area
+    value: {trap_pot: 4.0, tire_car: 500.0, all: 29.2}
+    tag: DERIVED
+    sources: [R31, R22, R1]
+    used_by: model.realism_guard
+    note: "traps: 3.4 probable (4.0 recovered) per ha in the densest Mullica polygons (R31); tyres: 180 in the
+      0.36 ha Pomos basin measured on OpenStreetMap; all classes: 56 in 1.92 ha at Thessaloniki (R1)"

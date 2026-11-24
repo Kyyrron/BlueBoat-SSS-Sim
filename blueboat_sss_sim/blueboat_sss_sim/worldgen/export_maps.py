@@ -1,4 +1,4 @@
-"""``export_scene_maps`` CLI: ground-truth maps from a mission bundle.
+"""``export_scene_maps`` CLI: ground-truth maps from a world folder.
 
 Renders the generated scene's **reflectivity**, **depth** and **object**
 maps as georeferenced PNGs so mosaics from the visualization app can be
@@ -35,6 +35,58 @@ def _to_u8(a: np.ndarray, lo: float | None = None,
     lo = float(a.min()) if lo is None else lo
     hi = float(a.max()) if hi is None else hi
     return (np.clip((a - lo) / max(hi - lo, 1e-9), 0, 1) * 255).astype(np.uint8)
+
+
+def _w2px(g, x, y, img_h):
+    """World (x, y) -> image pixel (north-up, row 0 = y_max)."""
+    return ((np.asarray(x) - g.origin_x) / g.resolution,
+            img_h - 1 - (np.asarray(y) - g.origin_y) / g.resolution)
+
+
+def render_objects_preview(scene: SceneModel, out_path: str | Path,
+                           path_xy: np.ndarray | None = None) -> Path:
+    """The Screen-5 objects map: reflectivity ground, every object circled
+    and labelled, walls as solid lines, the world limit as a border, and
+    the source GPS path overlaid. PIL-only, so the smoke test renders it
+    headless and the GUI merely displays the same PNG."""
+    g = scene.grid
+    refl = np.flipud(scene.reflectivity)
+    img = Image.fromarray(_to_u8(refl, 0.0, 1.0), "L").convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    # World limits: the image border, drawn explicitly.
+    draw.rectangle([0, 0, img.width - 1, img.height - 1],
+                   outline=(250, 210, 60), width=2)
+    # Walls.
+    for w in scene.walls:
+        x0, y0 = _w2px(g, w.x0, w.y0, img.height)
+        x1, y1 = _w2px(g, w.x1, w.y1, img.height)
+        draw.line([float(x0), float(y0), float(x1), float(y1)],
+                  fill=(80, 170, 255), width=3)
+    # Source path.
+    if path_xy is not None and len(path_xy) >= 2:
+        px, py = _w2px(g, path_xy[:, 0], path_xy[:, 1], img.height)
+        draw.line([c for xy in zip(px.tolist(), py.tolist()) for c in xy],
+                  fill=(90, 220, 90), width=2)
+    # Objects, circled so they are easy to spot.
+    for o in scene.objects:
+        px, py = _w2px(g, o.x, o.y, img.height)
+        r = max(max(o.length, o.width) * 0.5 / g.resolution, 5)
+        draw.ellipse([px - r, py - r, px + r, py + r],
+                     outline=(255, 60, 60), width=2)
+        draw.text((px + r + 2, py - 6), f"{o.object_id}:{o.type}",
+                  fill=(255, 200, 60))
+    out_path = Path(out_path)
+    img.save(out_path)
+    return out_path
+
+
+def render_depth_image(height: np.ndarray, out_path: str | Path) -> Path:
+    """Grayscale depth image (white = shallow) from a height raster --
+    the Screen-5 depth panel and the ``gt_depth`` convention."""
+    out_path = Path(out_path)
+    Image.fromarray(_to_u8(np.flipud(height)), "L").save(out_path)
+    return out_path
 
 
 def export_scene_maps(bundle: str | Path, out_dir: str | Path | None = None) -> Path:

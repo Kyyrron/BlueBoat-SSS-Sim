@@ -1,74 +1,272 @@
-"""Launch the simulated Side Scan Sonar stack.
+"""Launch the simulated Side Scan Sonar stack over a world folder.
 
-Composable with the existing simulator launch: start your simulator as
-usual, then include (or run alongside) this launch with the mission bundle
-directory. Nothing in the existing launch files needs modification.
-
-The simulator's output stops at SSS data (profiles + raw + ground-truth
-contacts) per the target pipeline; the YOLO dataset recorder is a
-downstream AI-stage tool and is therefore **off by default** (task 3).
-Enable it explicitly with ``with_recorder:=true`` only when you want the
-sim itself to write a dataset.
+Composable with the existing simulator launch: start Gazebo on the
+world's ``world.sdf`` as usual (``sim_world_launch.py`` or the full
+``full_mission_launch.py``), then include or run this alongside. Nothing
+in any neighbour package needs modification.
 
 Arguments
 ---------
-mission_dir     mission bundle directory (from `generate_mission`); provides
-                scene, sonar config and trajectory. Required.
-with_recorder   also run the YOLO dataset recorder            (default false)
-with_mavros_shim  republish heading/imu under MAVROS names    (default false)
-with_mission_path run the RequestPath mission service         (default false)
-                  (leave false if another path_generation runs;
-                  the two serve the same service name)
-dataset_dir     recorder output (default <mission_dir>/dataset)
+world_dir       world folder (from the ``world_builder`` GUI or
+                ``generate_world``); provides the scene. Required.
+sonar_config    sonar profile YAML (default: the world folder's own frozen
+                ``sonar.yaml`` if one exists -- legacy mission bundles --
+                else the package ``config/default_sonar.yaml``)
+with_mavros_shim  republish heading/imu/GPS under MAVROS names (default
+                  true; the BlueBoat GCS's GPS-anchored map needs
+                  /mavros/global_position/global + compass_hdg to anchor)
+sim_origin_lat  geographic latitude of the ENU world origin (default "":
+                taken from the world's own geo anchor; the legacy
+                43.6961 fallback applies only to unanchored worlds)
+sim_origin_lon  geographic longitude, same resolution as the latitude
+sonar_seed      sensor-noise seed for the node (default 0: a fresh seed from
+                OS entropy, which the node logs and reports as
+                ``noise_seed`` on ~/ground_truth/sensor, so any run can be
+                replayed by passing that value here)
+sonar_renderer  ``geometric`` | ``raycast`` | "" (default: the profile's own
+                ``renderer:`` key, else geometric). ``raycast`` without an
+                explicit ``sonar_config`` resolves the profile to the package's
+                ``config/raycast_default_sonar.yaml`` (2026-11-07,
+                ``raycast_design.md`` §11). The ray-cast is far slower than the
+                ping period: run the simulation slowed down
+                (``full_mission_launch.py real_time_factor:=``)
+sonar_fouling   ray-cast: fouled fraction of object and wall surfaces for this
+                run, 0..1 (default -1: the profile's ``raycast.objects.fouling``)
+sonar_hold_sim  ``auto`` | ``when_needed`` | ``always`` | ``off`` (default ``auto``:
+                ``when_needed`` for the ray-cast). Pause the Gazebo world
+                ``gz_world_name`` while a ping cycle overruns its wall budget
+                (``ping period / real_time_factor``), so no ping is skipped
+                (2026-11-09, ``core/sim_hold.py``). Without a world name (a
+                standalone sonar, the GCS's bag-replay sonar) nothing is held.
+gz_world_name   the running Gazebo world's ``<world name>`` (default '';
+                ``full_mission_launch.py`` passes it)
+real_time_factor  the simulation's real-time factor (default 1.0;
+                ``full_mission_launch.py`` passes its own): the hold's budget
 auto_ping       enable pinging automatically at startup       (default true)
 quiet           route helper one-shot output to log           (default true)
+
+Acquisition parameters
+----------------------
+The six run-dependent device parameters are passed to the node
+**explicitly**, read from the resolved sonar profile, so a run's
+acquisition is always traceable to a named file rather than to node
+defaults -- which is what makes a sim-vs-real comparison meaningful (root
+CLAUDE.md CM-2). The shipped default profile, the node's declared defaults
+and the real ``sss_node.py``'s are the same six values since 2026-09-28
+(20 m, gain -1 = device auto, 1200 bins, pulse 0.00125).
+
+Each may still be overridden per run, exactly as on the real system:
+
+    range_start_mm  range_length_mm  msec_per_ping
+    gain_index      num_results      pulse_len_percent
+
+An empty override (the default) means "take the profile's value".
 """
 
-from simple_launch import SimpleLauncher
+# ROS is needed to *launch*, not to read the resolvers below. Importing
+# `simple_launch` pulls in `launch` -> `lark`, which the workspace venv does
+# not carry, so a plain `python3 -m test.smoke_test` used to die here before
+# reporting a single check (2026-09-18). The import is therefore optional:
+# under ROS every line behaves exactly as before, and without it the module
+# still yields its constants and its pure resolvers -- which is what
+# `CLAUDE.md` means by "module-scope, launch-free resolvers the smoke test
+# exercises directly".
+try:
+    from simple_launch import SimpleLauncher
+except ImportError:                       # no ROS on this interpreter
+    SimpleLauncher = None
 
-sl = SimpleLauncher(use_sim_time=True)
+sl = SimpleLauncher(use_sim_time=True) if SimpleLauncher is not None else None
 
-sl.declare_arg("mission_dir", default_value="")
-sl.declare_arg("with_recorder", default_value=False)
-sl.declare_arg("with_mavros_shim", default_value=False)
-sl.declare_arg("with_mission_path", default_value=False)
-sl.declare_arg("dataset_dir", default_value="")
-sl.declare_arg("auto_ping", default_value=True)
-sl.declare_arg("quiet", default_value=True)
+# The six run-dependent parameters of the real sss_node.py, in its own order.
+ACQUISITION_ARGS = ("range_start_mm", "range_length_mm", "msec_per_ping",
+                    "gain_index", "num_results", "pulse_len_percent")
+
+#: Legacy origin (the GCS bench simulator's) for worlds without a geo anchor.
+LEGACY_ORIGIN = (43.6961, 7.3080)
+
+if sl is not None:
+    sl.declare_arg("world_dir", default_value="")
+    sl.declare_arg("sonar_config", default_value="")
+    sl.declare_arg("sonar_seed", default_value="0",
+                   description="sensor-noise seed; 0 = fresh, logged and "
+                               "reported as noise_seed")
+    sl.declare_arg("sonar_renderer", default_value="",
+                   description="geometric | raycast | '' (the profile's "
+                               "renderer: key, else geometric)")
+    sl.declare_arg("sonar_fouling", default_value="-1",
+                   description="ray-cast: fouled fraction of object and wall "
+                               "surfaces, 0..1; -1 = the profile's")
+    sl.declare_arg("with_mavros_shim", default_value=True)
+    sl.declare_arg("sim_origin_lat", default_value="")
+    sl.declare_arg("sim_origin_lon", default_value="")
+    sl.declare_arg("sonar_hold_sim", default_value="auto",
+                   description="auto | when_needed | always | off: pause Gazebo "
+                               "while a ping cycle overruns (2026-11-09)")
+    sl.declare_arg("gz_world_name", default_value="",
+                   description="the running Gazebo world's name (the hold's "
+                               "/world/<name>/control); '' = no hold")
+    sl.declare_arg("real_time_factor", default_value="1.0",
+                   description="the simulation's real-time factor (the hold's "
+                               "wall budget per ping)")
+    sl.declare_arg("auto_ping", default_value=True)
+    sl.declare_arg("quiet", default_value=True)
+    # Additive (2026-11-15, session 03).
+    sl.declare_arg("with_sonar", default_value=True,
+                   description="false: the MAVROS shim only, no sonar node and no "
+                               "auto ping (motion-only runs)")
+    sl.declare_arg("odom_topic", default_value="/blueboat/odom",
+                   description="the sonar's last-fallback pose; /blueboat/odom is the "
+                               "only pose of a bag replay (the GCS starts this launch "
+                               "standalone then), so it stays the default")
+    sl.declare_arg("true_odom_topic", default_value="/blueboat/odom_gz",
+                   description="Gazebo's own odometry, preferred while fresh (R-7); "
+                               "'' = none")
+    sl.declare_arg("run_context", default_value="",
+                   description="run metadata from full_mission_launch (b64:-encoded "
+                               "JSON), recorded in run_info")
+    for _a in ACQUISITION_ARGS:
+        sl.declare_arg(_a, default_value="",
+                       description=f"{_a} override; empty = use the resolved "
+                                   "sonar profile's value")
+
+
+#: The ray-cast sensor's packaged profile (``renderer: raycast``).
+RAYCAST_PROFILE = "raycast_default_sonar.yaml"
+
+
+def resolve_sonar_config(world_dir, sonar_config=None, renderer="") -> str:
+    """The sonar profile in force: explicit > (``renderer`` ``raycast``: the
+    package's ray-cast profile) > the folder's own frozen ``sonar.yaml``
+    (legacy bundles) > the package default. Module scope, launch-free, so
+    the smoke test exercises the same resolution.
+
+    An explicit bare file name that is not a file in the working directory
+    (``sonar_config:=field_candidate_v1_sonar.yaml``) resolves against the
+    package's ``config/`` (2026-10-23; before, it was passed on unresolved
+    and the node failed to open it)."""
+    from pathlib import Path
+
+    from blueboat_sss_sim.sonar.config import find_default_sonar_yaml
+
+    if sonar_config:
+        given = Path(str(sonar_config)).expanduser()
+        if not given.exists() and given.name == str(sonar_config):
+            packaged = Path(find_default_sonar_yaml()).parent / given.name
+            if packaged.exists():
+                return str(packaged)
+        return str(given) if given.exists() else str(sonar_config)
+    if str(renderer or "").strip().lower() == "raycast":
+        return str(Path(find_default_sonar_yaml()).parent / RAYCAST_PROFILE)
+    frozen = Path(world_dir) / "sonar.yaml"
+    if frozen.exists():
+        return str(frozen)
+    return str(find_default_sonar_yaml())
+
+
+def resolve_acquisition(sonar_yaml, overrides=None):
+    """Profile acquisition values, with non-empty overrides applied.
+
+    Returns a ``{param: value}`` mapping ready to hand to the node. Kept at
+    module scope, with no launch dependencies, so the offline smoke test can
+    exercise the same resolution the launch performs.
+    """
+    from dataclasses import asdict, fields
+
+    from blueboat_sss_sim.sonar.config import AcquisitionParams, SonarConfig
+
+    acq = asdict(SonarConfig.from_yaml(sonar_yaml).acquisition)
+    cast = {f.name: f.type for f in fields(AcquisitionParams)}
+    for key, raw in (overrides or {}).items():
+        if raw is None or str(raw) == "":
+            continue
+        acq[key] = float(raw) if cast[key] in ("float", float) else int(raw)
+    AcquisitionParams(**acq)                  # validates the gain ladder early
+    return acq
+
+
+def resolve_world_anchor(world_dir):
+    """The world's GPS anchor ``(lat0, lon0)`` from its manifest, or None.
+
+    Module scope and launch-free like ``resolve_acquisition``, for the same
+    reason. A world built by the ``world_builder`` GUI always carries one;
+    a legacy bundle or a bare ``generate_world`` output may not.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    manifest = Path(world_dir) / "scene_manifest.yaml"
+    if not manifest.exists():
+        return None
+    with open(manifest, "r", encoding="utf-8") as f:
+        doc = yaml.safe_load(f) or {}
+    a = (doc.get("geo") or {}).get("anchor") or {}
+    if "lat0" in a and "lon0" in a:
+        return float(a["lat0"]), float(a["lon0"])
+    return None
 
 
 def launch_setup():
-    mission_dir = sl.arg("mission_dir")
-    if not mission_dir:
-        raise RuntimeError("launch argument 'mission_dir' is required")
-    dataset_dir = sl.arg("dataset_dir") or f"{mission_dir}/dataset"
+    world_dir = sl.arg("world_dir")
+    if not world_dir:
+        raise RuntimeError("launch argument 'world_dir' is required")
     quiet = bool(sl.arg("quiet"))
 
     # Simulated sonar (drop-in replacement for the real sss_node.py).
-    sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
+    # Acquisition comes from the resolved profile, passed explicitly, so
+    # the run images what a named file records, never silent defaults.
+    renderer = str(sl.arg("sonar_renderer") or "").strip().lower()
+    sonar_yaml = resolve_sonar_config(world_dir, sl.arg("sonar_config"),
+                                      renderer)
+    acquisition = resolve_acquisition(
+        sonar_yaml, {a: sl.arg(a) for a in ACQUISITION_ARGS})
+    with_sonar = str(sl.arg("with_sonar")).lower() not in ("false", "0", "no")
+    if with_sonar:
+        sl.node("blueboat_sss_sim", "sss_sim_node", output="screen",
             parameters={
-                "scene_dir": mission_dir,
-                "sonar_config": f"{mission_dir}/sonar.yaml",
-                "odom_topic": "/blueboat/odom",
+                "scene_dir": world_dir,
+                "sonar_config": sonar_yaml,
+                "odom_topic": str(sl.arg("odom_topic") or "/blueboat/odom"),
+                "true_odom_topic": str(sl.arg("true_odom_topic") or ""),
+                "run_context": str(sl.arg("run_context") or ""),
                 "publish_ground_truth": True,
+                "seed": int(str(sl.arg("sonar_seed") or 0)),
+                "renderer": renderer,
+                "fouling": float(str(sl.arg("sonar_fouling") or -1)),
+                # Additive (2026-11-09): hold the simulation while a slow
+                # ping renders (sss_sim_node module doc).
+                "hold_sim_while_rendering": str(sl.arg("sonar_hold_sim") or "auto"),
+                "gz_world_name": str(sl.arg("gz_world_name") or ""),
+                "real_time_factor": float(str(sl.arg("real_time_factor") or 1.0)),
+                **acquisition,
             })
 
-    if sl.arg("with_recorder"):
-        sl.node("blueboat_sss_sim", "dataset_recorder_node", output="screen",
-                parameters={"output_dir": dataset_dir})
-
     if sl.arg("with_mavros_shim"):
-        sl.node("blueboat_sss_sim", "mavros_shim_node")
+        # Origin priority: explicit launch args > the world's own anchor >
+        # the legacy constant (with a warning -- GPS from such a run is
+        # geographically meaningless).
+        lat, lon = sl.arg("sim_origin_lat"), sl.arg("sim_origin_lon")
+        if str(lat) == "" or str(lon) == "":
+            anchor = resolve_world_anchor(world_dir)
+            if anchor is not None:
+                lat, lon = anchor
+            else:
+                lat, lon = LEGACY_ORIGIN
+                import logging
+                logging.getLogger("sss_sim_launch").warning(
+                    "world %s carries no geo anchor; the MAVROS shim will "
+                    "publish GPS about the legacy origin %s", world_dir,
+                    LEGACY_ORIGIN)
+        sl.node("blueboat_sss_sim", "mavros_shim_node",
+                parameters={"sim_origin_lat": float(lat),
+                            "sim_origin_lon": float(lon)})
 
-    if sl.arg("with_mission_path"):
-        sl.node("blueboat_sss_sim", "sss_path_generation", output="screen",
-                parameters={"trajectory_file": f"{mission_dir}/trajectory.yaml"})
-
-    if sl.arg("auto_ping"):
+    if sl.arg("auto_ping") and with_sonar:
         # One-shot ping enable a few seconds after the graph is up (same
         # command an operator issues on the real system). Its publisher
         # chatter ("beginning loop", "publishing #1: ...") goes to the log
-        # file when quiet (task 1).
+        # file when quiet.
         from launch.actions import ExecuteProcess, TimerAction
         sl.add_action(TimerAction(period=5.0, actions=[ExecuteProcess(
             cmd=["ros2", "topic", "pub", "--once",
@@ -79,4 +277,6 @@ def launch_setup():
     return sl.launch_description()
 
 
-generate_launch_description = sl.launch_description(opaque_function=launch_setup)
+generate_launch_description = (
+    sl.launch_description(opaque_function=launch_setup)
+    if sl is not None else None)

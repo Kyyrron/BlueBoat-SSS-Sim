@@ -1,0 +1,26 @@
+# Plan digests of model version 1.0.0. A change here is a new model version:
+# bump __version__ (setup.py, package.xml) and regenerate with the snippet in test_golden.py.
+environment_digest: d9b290ffb036c414
+plans:
+  auto/L2: a38978e7ccd942eb
+  auto/L5: f1a4b184098f846e
+  auto/L8: 73996da04c61b7b9
+  city_harbour/L2: 1112d94d96027952
+  city_harbour/L5: 81ef6f8dcaf94d75
+  city_harbour/L8: 891f015c6535e64a
+  fishing_harbour/L2: 7186c3748dd4cd3f
+  fishing_harbour/L5: 1550b9b75092d79e
+  fishing_harbour/L8: 4620a9b5653559ed
+  generic/L2: c2f4295a7d8ee796
+  generic/L5: fcd71189983ae1c5
+  generic/L8: 102a029e5061925f
+  marina/L2: 53d7c1f3d1658618
+  marina/L5: a64201a6eff61908
+  marina/L8: d59d97165d9b668f
+  trap_harbour/L2: 6fc194ddf0b6a72c
+  trap_harbour/L5: 7b83cabb792da544
+  trap_harbour/L8: df6aefebaee1984b
+  working_port/L2: fe5e398b3946278c
+  working_port/L5: 0d14fd9dc28c904f
+  working_port/L8: 04266b369e45d080
+version: 1.0.0

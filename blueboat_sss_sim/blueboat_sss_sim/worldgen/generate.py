@@ -17,7 +17,7 @@ from .sdf_writer import write_world_sdf
 
 def generate_world(config_path: str | Path, out_dir: str | Path,
                    seed: int | None = None,
-                   plugin_prefix: str = "ignition") -> SceneModel:
+                   plugin_prefix: str = "gz") -> SceneModel:
     """Programmatic API used by the mission generator and the CLI."""
     with open(config_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
@@ -25,10 +25,16 @@ def generate_world(config_path: str | Path, out_dir: str | Path,
     if seed is not None:
         cfg.seed = int(seed)
         raw.setdefault("world", {})["seed"] = int(seed)
-    scene = generate_scene(cfg, raw_config=raw)
+    # The Gazebo visuals stand on the pre-stamp terrain, not on the objects'
+    # own stamps (2026-11-02); the scene itself is unchanged.
+    terrain_out: list = []
+    scene = generate_scene(cfg, raw_config=raw, terrain_out=terrain_out)
+    terrain = terrain_out[0]
     scene.save(out_dir)
     write_world_sdf(scene, out_dir, plugin_prefix=plugin_prefix,
-                    material_overrides=cfg.material_overrides or None)
+                    material_overrides=cfg.material_overrides or None,
+                    limits_collision=cfg.limits_collision,
+                    terrain_height=terrain)
     return scene
 
 
@@ -37,7 +43,7 @@ def main() -> None:
     ap.add_argument("--config", required=True, help="world YAML config")
     ap.add_argument("--out", required=True, help="output directory")
     ap.add_argument("--seed", type=int, default=None, help="override config seed")
-    ap.add_argument("--plugin-prefix", choices=["ignition", "gz"], default="ignition")
+    ap.add_argument("--plugin-prefix", choices=["gz", "ignition"], default="gz")
     args = ap.parse_args()
 
     scene = generate_world(args.config, args.out, args.seed, args.plugin_prefix)

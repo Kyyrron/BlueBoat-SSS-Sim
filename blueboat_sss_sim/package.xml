@@ -4,12 +4,15 @@
   <name>blueboat_sss_sim</name>
   <version>1.0.0</version>
   <description>
-    Synthetic Side Scan Sonar experimentation platform for the BlueBoat USV
-    simulator: procedural world generation, drop-in simulated Omniscan 450
-    interface, mission generation and automatic YOLO dataset export.
+    Synthetic Side Scan Sonar platform for the BlueBoat USV: a GUI world
+    builder producing GPS-anchored Gazebo worlds (anchored to MCS survey
+    paths, with authored bathymetry, reflective walls and a litter-object
+    catalog), plus a drop-in simulated Omniscan 450 interface. The world
+    builder GUI additionally needs PySide6 (pip, no rosdep key); everything
+    else runs without it.
   </description>
   <maintainer email="killian.bertrand2002@gmail.com">Killian BERTRAND</maintainer>
-  <license>MIT</license>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
@@ -22,6 +25,12 @@
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-pil</exec_depend>
   <exec_depend>simple_launch</exec_depend>
+  <!-- full_mission_launch.py brings up Gazebo, the gz bridges and the robot
+       spawn itself, so these are runtime requirements of the launch files. -->
+  <exec_depend>blueboat_description</exec_depend>
+  <exec_depend>blueboat_control</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ros_gz_bridge</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

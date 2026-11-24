@@ -1,0 +1,11 @@
+# Sea situation `calm` (R3, session 03, 2026-11-15): no forcing. Flat water, no current, no wind, no yaw moment;
+# the hull still floats on the catamaran hydrostatics with its damping (one hull in every run). Pass with
+# sea_schedule:=<this file>. Physical meaning: the lower bound of the sea-state bracket.
+format: blueboat_sea_schedule/1
+name: calm
+seed: 0
+interpolation: hold
+keyframes:
+- t_s: 0.0
+  current: {preset: none}
+  waves: {preset: calm}
