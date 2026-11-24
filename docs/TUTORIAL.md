@@ -1,11 +1,12 @@
 # Start tutorial: from a new world to analysing a run
 
-*Moved verbatim from `README.md` on 2026-11-18 (session 11). **Since the 2026-11-18 freeze**, a run whose
-results are used must be the frozen simulator (`python3 -m blueboat_sss_sim.core.provenance --check` → code
-digest `cc29e08780aac4cd`) inside the envelope of `../SIM_VALIDITY_CONDITIONS.md` (superproject root):
-the production ray-cast `raycast_harbour_fast` at 20 m / 1200 bins, altitude 4.5–7.0 m, campaign worlds.
-The tutorial below still shows the legacy geometric renderer first; Step 7 is the ray-cast. Labels come
-from the rendered picture and the world metadata, never from a contact.*
+*Since the simulator was frozen on 18 November 2026, a run whose results are used must come from the frozen
+simulator (`python3 -m blueboat_sss_sim.core.provenance --check` must end with "source check: OK", and the code
+digest it prints must be one the superproject's `SIM_VALIDITY_CONDITIONS.md` §7 lists), inside the conditions of
+that file: the production ray-cast profile `raycast_harbour_fast` at 20 m and 1200 samples, an altitude of 4.5 to
+7.0 m, worlds from the campaign generator. The tutorial below still shows the older geometric renderer first;
+Step 7 is the ray-cast. Labels for a detector come from the rendered picture and the world metadata, never from
+a ground-truth contact.*
 
 ## Start tutorial: test the whole chain, from a new world to analysing a run
 

@@ -1,7 +1,7 @@
 # Figures of the population model (captions for the thesis)
 
-*Made by `~/ros2_ws/sim_runs/worldgen_v11/stats/make_figures.py` from the statistics of 2026-11-21 (model 1.0.0, code
-digest `15c33763a2a771f3`, evidence digest `534a2c0b3db629f2`). Vector files: `.svg`, `.pdf`; `.png` is a preview
+*Made by `~/ros2_ws/sim_runs/worldgen_v11/stats/make_figures.py` from the statistics of 2026-11-21 (population
+model version 1.0.0). Vector files: `.svg`, `.pdf`; `.png` is a preview
 (ignored by git). Reference keys: `../EVIDENCE.md` §7.*
 
 **Figure 1 (`fig1_density_levels`).** Density of sonar-size objects (targets and debris) in the active band against

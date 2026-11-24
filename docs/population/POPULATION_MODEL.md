@@ -1,6 +1,6 @@
 # The harbour population model (mission-like placement)
 
-*Model version 1.0.0, session 14, 2026-11-21. Package `blueboat_harbour_population` (beside `blueboat_sss_sim` in this
+*Model version 1.0.0, 2026-11-21. Package `blueboat_harbour_population` (beside `blueboat_sss_sim` in this
 repository, outside the simulator's code digest). Evidence: `EVIDENCE.md` beside this file. Every number:
 `blueboat_harbour_population/blueboat_harbour_population/data/evidence_parameters.yaml` (value, tag, bracket, sources,
 the function that reads it). How to run it: §11.*
