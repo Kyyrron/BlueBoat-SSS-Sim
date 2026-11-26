@@ -98,10 +98,45 @@ Evidence root: `~/ros2_ws/sim_runs/sim_acceptance/` (this machine only). The cri
 - **What changed in the package:** `builder/` only (`state.py`: a `placement` record written only when set;
   `placement.py`, `pages/mission_panel.py` new; `pages/place_page.py`: the switch, Manual paths verbatim;
   `worker.py`: the build passes the record to `metadata.yaml`, and two workers; `map/canvas.py`: an optional object
-  colour). Code digest v1.1 `bbd4112928645e13`; engine digest `ffacf236faa57010`, generator digest `4de0d3a4…`,
-  profiles and sea presets unchanged.
+  colour). Engine, profiles and sea presets unchanged.
 - **Regression:** the 32 recorded worlds with a builder state rebuild identically from v1.0 (`1932b9a`) and v1.1
   (content digest, `builder_state.yaml`, `world.sdf`, `seabed.stl`, `depth_baked.tif`); a fixed scene renders
   bit-identical pings (geometric) and within the GPU's own run-to-run floor (ray-cast, 7.5e-15 against 7.7e-15).
   Evidence: `~/ros2_ws/sim_runs/worldgen_v11/` (`HANDOFF_14.md`). Decision record for the owner:
   `~/ros2_ws/sim_runs/sim_acceptance/sim_v1.1_worldgen_decision.md`; proposed tag `sim-v1.1-worldgen-2026-11-21`.
+
+## Simulator v1.1: the seabed raster of a large world (2026-11-26, session 16, owner order)
+
+- **Why.** One complex world per real harbour needs up to 12 ha (400 x 300 m). The generator coarsens the raster of a
+  world over 150 m of side in 0.05 m steps (400 m gives 0.30 m), and every validation of the seabed picture was made
+  on worlds of about 140 x 130 m at 0.10 m.
+- **What changed in the package: two files.** `builder/state.py`: `BuilderState.raster_resolution_m` (None by default,
+  written to `builder_state.yaml` only when set). `worldgen/world_folder.py`: `world_block` takes the state's value
+  when there is one (`_resolution_of`): never finer than 0.10 m, never coarser than the automatic raster, at most
+  `MAX_CELLS_REQUESTED` = 8 million cells; otherwise `_resolution_for` as before. No GUI control; an Edit re-save keeps
+  the field. Code digest v1.1 `ed13b523d1be4f07`; **engine digest `40764206ab14c647`** (it covers `worldgen/`: of its
+  86 files only `world_folder.py` differs from v1.0's `ffacf236faa57010`); generator digest `6a6e3de4e4dfa21c`;
+  `sonar/`, `core/`, calibration, profiles and sea presets unchanged.
+- **Measured before the change** (a synthetic 400 x 300 m world through the depth-file route, production ray-cast at
+  20 m / 1200 bins, RTX 4060 with 8188 MiB, 15 GiB of RAM; `~/ros2_ws/sim_runs/harbour_worlds/part_a/`): at 0.10 m
+  (12.0 M cells) the build takes 44 s and 1.2 GiB, but the sensor peaks at 8074 MiB of RAM at start-up and 7210 MiB
+  of GPU memory with no object in view (88 % of the card); at 0.125 m (7.7 M cells) 5388 MiB and 4842 MiB; at 0.15 m
+  3880 MiB and 3562 MiB. A ping costs the same at
+  every raster (0.025 s in open water, 0.048 s beside a 300 m quay). The seabed picture at 0.125, 0.15 and 0.20 m
+  matches the 0.10 m one on the acceptance measures (3 or 4 seeds each: level by range band within 0.12 dB against a
+  2 dB limit, grey-level and local-pattern KL at most 0.0002 against 0.2, lag-1 and lag-3 correlations within 0.006
+  against 0.1 and 0.05, patch spreads within 11 % against 30 %), also with the small-litter layer on. The owner chose
+  0.125 m for the two harbour worlds.
+- **Regression:** the 27 recorded worlds with a builder state that still exist (the 26 campaign worlds of
+  `02_world_builder` and the B7 world; the five worlds of `~/worlds` used for v1.1 were emptied on 2026-11-24) rebuild
+  identically from the tree of `7839455` (`git archive`) and from the v1.1 tree (content digest,
+  `builder_state.yaml`, `world.sdf`, `seabed.stl`, `depth_baked.tif`), and all 27 repeat their recorded digest; the
+  three worlds of the population package's tests likewise. Smoke test on the final tree: 556 checks passed, none
+  failed, the three NC #6 anchor checks skipped (the beach recordings were moved off the machine at 12:16 that day; the
+  run before a comment-only correction of `world_folder.py` passed all 559); placement test 53; package tests 61.
+  Evidence: `~/ros2_ws/sim_runs/worldgen_v12/`. Decision record:
+  `~/ros2_ws/sim_runs/sim_acceptance/sim_v1.2_worldgen_decision.md`; proposed tag `sim-v1.1-worldgen-2026-11-21`.
+- **The population package 1.1.0** (outside the code digest): a depth-file world keeps its area features, the uses of
+  its walls and its seabed declaration for World Builder Screen 5 (it planned about 0 objects there); a wall of
+  several points is one litter source; the `environment:` block takes `land`, `structures` and
+  `raster_resolution_m`. `docs/population/POPULATION_MODEL.md` §12.

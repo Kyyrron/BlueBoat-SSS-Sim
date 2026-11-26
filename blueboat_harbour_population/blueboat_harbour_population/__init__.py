@@ -21,7 +21,12 @@ The core is pure Python (numpy, scipy, PyYAML): no ROS, no Qt, no simulator.
 
 #: The model version (the same as setup.py and package.xml). Bump it whenever
 #: a plan can change for the same inputs; test/test_golden.py guards it.
-__version__ = "1.0.0"
+#: 1.1.0 (2026-11-26, session 16): the model itself is unchanged (the golden
+#: plans are those of 1.0.0); a depth-file specification with a wall of
+#: several points plans differently (the wall is one source, it was counted
+#: per segment as well), and the ``environment:`` block gained ``land``,
+#: ``structures`` and ``raster_resolution_m``.
+__version__ = "1.1.0"
 
 from .data import CLASSES, DEBRIS, TARGETS, code_digest, default_parameters, evidence_digest  # noqa: E402,F401
 from .environment import Environment, Feature, synthetic_basin  # noqa: E402,F401

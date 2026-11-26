@@ -5,7 +5,7 @@ from setuptools import find_packages, setup
 PACKAGE = "blueboat_harbour_population"
 # The model version: bump it whenever a plan can change for the same inputs
 # (test/test_golden.py holds the plan digests that guard it).
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 setup(
     name=PACKAGE,

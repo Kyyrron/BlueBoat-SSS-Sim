@@ -23,6 +23,13 @@ The planning environment is computed with the plan's own seabed layers in
 place at zero density, so that the terrain it sees is the terrain of the
 built world (a layer changes how a layer-less state is built).
 
+A world on a depth file (``environment:``) keeps what the specification says
+of its harbour and the state cannot hold elsewhere -- the use of each wall,
+the areas, lanes and points, the hard class of its small litter -- in the
+state's ``placement`` record under ``environment`` (version 1.1.0): World
+Builder Screen 5 plans from the state alone, and must see what the
+specification saw.
+
 Simulator imports are lazy: the rest of the package works without it.
 """
 
@@ -58,7 +65,19 @@ CANONICAL_LAYER = f"{RESERVED_PREFIX}litter_base"
 #: does not know
 OWN_KEYS = ("placement", "environment")
 _ENV_KEYS = {"depth_file", "values", "water_level_m", "smooth_sigma_m", "shift_m", "compress", "limits",
-             "walls", "features", "sediment", "clutter", "texture"}
+             "walls", "features", "sediment", "clutter", "texture", "land", "structures", "raster_resolution_m"}
+_WALL_KEYS = {"name", "kind", "points", "points_gps", "use", "source", "material", "thickness", "top_z",
+              "draft_m", "reflectivity", "roughness_m"}
+_LAND_KEYS = {"name", "points", "points_gps", "height_m", "source"}
+_STRUCTURE_KEYS = {"type", "x", "y", "lat", "lon", "yaw", "yaw_deg", "length", "width", "proud_height", "burial",
+                   "fill_fraction", "reflectivity", "material", "params"}
+#: vertices of an authored wall closer than this are thinned: the generator
+#: merges wall ends within 0.75 m (``core.geometry.WALL_SNAP_M``), so a
+#: shorter segment collapses
+WALL_MIN_VERTEX_M = 0.8
+#: the segments of a wall of several points are named ``<name>_s01`` ...
+#: ``_s99``: the names ``core.geometry.curve_base_name`` groups into one wall
+WALL_MAX_SEGMENTS = 99
 
 
 class SimulatorMissing(ImportError):
@@ -171,6 +190,47 @@ def _wall_features(state, records: list) -> list:
     return out
 
 
+def wall_points(state, name: str) -> list | None:
+    """The authored wall ``name`` as the generator builds it (ends merged,
+    design frame): one polyline along its segments; None when the state has
+    no such wall."""
+    s = _sim()
+    segs = [w for w in s.geometry.expand_walls(state.walls)
+            if (s.geometry.curve_base_name(w["name"]) or w["name"]) == name]
+    if not segs:
+        return None
+    return [[float(segs[0]["x0"]), float(segs[0]["y0"])]] + [[float(w["x1"]), float(w["y1"])] for w in segs]
+
+
+def stored_environment(state) -> dict:
+    """What a depth-file world's state keeps of its specification
+    (``placement.environment``: ``walls`` -- id, kind and use of the walls
+    that are more than a plain quay or pontoon --, ``features`` -- the areas,
+    lanes and points, design frame --, ``coarse_class``); {} for every other
+    state."""
+    env = (getattr(state, "placement", None) or {}).get("environment")
+    return copy.deepcopy(dict(env)) if isinstance(env, Mapping) else {}
+
+
+def stored_records(state, stored: Mapping[str, Any] | None = None) -> list:
+    """The feature records of :func:`stored_environment`, as
+    :func:`environment_from_state` takes them: each recorded wall with the
+    points the state's walls have NOW (a wall deleted on Screen 2 is gone, a
+    moved one has moved), then the features."""
+    stored = stored_environment(state) if stored is None else stored
+    out = []
+    for w in stored.get("walls") or []:
+        pts = wall_points(state, str(w["id"]))
+        if pts is None:
+            continue
+        rec = {"id": str(w["id"]), "kind": str(w["kind"]), "points": pts}
+        if w.get("use"):
+            rec["use"] = str(w["use"])
+        out.append(rec)
+    out += [copy.deepcopy(dict(f)) for f in stored.get("features") or []]
+    return out
+
+
 def _object_id(e: Mapping[str, Any]) -> str:
     name = dict(e.get("params") or {}).get("name")
     return str(name) if name else f"{e['type']}@{float(e['x']):.1f},{float(e['y']):.1f}"
@@ -183,11 +243,17 @@ def environment_from_state(state, *, features: list | None = None, coarse_class:
     ``features``: feature mappings the state does not hold (a campaign
     basin's berth, outlet and breakwater; a specification's own), in the
     design frame; a record with the id of a wall replaces that wall's
-    feature (its kind, e.g. ``breakwater``, and its use)."""
+    feature (its kind, e.g. ``breakwater``, and its use). With none given
+    (World Builder Screen 5 gives none) the state's own are used
+    (:func:`stored_records`: a world built on a depth file), and its
+    ``coarse_class``."""
     s = _sim()
     wf = s.world_folder
     records = [dict(r) for r in (features or [])]
-    coarse = coarse_class or _coarse_class(state)
+    stored = stored_environment(state)
+    if not records and stored:
+        records = stored_records(state, stored)
+    coarse = coarse_class or stored.get("coarse_class") or _coarse_class(state)
     st = canonical_state(state, coarse)
     st.validate_for_build()
     tmp = Path(tempfile.mkdtemp(prefix="harbour_population_env_"))
@@ -295,7 +361,8 @@ def apply_plan(state, plan: PlacementPlan, *, origin: Mapping[str, Any] | None =
     * ``state.placement`` (when the state has the field: simulator v1.1)
       keeps the record for an Edit re-save and for Screen 5: the block as
       asked, the model's digests, the metadata block, the layers and the
-      seabed declaration before and after.
+      seabed declaration before and after, and the ``environment`` record of
+      a depth-file world (:func:`stored_environment`), carried over.
     ``run``: recorded under ``run`` of the metadata (the world's fouling)."""
     s = _sim()
     st = state
@@ -330,6 +397,8 @@ def apply_plan(state, plan: PlacementPlan, *, origin: Mapping[str, Any] | None =
                   seabed=plain(dict(st.depth.seabed or {})), seabed_before=plain(dict(seabed_before or {})))
     if run:
         record["run"] = plain(dict(run))
+    if prev.get("environment"):
+        record["environment"] = plain(prev["environment"])
     if hasattr(st, "placement"):
         st.placement = record
     out = {"placement": meta}
@@ -466,13 +535,105 @@ def environment_layers(env_block: Mapping[str, Any]) -> tuple[list, dict]:
     return L, rec
 
 
+def _points(d: Mapping[str, Any], anchor, where: str) -> list:
+    """``points_gps`` ([lat, lon]) or ``points`` ([x, y], design frame) of a
+    block entry, as design-frame metres."""
+    if "points_gps" in d:
+        pts = []
+        for la, lo in d["points_gps"]:
+            e, n = anchor.to_en(float(la), float(lo))
+            pts.append([float(np.asarray(e).ravel()[0]), float(np.asarray(n).ravel()[0])])
+        return pts
+    if "points" not in d:
+        raise KeyError(f"{where}: points or points_gps is required")
+    return [[float(x), float(y)] for x, y in d["points"]]
+
+
+def thin_polyline(pts: list, min_m: float = WALL_MIN_VERTEX_M) -> list:
+    """A wall's vertices with those closer than ``min_m`` to the one kept
+    before them dropped; the two ends stay where they are. A closed outline
+    (its last point on its first) stays closed, on the first point exactly."""
+    def far(u, v):
+        return float(np.hypot(u[0] - v[0], u[1] - v[1])) >= min_m
+    pts = [[float(x), float(y)] for x, y in pts]
+    if len(pts) <= 2:
+        return pts
+    closed = len(pts) > 3 and not far(pts[0], pts[-1])
+    body = pts[:-1] if closed else pts
+    out = [body[0]]
+    for q in body[1:-1]:
+        if far(q, out[-1]):
+            out.append(q)
+    last = body[-1]
+    while len(out) > 1 and not far(last, out[-1]):
+        out.pop()
+    out.append(last)
+    if closed:
+        while len(out) > 2 and not far(out[-1], out[0]):
+            out.pop()
+        out.append(list(out[0]))
+    return out
+
+
+def _structure_entry(sdef: Mapping[str, Any], anchor, lib) -> dict:
+    """One explicit structure of a specification as the generator's pinned
+    instance (design frame): every drawn field stated, so that nothing is
+    drawn from a random stream (``worldgen.objects.PINNED_FIELDS``), in the
+    form of the campaign generator's own structures."""
+    from blueboat_sss_sim.worldgen.objects import V2_STRUCTURES
+    sdef = dict(sdef)
+    prm = dict(sdef.get("params") or {})
+    name = str(prm.get("name") or "")
+    where = f"environment.structures[{name or sdef.get('type')}]"
+    bad = set(sdef) - _STRUCTURE_KEYS
+    if bad:
+        raise KeyError(f"{where}: unknown key(s) {sorted(bad)} (known: {sorted(_STRUCTURE_KEYS)})")
+    t = str(sdef.get("type", ""))
+    if t not in V2_STRUCTURES:
+        raise ValueError(f"{where}: type {t!r}: a structure is one of {list(V2_STRUCTURES)} (litter is placed by "
+                         "the placement, or by hand on Screen 5)")
+    if not name:
+        raise KeyError(f"{where}: params.name is required (the structure's id as a feature)")
+    if name.startswith(RESERVED_PREFIX):
+        raise ValueError(f"{where}: the name {name!r} starts with {RESERVED_PREFIX!r}, the prefix of a plan's own "
+                         "structures")
+    for k in ("length", "width", "proud_height", "material"):
+        if k not in sdef:
+            raise KeyError(f"{where}: {k} is required (a pinned instance states every field: nothing is drawn)")
+    if t == "chain":
+        for k in ("link_m", "bar_mm", "z0_m", "z1_m", "sag_m"):
+            if k not in prm:
+                raise KeyError(f"{where}: params.{k} is required for a chain")
+    if "lat" in sdef or "lon" in sdef:
+        e, n = anchor.to_en(float(sdef["lat"]), float(sdef["lon"]))
+        x, y = float(np.asarray(e).ravel()[0]), float(np.asarray(n).ravel()[0])
+    else:
+        x, y = float(sdef["x"]), float(sdef["y"])
+    yaw = float(sdef["yaw"]) if "yaw" in sdef else float(np.radians(float(sdef.get("yaw_deg", 0.0))))
+    mat = str(sdef["material"])
+    return {"type": t, "x": x, "y": y, "yaw": yaw, "length": float(sdef["length"]), "width": float(sdef["width"]),
+            "proud_height": float(sdef["proud_height"]), "burial": float(sdef.get("burial", 0.0)),
+            "fill_fraction": float(sdef.get("fill_fraction", 1.0)),
+            "reflectivity": float(sdef.get("reflectivity", lib.get(mat).reflectivity)), "material": mat,
+            "params": {"spec": 2, "role": "structure", **plain(prm)}}
+
+
 def state_from_environment(spec: Mapping[str, Any], env_block: Mapping[str, Any], case: str, seed: int):
     """``(BuilderState, extras, feature records)`` of a world on a depth
     file (CSV ``lat,lon,depth|elevation`` or a geographic GeoTIFF), built
     with the generator's own reader (``worldgen/depth/ingest.py``): the
     trajectory anchors the world, the limits are its bounding box plus the
     margin (or ``environment.limits``), the walls and the features come
-    from the block."""
+    from the block.
+
+    Since 1.1.0 the block may also state ``land`` (polygons that the
+    generator's ``land`` layer lifts over the waterline, behind the walls),
+    ``structures`` (mooring blocks, chains and piles at known positions, as
+    pinned instances) and ``raster_resolution_m`` (a seabed raster finer
+    than the generator's automatic one for a large world: simulator v1.1).
+    The state keeps the block's records for Screen 5 and for an Edit re-save
+    (:func:`stored_environment`); the returned records are read back from it,
+    so that the specification and the built world plan on the same ones."""
     s = _sim()
     camp = s.campaign
     bad = set(env_block) - _ENV_KEYS
@@ -497,38 +658,80 @@ def state_from_environment(spec: Mapping[str, Any], env_block: Mapping[str, Any]
     clutter = str(env_block.get("clutter", cond["clutter"]))
     cond2 = {**cond, "sediment": sed, "clutter": clutter}
     seabed, seabed_rec = camp.seabed_layers(cond2)
-    walls, records = [], []
     anchor = path.anchor
+    # ---- walls: a wall of several points is its segments <name>_s01.., which the generator's own
+    # naming rule (core.geometry.curve_base_name) groups back into one wall
+    walls, wall_recs, wall_meta, names = [], [], [], set()
     for wdef in env_block.get("walls") or []:
         wdef = dict(wdef)
         name = str(wdef["name"])
-        if "points_gps" in wdef:
-            pts = [list(anchor.to_en(float(la), float(lo))) for la, lo in wdef["points_gps"]]
-            pts = [[float(np.asarray(e).ravel()[0]), float(np.asarray(n).ravel()[0])] for e, n in pts]
-        else:
-            pts = [[float(x), float(y)] for x, y in wdef["points"]]
+        bad = set(wdef) - _WALL_KEYS
+        if bad:
+            raise KeyError(f"environment.walls[{name}]: unknown key(s) {sorted(bad)} (known: {sorted(_WALL_KEYS)})")
+        if s.geometry.curve_base_name(name) or name in names:
+            raise ValueError(f"environment.walls: the name {name!r} is taken or ends in _sNN, the suffix of a "
+                             "wall's segments")
+        names.add(name)
+        pts = thin_polyline(_points(wdef, anchor, f"environment.walls[{name}]"))
+        if len(pts) < 2 or (len(pts) == 2 and float(np.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])) < 0.05):
+            raise ValueError(f"environment.walls[{name}]: a wall needs two points apart")
+        if len(pts) - 1 > WALL_MAX_SEGMENTS:
+            raise ValueError(f"environment.walls[{name}]: {len(pts) - 1} segments; at most {WALL_MAX_SEGMENTS} "
+                             "(simplify the line, or give it as two walls)")
         kind = str(wdef.get("kind", "quay"))
         wall_kind = "pontoon" if kind == "pontoon" else "quay"
         for k in range(len(pts) - 1):
-            seg = f"{name}_{k + 1}" if len(pts) > 2 else name
+            seg = f"{name}_s{k + 1:02d}" if len(pts) > 2 else name
             walls.append(camp._wall(seg, pts[k], pts[k + 1], kind=wall_kind,
                                     **{q: wdef[q] for q in ("material", "thickness", "top_z", "draft_m",
                                                             "reflectivity", "roughness_m") if q in wdef}))
         if len(pts) > 2 or kind not in ("quay", "pontoon") or wdef.get("use"):
-            rec = {"id": name, "kind": kind if kind in ("quay", "pontoon", "breakwater", "pier") else "quay",
-                   "points": pts}
+            rec = {"id": name, "kind": kind if kind in ("quay", "pontoon", "breakwater", "pier") else "quay"}
             if wdef.get("use"):
                 rec["use"] = str(wdef["use"])
-            records.append(rec)
+            wall_recs.append(rec)
+        wall_meta.append({"name": name, "kind": kind, "segments": len(pts) - 1,
+                          **{q: wdef[q] for q in ("use", "material", "source") if wdef.get(q) is not None}})
+    features = []
     for f in env_block.get("features") or []:
         f = dict(f)
         if "points_gps" in f:
-            pts = []
-            for la, lo in f.pop("points_gps"):
-                e, n = anchor.to_en(float(la), float(lo))
-                pts.append([float(np.asarray(e).ravel()[0]), float(np.asarray(n).ravel()[0])])
-            f["points"] = pts
-        records.append(f)
+            f["points"] = _points(f, anchor, f"environment.features[{f.get('id')}]")
+            f.pop("points_gps")
+        features.append(f)
+    # ---- land: the generator's own layer, hard-edged (a quay's land ends on the wall), AFTER the seabed's
+    # layers: a layer without a seed draws from its place in the stack, so the seabed must not move
+    land_layers, land_meta = [], []
+    for ldef in env_block.get("land") or []:
+        ldef = dict(ldef)
+        name = str(ldef.get("name") or f"land_{len(land_layers) + 1}")
+        bad = set(ldef) - _LAND_KEYS
+        if bad:
+            raise KeyError(f"environment.land[{name}]: unknown key(s) {sorted(bad)} (known: {sorted(_LAND_KEYS)})")
+        pts = _points(ldef, anchor, f"environment.land[{name}]")
+        if len(pts) < 3:
+            raise ValueError(f"environment.land[{name}]: a polygon needs three points")
+        h = float(ldef.get("height_m", 0.3))
+        if not h > 0.0:
+            raise ValueError(f"environment.land[{name}]: height_m {h}: land stands above the waterline")
+        lid = f"land_{name}"
+        if any(L["id"] == lid for L in land_layers):
+            raise ValueError(f"environment.land: the name {name!r} is given twice")
+        land_layers.append({"id": lid, "kind": "land", "name": f"Land: {name}",
+                            "geometry": {"type": "polygon", "points": pts},
+                            "params": {"height_m": h, "round_m": 0.0, "shore_m": 0.0, "material_enabled": False,
+                                       "material": str(sed["reference"])}})
+        land_meta.append({"name": name, "height_m": h, "points": pts,
+                          **({"source": ldef["source"]} if ldef.get("source") is not None else {})})
+    lib = s.MaterialLibrary()
+    explicit = [_structure_entry(sdef, anchor, lib) for sdef in env_block.get("structures") or []]
+    taken = names | {str(f.get("id")) for f in features}
+    for e in explicit:
+        n = e["params"]["name"]
+        if n in taken:
+            raise ValueError(f"environment.structures: the name {n!r} is already a wall's, a feature's or a "
+                             "structure's")
+        taken.add(n)
     layers, rec = environment_layers(env_block)
     from blueboat_sss_sim.worldgen.terrain import texture_defaults
     tex = texture_defaults()
@@ -538,14 +741,39 @@ def state_from_environment(spec: Mapping[str, Any], env_block: Mapping[str, Any]
     state = s.bstate.BuilderState(
         path=path, limits_rect=rect, walls=walls,
         depth=s.bstate.DepthState(mode="file", file=str(src), file_values=str(env_block.get("values", "auto")),
-                                  texture=tex, material=sed["reference"], layers=layers + seabed,
+                                  texture=tex, material=sed["reference"], layers=layers + seabed + land_layers,
                                   seabed={"reference": sed["reference"], "patch_classes": patch,
                                           "heterogeneity": sed["heterogeneity"]}),
-        objects=s.bstate.ObjectsState(seed=int(seed), classes={}, pinned=True),
+        objects=s.bstate.ObjectsState(seed=int(seed), classes={}, explicit=explicit, pinned=True),
         world_name=f"{spec['name']}-{case}-s{int(seed)}")
+    raster = env_block.get("raster_resolution_m")
+    if raster is not None:
+        if not hasattr(state, "raster_resolution_m"):
+            raise RuntimeError("environment.raster_resolution_m needs simulator v1.1 (BuilderState."
+                               "raster_resolution_m); this simulator takes the generator's automatic raster only")
+        state.raster_resolution_m = float(raster)
+        rec["raster_resolution_m"] = float(raster)
     state.validate_for_build()
+    # ---- what the state keeps for Screen 5 and an Edit re-save, and the records read back from it
+    stored = {"walls": plain(wall_recs), "features": plain(features), "coarse_class": str(sed["coarser"])}
+    if hasattr(state, "placement"):
+        state.placement = {"environment": stored, "seabed": plain(dict(state.depth.seabed))}
+    records = stored_records(state, stored)
+    for r in records:
+        Feature.from_dict(r)                              # a bad feature fails here, by name
+    ox, oy = state.spawn_origin()
+
+    def world(pts):
+        return [[round(float(x) - ox, 3), round(float(y) - oy, 3)] for x, y in pts]
     rec.update(depth_file=src.name, depth_file_sha256=hashlib.sha256(src.read_bytes()).hexdigest()[:16],
                values=str(env_block.get("values", "auto")))
+    if records:
+        rec["features"] = [{**{k: v for k, v in r.items() if k != "points"}, "points": world(r["points"])}
+                           for r in records]
+    if wall_meta:
+        rec["walls"] = wall_meta
+    if land_meta:
+        rec["land"] = [{**L, "points": world(L["points"])} for L in land_meta]
     extras = {
         "campaign": {"name": str(spec["name"]), "case": case, "seed": int(seed),
                      "generator_version": camp.GENERATOR_VERSION},
@@ -555,6 +783,52 @@ def state_from_environment(spec: Mapping[str, Any], env_block: Mapping[str, Any]
         "structures": [{"kind": r["kind"], "name": r["id"]} for r in records],
     }
     return state, extras, records
+
+
+def drop_preset_litter(state) -> bool:
+    """Take the seabed preset's own small-litter layer out of ``state`` (a
+    mission-like placement adds the small litter at its level's density);
+    True when there was one."""
+    n = len(state.depth.layers)
+    state.depth.layers = [L for L in state.depth.layers if dict(L).get("id") != "small_litter"]
+    return len(state.depth.layers) != n
+
+
+def environment_world(doc: Mapping[str, Any], case: str, seed: int, world_name: str | None = None):
+    """``(state, extras)`` of the ENVIRONMENT-ONLY world of a specification
+    with an ``environment:`` block: its seabed, walls, land and structures,
+    no litter. The preset's small-litter layer is left out as
+    :func:`plan_world` leaves it out, so that a plan made later on the built
+    world (Screen 5, or the same specification) sees the specification's
+    terrain and does not add the small litter twice."""
+    _, _, env_block = split_spec(doc)
+    if not env_block:
+        raise ValueError("environment_world: the specification has no environment: block")
+    spec = _campaign_spec(doc, mission=True)
+    state, extras, _records = state_from_environment(spec, env_block, case, int(seed))
+    placement = case_placement(doc, case) or {}
+    if bool(dict(placement.get("clutter") or {}).get("small_litter", True)) and drop_preset_litter(state):
+        extras["conditions"]["clutter"]["small_litter_layer"] = (
+            "left out of this environment-only world: a mission-like placement adds the small litter at its "
+            "density level")
+    state.world_name = str(world_name or f"{spec['name']}_env-s{int(seed)}")
+    return state, extras
+
+
+def build_environment_world(doc: Mapping[str, Any], case: str, seed: int, root: str | Path,
+                            world_name: str | None = None, extras: Mapping[str, Any] | None = None,
+                            progress=None) -> Path:
+    """Build :func:`environment_world` under ``root`` with the frozen
+    ``build_world_folder`` (an existing folder is never touched: it raises).
+    ``extras``: more keys for ``metadata.yaml`` (a source record)."""
+    s = _sim()
+    wf = s.world_folder
+    state, ex = environment_world(doc, case, seed, world_name)
+    ex.update(plain(dict(extras or {})))
+    final = Path(root).expanduser() / wf._safe_name(state.path.name) / wf._safe_name(state.world_name)
+    if final.exists():
+        raise FileExistsError(f"{final} exists: a world folder is immutable")
+    return Path(wf.build_world_folder(state, Path(root).expanduser(), progress=progress, extras=ex))
 
 
 # ----------------------------------------------------------------------- build
@@ -594,7 +868,7 @@ def plan_world(doc: Mapping[str, Any], case: str, seed: int):
         raise ValueError("placement.mode manual in a specification: not planned (use plan_manual)")
     if params.small_litter:
         # the level decides the small litter: the campaign's own layer goes
-        state.depth.layers = [L for L in state.depth.layers if dict(L).get("id") != "small_litter"]
+        drop_preset_litter(state)
     env = environment_from_state(state, features=records, coarse_class=coarse, name=state.world_name)
     plan = populate(env, params, params.seed)
     fouling = extras.get("run", {}).get("sonar_fouling")

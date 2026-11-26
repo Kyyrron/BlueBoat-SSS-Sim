@@ -1,9 +1,9 @@
 # The harbour population model (mission-like placement)
 
-*Model version 1.0.0, 2026-11-21. Package `blueboat_harbour_population` (beside `blueboat_sss_sim` in this
-repository, outside the simulator's code digest). Evidence: `EVIDENCE.md` beside this file. Every number:
-`blueboat_harbour_population/blueboat_harbour_population/data/evidence_parameters.yaml` (value, tag, bracket, sources,
-the function that reads it). How to run it: §11.*
+*Model version 1.1.0, 2026-11-26 (1.0.0: 2026-11-21). Package `blueboat_harbour_population` (beside
+`blueboat_sss_sim` in this repository, outside the simulator's code digest). Evidence: `EVIDENCE.md` beside this file.
+Every number: `blueboat_harbour_population/blueboat_harbour_population/data/evidence_parameters.yaml` (value, tag,
+bracket, sources, the function that reads it). How to run it: §11. What 1.1.0 changed: §12.*
 
 ## 1. What it does
 
@@ -227,6 +227,74 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest            # the model's test
 ```
 
 A specification is a `blueboat_campaign/1` file with a `placement:` block (and, for a real depth file, an
-`environment:` block: `depth_file`, `values`, `water_level_m`, `smooth_sigma_m`, `shift_m` or `compress {k ≥ 0.5,
-d_lo, to}`, `walls`, `features`, `sediment`). Without `placement:`, or with `mode: legacy`, `build` hands it to the
-frozen `worldgen_campaign` unchanged. In the World Builder: Screen 5, "Mission-like".
+`environment:` block, §12). Without `placement:`, or with `mode: legacy`, `build` hands it to the frozen
+`worldgen_campaign` unchanged. In the World Builder: Screen 5, "Mission-like".
+
+## 12. Worlds on a real depth file (the `environment:` block), and the same world on Screen 5 (version 1.1.0)
+
+**The block.** `depth_file` (CSV `lat,lon,depth|elevation`, or a geographic GeoTIFF), `values`, `water_level_m`,
+`smooth_sigma_m`, `shift_m` or `compress {k ≥ 0.5, d_lo, to}`, `limits {x_min, y_min, x_max, y_max}` (else the
+trajectory's box plus the margin), `sediment`, `clutter`, and:
+
+| Key | What it states | What it becomes |
+|---|---|---|
+| `walls` | `{name, kind: quay \| pontoon \| breakwater \| pier, points \| points_gps, use, material, thickness, top_z, draft_m, reflectivity, roughness_m, source}` | The generator's walls. A wall of several points is its segments `<name>_s01 …` (at most 99; vertices closer than 0.8 m are thinned, because the generator merges wall ends within 0.75 m). It is **one** feature and one litter source, with its `use` |
+| `features` | `{id, kind: area \| lane \| point \| berth \| …, points \| points_gps, use, activity, attrs}` | Sources for the planner only (no geometry in the world) |
+| `land` (1.1.0) | `{name, points \| points_gps, height_m, source}`: a polygon | A layer of the generator's own kind `land`, hard-edged (`round_m` 0, `shore_m` 0: a quay's land ends on its wall), placed after the seabed's layers so that adding land never moves the seabed's random draws. Dry cells return no sound and hold no object |
+| `structures` (1.1.0) | Mooring blocks, chains and piles at known positions: `{type, x, y \| lat, lon, yaw_deg, length, width, proud_height, material, params {name, …}}`, every field stated | The generator's pinned instances (nothing is drawn from a random stream). A block is a `mooring` feature, a pile a `pile` feature; both are obstacles |
+| `raster_resolution_m` (1.1.0) | A seabed raster finer than the generator's automatic one (0.10 m up to 150 m of side, then coarser) | `BuilderState.raster_resolution_m`: needs simulator v1.1; an older simulator is refused by name |
+
+Unknown keys raise by name, in the block and in each wall, land and structure entry. `source` is free text (where the
+element comes from); it is written to `metadata.yaml`.
+
+**What the built world keeps.** `metadata.yaml` → `environment`: the water level, the smoothing, the transform, the
+depth file's name and SHA-256, and since 1.1.0 `features` (every record with its points in the world frame, its kind
+and use), `walls` (name, kind, use, material, source, number of segments), `land` (name, height, source, points) and
+`raster_resolution_m`. `structures` (kind and name of each record) is unchanged.
+
+**The same world on Screen 5.** Screen 5 plans from the state of `builder_state.yaml` and nothing else. Until 1.0.0
+a world built on a depth file forgot there what the specification said of its harbour: its area features, the use of
+its walls, and the hard class of its small litter (session 15 measured 0 objects planned from the built world against
+8 to 15 from the specification). Since 1.1.0 the state carries it in its `placement` record:
+
+- `placement.environment`: `walls` (id, kind and use of each wall that is more than a plain two-point quay or
+  pontoon), `features` (the block's features, design frame), `coarse_class`;
+- `placement.seabed`: the seabed declaration, which Screen 3 drops and the builder's own `reassert` puts back on
+  entry to Screen 5.
+
+The record has no `mode`: the builder treats such a world as Manual and builds it exactly as before. A plan
+(`apply_plan`, headless or on Screen 5) carries `environment` over, so a re-saved world keeps it.
+`environment_from_state` with no features given (Screen 5 gives none) reads the record; each recorded wall takes the
+points the state's walls have at that moment, so a wall moved or deleted on Screen 2 is followed.
+
+Tested (`test/test_environment_route.py`): the environment digest, the sources, the expected counts and the plan of
+the built environment-only world equal the specification's; the same after a plan and a re-save; a wall of three
+points is one source with its half thickness as keep-out; the seabed declaration survives Screen 3; a Screen 5 re-save
+writes `placement.envelope`.
+
+**The environment-only world.** `python3 -m blueboat_harbour_population build --spec <file> --seeds <seed>
+--environment-only [--name <world name>] --out <root>` (`sim_adapter.environment_world`): the seabed, walls, land and
+structures without litter, for Screen 5 or a hand placement. The seabed preset's own small-litter layer is left out,
+as a mission-like plan leaves it out, so that a later plan does not add the small litter twice.
+
+**What changed in the plans.** The model is unchanged: the golden plans of 1.0.0 are those of 1.1.0. One case plans
+differently: a depth-file specification with a wall of more than two points. Its segments were named `<name>_1 …`,
+which the generator's naming rule does not group, so the wall's record AND each segment were sources; now the wall is
+one source. No world built before had such a wall. Also new: with `structures: auto`, a pontoon given as a closed
+outline (a float drawn as an area) is passed over by the automatic guide piles; its end-to-end length is zero, and the
+code divided by it (the stations came out as not-a-number and were dropped, with a warning). A world rebuilt under 1.1.0 has the same arrays, scene manifest and
+plan digest as under 1.0.0; its `metadata.yaml` holds the new version string (and, on a depth file, the new records),
+so its content digest is new. A world without a placement (the frozen generator alone) rebuilds with its content
+digest.
+
+**Limits.**
+- "Convert to manual" and Manual chosen over a stored plan drop the record (the builder's own rule for a plan): the
+  area features are then gone from that state. Open the environment-only world again instead.
+- On Screen 5 the Advanced list labels each feature's row "default (…)" with the default use of its kind; a feature
+  with a use of its own keeps that use unless the row is changed.
+- The Mission-like panel cannot state `harbour`, `split_override`, `advanced.outside_band`, `advanced.count` or a
+  custom `mix`; a specification that uses them is not reproducible from the panel.
+- Worlds of the campaign generator (procedural basins) are as before on Screen 5: their berth, outlet and
+  breakwater records are read from `metadata.yaml` by the command line only.
+- With `structures: auto` the planner adds a mooring field and pontoon piles of its own. For a real harbour state
+  `structures: keep` and give the surveyed moorings in `environment.structures`.

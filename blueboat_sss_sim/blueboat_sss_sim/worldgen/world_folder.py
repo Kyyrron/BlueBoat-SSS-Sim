@@ -49,6 +49,14 @@ METADATA_FORMAT = "blueboat_world_meta/1"
 #: Raster resolution [m]; auto-coarsened so no axis exceeds this many cells.
 BASE_RESOLUTION_M = 0.10
 MAX_CELLS_AXIS = 1500
+#: The most cells of a raster a caller may ASK for (simulator v1.1,
+#: ``BuilderState.raster_resolution_m``). Measured on the laptop the project
+#: runs on (session 16, 2026-11-26; a GPU of 8188 MiB, 15 GiB of RAM): a
+#: 400 x 300 m world at 0.125 m (7.7 M cells) builds in 32 s, and the
+#: ray-cast sensor loads it with a peak of 5388 MiB of RAM and 4842 MiB of
+#: GPU memory; at 0.10 m (12.0 M cells) the sensor needs 7210 MiB of GPU
+#: memory before any object is in view.
+MAX_CELLS_REQUESTED = 8_000_000
 
 
 def _safe_name(name: str) -> str:
@@ -93,6 +101,31 @@ def _resolution_for(size_x: float, size_y: float) -> float:
     return float(res)
 
 
+def _resolution_of(state: "BuilderState", size_x: float, size_y: float) -> float:
+    """The raster resolution of ``state``'s world: the automatic one
+    (:func:`_resolution_for`), unless the state asks for a finer one
+    (``raster_resolution_m``, simulator v1.1). A request is never finer than
+    BASE_RESOLUTION_M (the raster every validation of the seabed picture was
+    made on), never coarser than the automatic value (that would be another
+    meaning), and at most MAX_CELLS_REQUESTED cells."""
+    auto = _resolution_for(size_x, size_y)
+    asked = getattr(state, "raster_resolution_m", None)
+    if asked is None:
+        return auto
+    asked = float(asked)
+    if abs(asked - auto) <= 1e-9:
+        return auto
+    if not (BASE_RESOLUTION_M - 1e-9 <= asked < auto):
+        raise ValueError(f"raster_resolution_m {asked}: a world of {size_x:g} x {size_y:g} m takes "
+                         f"{BASE_RESOLUTION_M} to {auto:.2f} m (the automatic raster)")
+    cells = (int(round(size_x / asked)) + 1) * (int(round(size_y / asked)) + 1)
+    if cells > MAX_CELLS_REQUESTED:
+        raise ValueError(f"raster_resolution_m {asked}: {cells / 1e6:.1f} million cells for {size_x:g} x "
+                         f"{size_y:g} m; at most {MAX_CELLS_REQUESTED / 1e6:.0f} million (what the ray-cast "
+                         "sensor was measured to load on this project's GPU)")
+    return asked
+
+
 def world_block(state: "BuilderState") -> tuple[list[float], list[float],
                                                   float, float, float]:
     """``(size, origin, resolution, ox, oy)`` of the generated world: the
@@ -101,7 +134,7 @@ def world_block(state: "BuilderState") -> tuple[list[float], list[float],
     ox, oy = state.spawn_origin()
     size = [float(r["x_max"] - r["x_min"]), float(r["y_max"] - r["y_min"])]
     origin = [float(r["x_min"] - ox), float(r["y_min"] - oy)]
-    return size, origin, _resolution_for(*size), ox, oy
+    return size, origin, _resolution_of(state, *size), ox, oy
 
 
 def build_grid(state: "BuilderState") -> GridSpec:

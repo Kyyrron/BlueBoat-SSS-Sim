@@ -147,6 +147,17 @@ def cmd_build(a) -> int:
     from . import sim_adapter as sa
     seeds = [int(s) for s in a.seeds.split(",") if s.strip()]
     cases = [c for c in a.cases.split(",") if c.strip()] or None
+    if a.environment_only:
+        # the world of an environment: block without its litter (for Screen 5, or a later plan)
+        doc = sa.load_spec(a.spec)
+        spec = sa._campaign_spec(doc, mission=False)
+        for case in (cases or [str(c["name"]) for c in spec["cases"]][:1]):
+            for seed in seeds:
+                name = a.name if (a.name and len(seeds) == 1) else None
+                out = sa.build_environment_world(doc, case, seed, a.out, world_name=name,
+                                                 progress=lambda m: print(m, flush=True))
+                print("environment-only world:", out)
+        return 0
     man = sa.run(a.spec, seeds, a.out, cases, cards=not a.no_cards, progress=lambda m: print(m, flush=True))
     for w in man["worlds"]:
         for msg in w.get("warnings") or []:
@@ -211,6 +222,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="the worlds root")
     p.add_argument("--cases", default="", help="comma-separated case names (default: all)")
     p.add_argument("--no-cards", action="store_true")
+    p.add_argument("--environment-only", action="store_true",
+                   help="build the world of the environment: block without litter (its first case, or --cases)")
+    p.add_argument("--name", default=None, help="with --environment-only and one seed: the world's name")
     p.set_defaults(fn=cmd_build)
 
     p = sub.add_parser("batch", help="write the specifications and the world list of a split")

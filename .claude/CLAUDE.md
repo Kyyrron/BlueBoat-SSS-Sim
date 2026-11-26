@@ -35,22 +35,37 @@ file when you read or edit a matching file; the tables below name the same files
   `tree_files()`). **Change none of them**; a change is a new simulator version, by owner decision only.
   `setup.py` also installs `blueboat_sss_sim/docs/*.md` and `docs/engineering/*.md`, so adding or removing a
   file there changes the install (needs a rebuild); module notes go to the repository-root `docs/` instead.
-- **Simulator v1.1 (2026-11-21, session 14, owner order; pending the owner's signature and tag
-  `sim-v1.1-worldgen-2026-11-21`): world generation only.** World Builder Screen 5 has a *Manual | Mission-like*
-  switch; `builder/` is the only part of the package that changed: code digest **`bbd4112928645e13`**, engine digest
-  `ffacf236faa57010`, generator digest `4de0d3a4…`, profiles and sea presets unchanged; every v1.0 world rebuilds with
-  its content digest (`~/ros2_ws/sim_runs/worldgen_v11/HANDOFF_14.md`). Runs may use v1.0 or v1.1; a world planned by
-  the Mission-like mode needs v1.1 only to be *edited* (its build uses the frozen generator).
+- **Simulator v1.1 (sessions 14 and 16, owner orders; pending the owner's signature and tag
+  `sim-v1.1-worldgen-2026-11-21`): world generation only.** Two changes:
+  - World Builder Screen 5 has a *Manual | Mission-like* switch (`builder/`). A world planned by the Mission-like
+    mode needs v1.1 only to be *edited* (its build uses the frozen generator).
+  - The seabed raster of one large world. The generator coarsens the raster of a world over 150 m of side (400 m
+    gives 0.30 m), and every validation of the seabed picture was made at 0.10 m. A state may ask for a finer raster:
+    `BuilderState.raster_resolution_m` (`builder/state.py`, written only when set), read and checked by
+    `worldgen/world_folder.py:world_block` (never finer than 0.10 m, never coarser than the automatic value, at most
+    8 million cells: what the ray-cast sensor loads on the 8 GB GPU). Absent, the behaviour is the one of v1.0, bit
+    for bit. The wizard has no control for the field; an Edit re-save keeps it; **an install older than v1.1 ignores
+    it and re-saves such a world at the coarse raster**.
+
+  Code digest **`ed13b523d1be4f07`**, **engine digest `40764206ab14c647`** (the engine digest covers `worldgen/`: of
+  its 86 files only `world_folder.py` differs from v1.0's `ffacf236faa57010`; `sonar/`, `core/`, calibration,
+  profiles and sea presets are untouched), generator digest `6a6e3de4e4dfa21c`. Every recorded world rebuilds with
+  its content digest. Runs may use v1.0 or v1.1. Evidence and decision records: `~/ros2_ws/sim_runs/worldgen_v11/`
+  (`HANDOFF_14.md`), `~/ros2_ws/sim_runs/worldgen_v12/`,
+  `~/ros2_ws/sim_runs/sim_acceptance/sim_v1.1_worldgen_decision.md`,
+  `~/ros2_ws/sim_runs/sim_acceptance/sim_v1.2_worldgen_decision.md`.
 - **How worlds are generated now:** by hand (Screen 5 Manual); by the population model (Screen 5 Mission-like, or
   headless `python3 -m blueboat_harbour_population build --spec <campaign spec with placement:> --seeds ... --out
-  ...`, also on a real depth file with an `environment:` block); by session 02's model (`worldgen_campaign`, a spec
+  ...`, also on a real depth file with an `environment:` block: walls, land, structures, use features and a raster
+  resolution since package version 1.1.0, `docs/population/POPULATION_MODEL.md` §12); by session 02's model (`worldgen_campaign`, a spec
   without `placement:`, or `placement.mode: legacy`). The model is the second package of this repository,
   `../blueboat_harbour_population/` (outside the code digest; its own version, digests, evidence file and tests).
   **Read `docs/population/POPULATION_MODEL.md` (the model) and `EVIDENCE.md` (its sources) before touching it**, and
   `builder/CLAUDE.md` before touching Screen 5. Splits: `blueboat_harbour_population/data/splits.yaml` (dataset
   100000–199999, tuning 200000–299999, evaluation 300000–399999, development below; harbours by split).
 - **Before producing results:** `python3 -m blueboat_sss_sim.core.provenance --check` (exit 1 = stale
-  install) must give code digest `cc29e08780aac4cd` (v1.0) or `bbd4112928645e13` (v1.1). Rebuild a stale install with
+  install) must give code digest `cc29e08780aac4cd` (v1.0) or `ed13b523d1be4f07` (v1.1).
+  Rebuild a stale install with
   `cd ~/ros2_ws && rm -rf build/blueboat_sss_sim install/blueboat_sss_sim && colcon build --packages-select blueboat_sss_sim`.
 - **Record per run** what the conditions file lists: world content digest (`metadata.yaml`
   `content_digest`), profile SHA-256, sea, controller, bracket ends (R1, R2, R5, R6), fouling, seeds. The
@@ -123,7 +138,7 @@ seabed classes and domain. Unknown keys raise by name in the sonar sections. Sch
 ## 5. Commands
 
 Population model (from `../blueboat_harbour_population/`): `python3 -m blueboat_harbour_population check | populate |
-build | batch | card | stats`; its tests `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest` (50, ~1 min; the
+build | batch | card | stats`; its tests `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m pytest` (61; the
 adapter tests need the simulator's source root on `PYTHONPATH`, which `test/conftest.py` adds). Screen 5's mode:
 `QT_QPA_PLATFORM=offscreen python3 -m test.placement_test` (53 checks, ~3 min; not in the Stop hook).
 

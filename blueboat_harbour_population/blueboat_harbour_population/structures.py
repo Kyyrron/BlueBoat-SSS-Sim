@@ -126,6 +126,8 @@ def plan_structures(env: Environment, params: PlacementParams, p: Parameters, se
         # stations along the centre line: both ends, then every spacing
         seg_a, seg_b = f.points[0], f.points[-1]
         ln = float(np.sqrt((seg_b[0] - seg_a[0]) * (seg_b[0] - seg_a[0]) + (seg_b[1] - seg_a[1]) * (seg_b[1] - seg_a[1])))
+        if ln < 1.0:
+            continue                                   # a closed outline (a float drawn as an area): no centre line
         ux, uy = (seg_b[0] - seg_a[0]) / ln, (seg_b[1] - seg_a[1]) / ln
         n_st = max(int(np.floor(ln / float(pc["spacing_m"]))) + 1, 2)
         for q in range(n_st):

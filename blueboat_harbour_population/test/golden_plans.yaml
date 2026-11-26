@@ -1,4 +1,4 @@
-# Plan digests of model version 1.0.0. A change here is a new model version:
+# Plan digests of model version 1.1.0 (the same as 1.0.0: the model did not change). A change here is a new model version:
 # bump __version__ (setup.py, package.xml) and regenerate with the snippet in test_golden.py.
 environment_digest: d9b290ffb036c414
 plans:
@@ -23,4 +23,4 @@ plans:
   working_port/L2: fe5e398b3946278c
   working_port/L5: 0d14fd9dc28c904f
   working_port/L8: 04266b369e45d080
-version: 1.0.0
+version: 1.1.0

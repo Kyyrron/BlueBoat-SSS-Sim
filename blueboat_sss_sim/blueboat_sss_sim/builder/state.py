@@ -218,6 +218,13 @@ class BuilderState:
     #: Empty for every Manual world, and an empty record is **not written**:
     #: a Manual world's ``builder_state.yaml`` is what it always was.
     placement: dict[str, Any] = field(default_factory=dict)
+    #: A seabed raster finer than the generator's automatic one, in metres
+    #: (simulator v1.1, 2026-11-26, owner order: one large real-harbour world
+    #: keeps a fine raster; ``worldgen.world_folder.world_block`` reads and
+    #: checks it). None for every world built before, and None is **not
+    #: written**: their ``builder_state.yaml`` is what it always was. The
+    #: wizard has no control for it; an Edit re-save keeps it.
+    raster_resolution_m: float | None = None
 
     # ------------------------------------------------------------- I/O
     def to_dict(self) -> dict[str, Any]:
@@ -232,6 +239,8 @@ class BuilderState:
         }
         if self.placement:
             d["placement"] = copy.deepcopy(self.placement)
+        if self.raster_resolution_m is not None:
+            d["raster_resolution_m"] = float(self.raster_resolution_m)
         return d
 
     @classmethod
@@ -249,6 +258,8 @@ class BuilderState:
             objects=ObjectsState(**(d.get("objects") or {})),
             world_name=str(d.get("world_name", "")),
             placement=copy.deepcopy(dict(d.get("placement") or {})),
+            raster_resolution_m=(float(d["raster_resolution_m"])
+                                 if d.get("raster_resolution_m") is not None else None),
         )
 
     def save(self, path: str | Path) -> None:

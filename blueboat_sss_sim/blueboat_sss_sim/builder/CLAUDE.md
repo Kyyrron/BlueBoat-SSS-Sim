@@ -219,3 +219,22 @@ the window first and scrolls only below its own minimum (every screen fits
   build at a time); plans are re-made 150 ms after a control changes and never replace a running worker. A wall's use
   is set by a double-click, the dialog deferred to the event loop (the canvas rule above).
 
+## The seabed raster of a large world, and worlds built on a depth file (2026-11-26, simulator v1.1, session 16)
+
+- `BuilderState.raster_resolution_m` (None by default; **None is not written**, so every other world's
+  `builder_state.yaml` is what it was): a seabed raster finer than the generator's automatic one for a world over
+  150 m of side. `worldgen/world_folder.py:world_block` reads and checks it (0.10 m to the automatic value, at most
+  8 million cells). No page sets or shows it: only a specification does (`environment.raster_resolution_m` of
+  `blueboat_harbour_population`). An Edit re-save keeps it, and the previews of Screens 3 and 5 rebuild the world at
+  that raster (about half a minute for 400 x 300 m at 0.125 m). An install older than v1.1 ignores the key and
+  re-saves at the coarse raster.
+- A world built on a depth file by `blueboat_harbour_population` (version 1.1.0) arrives with a **placement record
+  without a mode**: `placement = {environment: {walls, features, coarse_class}, seabed}`. It is not a plan: `mode_of`
+  says Manual, `extras` gives None (the build is the Manual build), `restore_layers` does nothing. It is there so that
+  (a) `reassert` puts the seabed declaration back after Screen 3 drops it, and (b) the planner sees on Screen 5 the
+  harbour's area features and the uses of its walls, which the state holds nowhere else. So the sentence "a Manual
+  state never gets a `placement` key" holds for states the wizard makes, not for these. Consequences in Manual mode:
+  the seabed declaration survives Screen 3 (also when the sediment was changed there), and the "scatter settings
+  changed" question of `enter` is skipped, as for every state with a record. Manual chosen over a stored plan and
+  "Convert to manual" drop the record, and with it the area features (`docs/population/POPULATION_MODEL.md` §12).
+
